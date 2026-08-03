@@ -1,6 +1,8 @@
 mod app;
 mod camera;
+mod mesh;
 mod render;
+mod scene;
 
 use std::error::Error;
 use std::sync::Arc;

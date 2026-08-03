@@ -4,20 +4,22 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
+use glam::Mat4;
 use wgpu::util::DeviceExt;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingType, BufferBindingType, BufferDescriptor, BufferUsages, Color, ColorTargetState,
-    ColorWrites, CommandEncoderDescriptor, CurrentSurfaceTexture, DeviceDescriptor,
-    FragmentState, InstanceDescriptor, LoadOp, Operations, PipelineLayoutDescriptor,
-    PrimitiveState, PrimitiveTopology, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipelineDescriptor, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource,
-    ShaderStages, StoreOp, TextureViewDescriptor, VertexAttribute, VertexBufferLayout,
-    VertexFormat, VertexState,
+    ColorWrites, CommandEncoderDescriptor, CurrentSurfaceTexture, DeviceDescriptor, FragmentState,
+    InstanceDescriptor, LoadOp, Operations, PipelineLayoutDescriptor, PrimitiveState,
+    PrimitiveTopology, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
+    RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp,
+    TextureViewDescriptor, VertexState,
 };
 use winit::window::Window;
 
 use crate::camera::{Camera, CameraUniform};
+use crate::mesh::Vertex;
+use crate::scene::Scene;
 
 /// 窗口的显示句柄，用于创建 wgpu 实例。
 pub type DisplayHandle = Box<dyn wgpu::wgt::WgpuHasDisplayHandle>;
@@ -30,55 +32,6 @@ pub const CLEAR_COLOR: Color = Color {
     a: 1.0,
 };
 
-/// 三角形顶点：位置 + 颜色。
-///
-/// 本阶段没有物体变换，顶点坐标直接写在（世界）空间里。
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Vertex {
-    pub position: [f32; 3],
-    pub color: [f32; 3],
-}
-
-const VERTEX_ATTRIBUTES: [VertexAttribute; 2] = [
-    VertexAttribute {
-        format: VertexFormat::Float32x3,
-        offset: 0,
-        shader_location: 0,
-    },
-    VertexAttribute {
-        format: VertexFormat::Float32x3,
-        offset: 12,
-        shader_location: 1,
-    },
-];
-
-impl Vertex {
-    pub fn layout() -> VertexBufferLayout<'static> {
-        VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &VERTEX_ATTRIBUTES,
-        }
-    }
-}
-
-/// 示例三角形（世界坐标 == 物体坐标）。
-const VERTICES: &[Vertex] = &[
-    Vertex {
-        position: [-0.5, -0.5, 0.0],
-        color: [1.0, 0.0, 0.0],
-    },
-    Vertex {
-        position: [0.5, -0.5, 0.0],
-        color: [0.0, 1.0, 0.0],
-    },
-    Vertex {
-        position: [0.0, 0.5, 0.0],
-        color: [0.0, 0.0, 1.0],
-    },
-];
-
 /// wgpu 渲染器：持有 surface / device / queue，负责清屏渲染。
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -89,10 +42,57 @@ pub struct Renderer {
     /// 相机 uniform 缓冲区与绑定组。
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    /// 三角形渲染管线与顶点缓冲。
+    /// 物体数据（动态 uniform，模型矩阵）相关。
+    object_bind_group_layout: wgpu::BindGroupLayout,
+    object_data_buffer: wgpu::Buffer,
+    object_bind_group: wgpu::BindGroup,
+    /// 物体数据步长：每个物体的矩阵在缓冲中的间隔（满足设备对齐要求）。
+    object_stride: u32,
+    /// 网格渲染管线。
     pipeline: wgpu::RenderPipeline,
+    /// 深度缓冲（纹理 + 视图），随窗口尺寸重建。
+    depth_texture: wgpu::Texture,
+    depth_view: wgpu::TextureView,
+    /// 场景几何（GPU 侧顶点/索引缓冲 + 调色盘网格区间），由 load_scene 填充。
+    geometry: Option<SceneGeometry>,
+}
+
+/// 调色盘中单个网格在合并缓冲里的区间。
+#[derive(Debug, Clone, Copy)]
+struct MeshRange {
+    index_offset: u32,
+    index_count: u32,
+}
+
+/// 场景几何的 GPU 表示：合并后的顶点/索引缓冲，以及每个网格的区间。
+struct SceneGeometry {
     vertex_buffer: wgpu::Buffer,
-    vertex_count: u32,
+    index_buffer: wgpu::Buffer,
+    mesh_ranges: Vec<MeshRange>,
+}
+
+/// 创建与窗口尺寸一致的深度纹理。
+fn create_depth_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("depth texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth24Plus,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 impl Renderer {
@@ -123,6 +123,9 @@ impl Renderer {
             .get_default_config(&adapter, width, height)
             .ok_or(RendererError::UnsupportedSurface)?;
         surface.configure(&device, &config);
+
+        // 3.5 深度缓冲：管线与渲染通道都要用它来做正确的遮挡关系。
+        let (depth_texture, depth_view) = create_depth_texture(&device, width, height);
 
         // 4. 相机 uniform：缓冲区 + 绑定组。
         let camera_buffer = device.create_buffer(&BufferDescriptor {
@@ -156,20 +159,65 @@ impl Renderer {
             }],
         });
 
-        // 5. 渲染管线：三角形 + 相机 uniform。
+        // 5. 物体数据：动态 uniform 缓冲布局（每个物体一个模型矩阵）。
+        let object_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("object bind group layout"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(64),
+                    },
+                    count: None,
+                }],
+            });
+
+        // 物体矩阵至少 64 字节，且动态偏移必须是设备对齐值的整数倍。
+        let object_stride = device
+            .limits()
+            .min_uniform_buffer_offset_alignment
+            .max(64);
+        let object_data_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("object data buffer"),
+            size: object_stride as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let object_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("object data bind group"),
+            layout: &object_bind_group_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                // 动态偏移的校验以这里声明的绑定范围为准：只声明一个矩阵（64 字节），
+                // 这样每个物体的偏移（i * stride）才不会"顶穿"整个缓冲。
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &object_data_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(64),
+                }),
+            }],
+        });
+
+        // 6. 渲染管线：网格 + 相机/物体 uniform。
         let shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("triangle shader"),
-            source: ShaderSource::Wgsl(include_str!("triangle.wgsl").into()),
+            label: Some("mesh shader"),
+            source: ShaderSource::Wgsl(include_str!("mesh.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("triangle pipeline layout"),
-            bind_group_layouts: &[Some(&camera_bind_group_layout)],
+            label: Some("mesh pipeline layout"),
+            bind_group_layouts: &[
+                Some(&camera_bind_group_layout),
+                Some(&object_bind_group_layout),
+            ],
             immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("triangle pipeline"),
+            label: Some("mesh pipeline"),
             layout: Some(&pipeline_layout),
             vertex: VertexState {
                 module: &shader,
@@ -185,7 +233,13 @@ impl Renderer {
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(FragmentState {
                 module: &shader,
@@ -201,14 +255,6 @@ impl Renderer {
             cache: None,
         });
 
-        // 6. 三角形顶点缓冲。
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("triangle vertex buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: BufferUsages::VERTEX,
-        });
-        let vertex_count = VERTICES.len() as u32;
-
         Ok(Self {
             surface,
             device,
@@ -217,10 +263,83 @@ impl Renderer {
             size: (width, height),
             camera_buffer,
             camera_bind_group,
+            object_bind_group_layout,
+            object_data_buffer,
+            object_bind_group,
+            object_stride: object_stride as u32,
             pipeline,
-            vertex_buffer,
-            vertex_count,
+            depth_texture,
+            depth_view,
+            geometry: None,
         })
+    }
+
+    /// 加载场景：把调色盘合并成一份顶点/索引缓冲，并按物体数量重建动态 uniform 缓冲。
+    pub fn load_scene(&mut self, scene: &Scene) {
+        // 1. 合并所有网格（索引需要按各自的顶点起始偏移平移）。
+        let mut vertices: Vec<Vertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        let mut mesh_ranges = Vec::with_capacity(scene.meshes().len());
+        for mesh in scene.meshes() {
+            let vertex_offset = vertices.len() as u32;
+            mesh_ranges.push(MeshRange {
+                index_offset: indices.len() as u32,
+                index_count: mesh.indices().len() as u32,
+            });
+            vertices.extend_from_slice(mesh.vertices());
+            // 合并时索引已按该网格的顶点起始偏移平移，因此绘制时 base_vertex 必须为 0，
+            // 否则会出现"双重偏移"。
+            indices.extend(mesh.indices().iter().map(|i| i + vertex_offset));
+        }
+
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("scene vertex buffer"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: BufferUsages::VERTEX,
+            });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("scene index buffer"),
+                contents: bytemuck::cast_slice(&indices),
+                usage: BufferUsages::INDEX,
+            });
+
+        // 2. 按物体数量重建动态 uniform 缓冲与绑定组。
+        let stride = self
+            .device
+            .limits()
+            .min_uniform_buffer_offset_alignment
+            .max(64);
+        let object_data_buffer = self.device.create_buffer(&BufferDescriptor {
+            label: Some("object data buffer"),
+            size: (scene.objects().len() as u64).max(1) * stride as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let object_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("object data bind group"),
+            layout: &self.object_bind_group_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &object_data_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(64),
+                }),
+            }],
+        });
+
+        self.geometry = Some(SceneGeometry {
+            vertex_buffer,
+            index_buffer,
+            mesh_ranges,
+        });
+        self.object_data_buffer = object_data_buffer;
+        self.object_bind_group = object_bind_group;
+        self.object_stride = stride;
     }
 
     /// 窗口尺寸变化时重建交换链。
@@ -232,19 +351,34 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        // 深度缓冲必须与交换链尺寸保持一致。
+        (self.depth_texture, self.depth_view) = create_depth_texture(&self.device, width, height);
     }
 
-    /// 渲染一帧：写入相机 uniform，清屏，绘制三角形并呈现。
-    pub fn render(&mut self, camera: &Camera) {
+    /// 渲染一帧：写入相机与物体 uniform，清屏，绘制场景中所有物体并呈现。
+    pub fn render(&mut self, camera: &Camera, scene: &Scene) {
         // 每帧把相机数据写入 uniform 缓冲区。
         let uniform = CameraUniform::from_camera(camera);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
 
+        // 每帧把物体模型矩阵写入动态 uniform 缓冲（步长 = object_stride）。
+        if !scene.objects().is_empty() {
+            let stride = self.object_stride as usize;
+            let mut bytes = vec![0u8; scene.objects().len() * stride];
+            for (i, object) in scene.objects().iter().enumerate() {
+                let model =
+                    Mat4::from_scale_rotation_translation(object.scale, object.rotation, object.position);
+                bytes[i * stride..i * stride + 64].copy_from_slice(bytemuck::bytes_of(&model));
+            }
+            self.queue.write_buffer(&self.object_data_buffer, 0, &bytes);
+        }
+
         // 获取当前帧；surface 状态异常时跳过或重建交换链。
         let frame = match self.surface.get_current_texture() {
-            CurrentSurfaceTexture::Success(frame)
-            | CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
+                frame
+            }
             CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return,
             CurrentSurfaceTexture::Outdated
             | CurrentSurfaceTexture::Lost
@@ -254,11 +388,17 @@ impl Renderer {
             }
         };
 
+        let Some(geometry) = &self.geometry else {
+            return;
+        };
+
         {
             let view = frame.texture.create_view(&TextureViewDescriptor::default());
-            let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("frame encoder"),
-            });
+            let mut encoder = self
+                .device
+                .create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("frame encoder"),
+                });
 
             {
                 let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
@@ -272,13 +412,37 @@ impl Renderer {
                             store: StoreOp::Store,
                         },
                     })],
+                    // 每帧清空深度为 1.0（远），只保留真正更近的片元。
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: LoadOp::Clear(1.0),
+                            store: StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
                     ..Default::default()
                 });
 
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                pass.draw(0..self.vertex_count, 0..1);
+                pass.set_vertex_buffer(0, geometry.vertex_buffer.slice(..));
+                pass.set_index_buffer(
+                    geometry.index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+
+                // 每个物体：绑定它的模型矩阵（动态偏移），画调色盘里对应的网格区间。
+                for (i, object) in scene.objects().iter().enumerate() {
+                    let range = geometry.mesh_ranges[object.mesh_index as usize];
+                    let offset = (i * self.object_stride as usize) as u32;
+                    pass.set_bind_group(1, &self.object_bind_group, &[offset]);
+                    pass.draw_indexed(
+                        range.index_offset..range.index_offset + range.index_count,
+                        0,
+                        0..1,
+                    );
+                }
             }
 
             self.queue.submit([encoder.finish()]);

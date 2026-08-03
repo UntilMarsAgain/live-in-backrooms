@@ -4,7 +4,13 @@ struct CameraUniform {
     position: vec3<f32>,
 }
 
+// 物体数据：模型矩阵。通过动态 uniform 偏移为每个物体绑定不同的矩阵。
+struct ObjectData {
+    model: mat4x4<f32>,
+}
+
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
+@group(1) @binding(0) var<uniform> object_data: ObjectData;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -19,8 +25,9 @@ struct VertexOutput {
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    // 本阶段没有物体 uniform：顶点坐标即世界坐标，只乘相机视图投影。
-    out.clip_position = camera.view_proj * vec4<f32>(input.position, 1.0);
+    // 物体坐标 → 世界坐标（模型矩阵）→ 裁剪坐标（相机视图投影）。
+    let world_position = object_data.model * vec4<f32>(input.position, 1.0);
+    out.clip_position = camera.view_proj * world_position;
     out.color = input.color;
     return out;
 }
