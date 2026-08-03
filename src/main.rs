@@ -1,4 +1,5 @@
 mod app;
+mod camera;
 mod render;
 
 use std::error::Error;
@@ -6,8 +7,8 @@ use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event::{DeviceEvent, DeviceId, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop};
 use winit::window::{Window, WindowId};
 
 use app::App;
@@ -61,6 +62,18 @@ impl ApplicationHandler for WindowedApp {
             app.update();
         }
     }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        // 只做转发：设备事件交给 App 处理。
+        if let Some(app) = &mut self.app {
+            app.handle_device_event(event);
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -68,6 +81,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 使用 Wait：事件循环无事可做时真正休眠，渲染节奏由 update() 里的
     // request_redraw() 驱动；需要按帧动画时用 WaitUntil 即可。
     event_loop.set_control_flow(ControlFlow::Wait);
+    // 始终接收设备事件（自由视角需要鼠标相对位移）。
+    event_loop.listen_device_events(DeviceEvents::Always);
 
     let mut windowed_app = WindowedApp::new();
     event_loop.run_app(&mut windowed_app)?;
