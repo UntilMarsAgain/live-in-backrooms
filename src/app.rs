@@ -11,6 +11,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
 use crate::camera::{Camera, FreeCameraController};
+use crate::mesh::{Mesh, MeshKey, MeshLibrary};
 use crate::render::{DisplayHandle, Renderer, RendererError};
 use crate::scene::Scene;
 
@@ -21,6 +22,8 @@ pub struct App {
     camera: Camera,
     controller: FreeCameraController,
     last_frame: Instant,
+    /// 全局网格资产库（永久驻留，跨场景共享）。
+    mesh_library: MeshLibrary,
     scene: Scene,
 }
 
@@ -46,11 +49,23 @@ impl App {
             camera,
             controller,
             last_frame: Instant::now(),
+            mesh_library: MeshLibrary::new(),
             scene: Scene::default(),
         };
-        // 启动时加载演示场景。
-        app.load_scene(Scene::demo());
+        // 启动时注册演示资产并加载演示场景。
+        let keys = app.register_meshes(vec![Mesh::triangle(), Mesh::quad(), Mesh::cube()]);
+        let [triangle, quad, cube] = keys.as_slice() else {
+            unreachable!("demo 注册了 3 个网格")
+        };
+        app.load_scene(Scene::demo(*triangle, *quad, *cube));
         Ok(app)
+    }
+
+    /// 批量注册网格：追加进全局资产库并整体重传 GPU 合并缓冲，返回句柄列表。
+    pub fn register_meshes(&mut self, meshes: Vec<Mesh>) -> Vec<MeshKey> {
+        let keys = self.mesh_library.register_many(meshes);
+        self.renderer.upload_meshes(&self.mesh_library);
+        keys
     }
 
     /// App 级别的场景切换 API：渲染器（GPU 数据）与后续游戏逻辑统一从这里换场景。

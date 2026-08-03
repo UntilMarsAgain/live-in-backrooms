@@ -18,7 +18,7 @@ use wgpu::{
 use winit::window::Window;
 
 use crate::camera::{Camera, CameraUniform};
-use crate::mesh::Vertex;
+use crate::mesh::{MeshLibrary, Vertex};
 use crate::scene::Scene;
 
 /// 窗口的显示句柄，用于创建 wgpu 实例。
@@ -53,19 +53,22 @@ pub struct Renderer {
     /// 深度缓冲（纹理 + 视图），随窗口尺寸重建。
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
-    /// 场景几何（GPU 侧顶点/索引缓冲 + 调色盘网格区间），由 load_scene 填充。
-    geometry: Option<SceneGeometry>,
+    /// 全局网格缓冲（永久驻留，所有注册网格合并），由 upload_meshes 维护。
+    mesh_buffer: Option<MeshGpu>,
+    /// 已上传的网格库版本，避免重复上传。
+    mesh_uploaded_version: u64,
 }
 
-/// 调色盘中单个网格在合并缓冲里的区间。
+/// 资产库中单个网格在合并缓冲里的区间。
 #[derive(Debug, Clone, Copy)]
 struct MeshRange {
     index_offset: u32,
     index_count: u32,
 }
 
-/// 场景几何的 GPU 表示：合并后的顶点/索引缓冲，以及每个网格的区间。
-struct SceneGeometry {
+/// 全局网格的 GPU 表示：合并后的顶点/索引缓冲，以及每个网格的区间。
+/// 区间按 [`MeshKey`](crate::mesh::MeshKey) 的稠密编号索引（句柄即下标）。
+struct MeshGpu {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     mesh_ranges: Vec<MeshRange>,
@@ -270,44 +273,59 @@ impl Renderer {
             pipeline,
             depth_texture,
             depth_view,
-            geometry: None,
+            mesh_buffer: None,
+            mesh_uploaded_version: 0,
         })
     }
 
-    /// 加载场景：把调色盘合并成一份顶点/索引缓冲，并按物体数量重建动态 uniform 缓冲。
-    pub fn load_scene(&mut self, scene: &Scene) {
-        // 1. 合并所有网格（索引需要按各自的顶点起始偏移平移）。
+    /// 把网格库中的全部资产合并成一份顶点/索引缓冲，永久驻留。
+    ///
+    /// 版本没变则跳过；新增资产后整体重传（前面的数据保持不变）。
+    pub fn upload_meshes(&mut self, library: &MeshLibrary) {
+        if library.version() == self.mesh_uploaded_version {
+            return;
+        }
+
         let mut vertices: Vec<Vertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
-        let mut mesh_ranges = Vec::with_capacity(scene.meshes().len());
-        for mesh in scene.meshes() {
+        let mut mesh_ranges = Vec::with_capacity(library.len());
+        for mesh in library.meshes() {
             let vertex_offset = vertices.len() as u32;
             mesh_ranges.push(MeshRange {
                 index_offset: indices.len() as u32,
                 index_count: mesh.indices().len() as u32,
             });
             vertices.extend_from_slice(mesh.vertices());
-            // 合并时索引已按该网格的顶点起始偏移平移，因此绘制时 base_vertex 必须为 0，
-            // 否则会出现"双重偏移"。
+            // 合并时索引已按该网格的顶点起始偏移平移，因此绘制时 base_vertex 必须为 0。
             indices.extend(mesh.indices().iter().map(|i| i + vertex_offset));
         }
 
         let vertex_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("scene vertex buffer"),
+                label: Some("mesh library vertex buffer"),
                 contents: bytemuck::cast_slice(&vertices),
                 usage: BufferUsages::VERTEX,
             });
         let index_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("scene index buffer"),
+                label: Some("mesh library index buffer"),
                 contents: bytemuck::cast_slice(&indices),
                 usage: BufferUsages::INDEX,
             });
 
-        // 2. 按物体数量重建动态 uniform 缓冲与绑定组。
+        self.mesh_buffer = Some(MeshGpu {
+            vertex_buffer,
+            index_buffer,
+            mesh_ranges,
+        });
+        self.mesh_uploaded_version = library.version();
+    }
+
+    /// 加载场景：按物体数量重建动态 uniform 缓冲（网格资产已在 `upload_meshes` 中常驻）。
+    pub fn load_scene(&mut self, scene: &Scene) {
+        // 按物体数量重建动态 uniform 缓冲与绑定组。
         let stride = self
             .device
             .limits()
@@ -315,7 +333,7 @@ impl Renderer {
             .max(64);
         let object_data_buffer = self.device.create_buffer(&BufferDescriptor {
             label: Some("object data buffer"),
-            size: (scene.objects().len() as u64).max(1) * stride as u64,
+            size: (scene.object_count() as u64).max(1) * stride as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -332,14 +350,9 @@ impl Renderer {
             }],
         });
 
-        self.geometry = Some(SceneGeometry {
-            vertex_buffer,
-            index_buffer,
-            mesh_ranges,
-        });
         self.object_data_buffer = object_data_buffer;
         self.object_bind_group = object_bind_group;
-        self.object_stride = stride;
+        self.object_stride = stride as u32;
     }
 
     /// 窗口尺寸变化时重建交换链。
@@ -363,10 +376,10 @@ impl Renderer {
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
 
         // 每帧把物体模型矩阵写入动态 uniform 缓冲（步长 = object_stride）。
-        if !scene.objects().is_empty() {
+        if scene.object_count() > 0 {
             let stride = self.object_stride as usize;
-            let mut bytes = vec![0u8; scene.objects().len() * stride];
-            for (i, object) in scene.objects().iter().enumerate() {
+            let mut bytes = vec![0u8; scene.object_count() * stride];
+            for (i, (_, object)) in scene.objects().enumerate() {
                 let model =
                     Mat4::from_scale_rotation_translation(object.scale, object.rotation, object.position);
                 bytes[i * stride..i * stride + 64].copy_from_slice(bytemuck::bytes_of(&model));
@@ -388,7 +401,7 @@ impl Renderer {
             }
         };
 
-        let Some(geometry) = &self.geometry else {
+        let Some(mesh_buffer) = &self.mesh_buffer else {
             return;
         };
 
@@ -426,15 +439,15 @@ impl Renderer {
 
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                pass.set_vertex_buffer(0, geometry.vertex_buffer.slice(..));
+                pass.set_vertex_buffer(0, mesh_buffer.vertex_buffer.slice(..));
                 pass.set_index_buffer(
-                    geometry.index_buffer.slice(..),
+                    mesh_buffer.index_buffer.slice(..),
                     wgpu::IndexFormat::Uint32,
                 );
 
-                // 每个物体：绑定它的模型矩阵（动态偏移），画调色盘里对应的网格区间。
-                for (i, object) in scene.objects().iter().enumerate() {
-                    let range = geometry.mesh_ranges[object.mesh_index as usize];
+                // 每个物体：绑定它的模型矩阵（动态偏移），按句柄直取网格区间。
+                for (i, (_, object)) in scene.objects().enumerate() {
+                    let range = mesh_buffer.mesh_ranges[object.mesh.index()];
                     let offset = (i * self.object_stride as usize) as u32;
                     pass.set_bind_group(1, &self.object_bind_group, &[offset]);
                     pass.draw_indexed(

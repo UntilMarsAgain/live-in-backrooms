@@ -2,6 +2,10 @@
 //!
 //! 目前只保存静态几何数据，GPU 缓冲区的创建在 `render` 模块完成。
 //! 后续可以在这里扩展法线、UV 等顶点属性。
+//!
+//! [`MeshLibrary`] 是全局网格资产库：只追加、永久持有、跨场景共享。
+//! 句柄是库里的稠密编号（不删除因此稳定），GPU 侧把全部网格合并成
+//! 一份顶点/索引缓冲永久驻留，新增网格时整体重传。
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::{VertexAttribute, VertexBufferLayout, VertexFormat, VertexStepMode};
@@ -165,5 +169,72 @@ impl Mesh {
         );
 
         Self::new(vertices, indices)
+    }
+}
+
+/// 网格句柄：在 [`MeshLibrary`] 中的稠密编号。
+///
+/// 库只追加不删除，因此编号稳定、不会复用；句柄即索引，渲染时一跳直达。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MeshKey(usize);
+
+impl MeshKey {
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
+
+/// 全局网格资产库：只追加、永久持有。
+#[derive(Debug, Default)]
+pub struct MeshLibrary {
+    meshes: Vec<Mesh>,
+    /// 版本号：每次注册新网格 +1，供 GPU 侧判断是否需要重传。
+    version: u64,
+}
+
+impl MeshLibrary {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 注册单个网格（内部走批量路径）。
+    #[allow(dead_code)] // 预留：单条注册 API
+    pub fn register(&mut self, mesh: Mesh) -> MeshKey {
+        self.register_many([mesh])[0]
+    }
+
+    /// 批量注册：一次调用追加多个网格并返回各自的句柄。
+    pub fn register_many(&mut self, meshes: impl IntoIterator<Item = Mesh>) -> Vec<MeshKey> {
+        let start = self.meshes.len();
+        self.meshes.extend(meshes);
+        let keys: Vec<_> = (start..self.meshes.len()).map(MeshKey).collect();
+        if !keys.is_empty() {
+            self.version += 1;
+        }
+        keys
+    }
+
+    #[allow(dead_code)] // 预留：按句柄读取资产
+    pub fn mesh(&self, key: MeshKey) -> Option<&Mesh> {
+        self.meshes.get(key.0)
+    }
+
+    pub fn len(&self) -> usize {
+        self.meshes.len()
+    }
+
+    #[allow(dead_code)] // 预留
+    pub fn is_empty(&self) -> bool {
+        self.meshes.is_empty()
+    }
+
+    /// 全部资产（追加顺序，句柄编号即下标）。
+    pub fn meshes(&self) -> &[Mesh] {
+        &self.meshes
+    }
+
+    /// 当前版本号：新增资产后 +1。
+    pub fn version(&self) -> u64 {
+        self.version
     }
 }
