@@ -1,0 +1,6 @@
+[package]
+name = "live-in-backrooms"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
