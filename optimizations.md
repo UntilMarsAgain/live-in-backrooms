@@ -3,6 +3,8 @@
 这份文档记录项目开发中"确认过、但现阶段不做"的优化点：为什么现在不做、将来怎么做、
 以及哪些路已经铺好（做的时候不用推倒重来）。原则是**静态数据加载时解决，动态数据
 渲染时解决**——先不为了用不上的优化增加复杂度，但给它们留好位置。
+维护规则：**已实现的优化移出本文档**（不留已完成条目）；**明确不做的用删除线标记**
+留在原处。
 
 ## 物体世界矩阵/法线矩阵：每帧全量上传
 
@@ -50,13 +52,51 @@
   （管线加实例输入即可，`draw_indexed(..., 0..instances)` 原生支持）。
 - **触发时机**：Level 0 迷宫/区块体系落地时一起做。
 
-## 着色器：PBR 已落地，阴影/IBL 待补
+## MultiDrawIndirect：从 CPU 逐条画改为 GPU 批量画
+
+- **现状**：所有绘制仍是 CPU 驱动（每物体一条命令），区块世界里几千个可见区块 =
+  几千次 CPU 命令编码往返。
+- **优化方向**：参考 Minecraft 26.3 Snapshot 6 的做法——地形区块改用 MultiDrawIndirect，
+  每帧 CPU 只上传一张紧凑的间接参数表（每个 draw 5×u32：
+  `index_count / instance_count / first_index / base_vertex / first_instance`），
+  然后一条 `multi_draw_indexed_indirect` 让 GPU 自己遍历完成全部绘制。
+  per-draw 数据（模型矩阵、法线矩阵、材质索引等）从"动态 offset uniform"改为
+  storage buffer，用 `@builtin(instance_index)`（配合 `first_instance` 当 draw ID 的技巧）
+  取自己那份；按材质分组，每组一条 multi-draw。实体等可动资产同样适用：不同网格
+  由 `first_index`/`base_vertex` 指向大缓冲中的不同区间，蒙皮实体额外需要一块
+  骨骼矩阵缓冲 + per-draw 关节区间偏移。
+- **约束**：需要 `Features::MULTI_DRAW_INDIRECT`（用 `first_instance` 还需要
+  `INDIRECT_FIRST_INSTANCE`），不是所有后端都支持 → 保留现有 CPU 循环做回退
+  （能力探测后二选一）。
+- **已铺好的路**：调色盘按材质分组天然对应"每组一条 multi-draw"；
+  `MeshLibrary` 的大顶点/索引缓冲 + `mesh_ranges` 区间正好映射到
+  `first_index`/`base_vertex`；`Vertex::layout()` 扩展性已就位。
+- **参考**：Minecraft 26.3 Snapshot 6 公告（含 terrain shader 为 multi-draw 重构、
+  `DynamicTransforms` 内存重排、OIT 相关的 `RENDERPEARL_EXPLICIT_DEPTH_INVARIANCE`）：
+  https://www.minecraft.net/en-us/article/minecraft-26-3-snapshot-6
+- **触发时机**：Level 0 迷宫/区块体系落地时，与上一条一起做；设计成引擎通用批处理层
+  （地形 + 实体 + 将来粒子共用），而不是地形专用。
+
+## 着色器：PBR + 漫反射 IBL 已落地，镜面 IBL/阴影待补
 
 - **现状**：GGX 分布 + Smith 几何 + Schlick 菲涅尔（metallic workflow），
   法线贴图（切线空间 → 世界，Gram-Schmidt）、金属度/粗糙度贴图已接入。
-- **待补**：阴影贴图（从灯光视角渲染深度，独立 pass）；环境光目前是硬编码
-  `albedo × 0.08`，金属材质在阴影里偏暗——将来换 IBL（环境贴图）才正确；
-  色调映射（HDR）也没做。
+- **环境管线（已落地）**：HDRI → 环境立方体贴图（256²×6）→ 辐照度图（32²×6）
+  → 天空盒 + mesh @group(4) 漫反射 IBL；转换按后端分流（Vulkan/Metal GPU
+  compute、GL 回退 CPU，见 BUG.md），`FLOAT32_FILTERABLE` 不支持时回退点采样。
+- **已知简化（Phase 1 的偷懒）**：
+  - 只有漫反射 IBL，**没有镜面 IBL**（预过滤环境图 + BRDF LUT）——金属材质
+    的环境高光缺失，阴影里的金属仍偏暗；路已铺好（`EnvironmentGpu` 保留环境
+    立方体视图，加一个预过滤 compute + 一张 BRDF LUT 即可）；
+  - 环境立方体贴图只有 1 级 mip，没有预过滤 mip 链，也没有粗糙度分级采样；
+  - 天空盒曝光写死为 `1.0`（`1 - exp(-exposure × radiance)` 色调映射），
+    未做成可调 uniform；IBL 漫反射不经过曝光，与天空盒亮度未必一致；
+  - 环境转换在启动时阻塞完成（加载画面出现前），未异步化（GL 回退路径尤其
+    明显，CPU 辐照度卷积 debug 约 1s / release 快得多）；
+  - 环境是"每 Level 一份"的资产，当前只有启动时加载一次，没有 Level 切换
+    的卸载/热替换（`set_environment` 已支持重建，App 层尚未接关卡数据）。
+- **待补**：阴影贴图（从灯光视角渲染深度，独立 pass）；镜面 IBL（上）；HDR
+  色调映射升级（ACES 等）；环境贴图预过滤 mip 链。
 
 ## 纹理：基础色 / 金属度粗糙度 / 法线已接入
 
@@ -81,7 +121,7 @@
 - **现状**：管线 `blend: None`，全部不透明。
 - **已铺好的路**：深度缓冲已就位；届时加第二条管线（深度测试开、写入关、blend 开），
   透明物体从远到近排序，复用同一张深度附件。
-- **备选**：OIT（顺序无关透明）复杂度高，默认不做。
+- ~~**备选**：OIT（顺序无关透明）~~复杂度高，明确不做。
 
 ## 深度精度
 
@@ -121,7 +161,19 @@
 
 ## 测试覆盖
 
-- **现状**：4 个单测（2 个 glTF 加载 + 2 个场景层级变换）；渲染路径靠手工验证。
+- **现状**（13 个测试）：
+  - CPU 单测：场景世界矩阵、glTF 加载、环境转换（`to_cubemap` / `irradiance_map`），
+    不碰 GPU，任何环境可跑；
+  - **WGSL 语法校验**：用 naga 解析并校验 `mesh.wgsl` / `environment.wgsl`，
+    语法与绑定组声明错误在 `cargo test` 阶段暴露（`cargo build` 不编译 WGSL）；
+  - **无头冒烟测试**：不创建窗口，请求软件渲染设备（llvmpipe GL），真跑
+    环境资源创建 → 转换 → 天空盒渲染到离屏 → 读回像素验证非黑；无 GPU
+    环境自动跳过并打印原因；
+  - **端到端像素验证**：真实 `test.hdr` 转换后渲染天空盒，断言平均亮度非黑。
+- **注意事项**：llvmpipe 软件渲染器并行跑多个 GPU 测试会段错误（线程问题），
+  因此 GPU 相关测试统一用 `cargo test -- --test-threads=1` 跑；单线程下全部通过。
 - **可补**：`collect_lights`（方向推导）、`upload_meshes` 合并区间、uniform 布局
   （大小/偏移断言）、strip/fan 转换的边界。
-- **着色器**：WGSL 目前无自动化测试（naga 可做解析级测试，成本高，暂缓）。
+- **后端能力验证**：`examples/vulkan_probe.rs`（强制 Vulkan，A/B/C/D 四项实测），
+  换机器/驱动后跑一遍即可确认后端能力，避免静默依赖 storage 数组纹理等
+  不可靠特性。
