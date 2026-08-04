@@ -175,7 +175,7 @@ impl InputController<Camera> for FreeCameraController {
         if self.pressed(KeyCode::Space) {
             movement += Vec3::Y;
         }
-        if self.pressed(KeyCode::ControlLeft) || self.pressed(KeyCode::ControlRight) {
+        if self.pressed(KeyCode::ControlLeft) || self.pressed(KeyCode::ShiftLeft) {
             movement -= Vec3::Y;
         }
 

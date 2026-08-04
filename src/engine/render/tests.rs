@@ -283,15 +283,11 @@ use super::environment::create_cube_texture;
         );
 
         // 2) 真实 HDR → convert（CPU 转换 + 逐层上传）→ 天空盒渲染 → 非黑。
-        let env = match Environment::from_hdr_file(std::path::Path::new("assets/environments/test.hdr"))
-        {
-            Ok(env) => env,
-            Err(_) => Environment {
-                width: 2,
-                height: 1,
-                rgb: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            },
-        };
+        let env = Environment::from_hdr_file(std::path::Path::new("assets/environments/test.hdr")).unwrap_or_else(|_| Environment {
+            width: 2,
+            height: 1,
+            rgb: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        });
         let gpu_env = resources.convert(&device, &queue, &env);
         let data = render_skybox_rgb(
             &device,
