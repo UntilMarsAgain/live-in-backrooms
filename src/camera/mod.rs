@@ -3,12 +3,11 @@
 //! 分层设计：
 //! - 本文件：`Camera`，纯数学核心（位置、朝向、投影），不依赖 wgpu；
 //! - [`uniform`]：`CameraUniform`，GPU 内存布局与数据填充；
-//! - [`controller`]：`FreeCameraController`，自由视角控制，把键盘/鼠标输入翻译成相机运动。
+//!
+//! 输入控制（自由视角）已拆到 [`crate::controller`]，相机本身不依赖任何输入。
 
-pub mod controller;
 pub mod uniform;
 
-pub use controller::FreeCameraController;
 pub use uniform::CameraUniform;
 
 use std::f32::consts::FRAC_PI_2;

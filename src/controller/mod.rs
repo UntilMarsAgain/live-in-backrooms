@@ -1,4 +1,8 @@
-//! 相机控制器：把键盘/鼠标输入翻译成相机的移动与旋转。
+//! 控制器模块：把输入翻译成相机运动。
+//!
+//! 与 [`crate::camera`] 解耦：相机模块只负责纯数学与 GPU 数据，不依赖任何输入；
+//! 本模块负责收集 winit 输入事件，并在每帧把积累的输入统一应用到相机。
+//! 后续的角色控制器（重力、碰撞、第一人称移动）也在这里接入。
 //!
 //! 事件回调里只记录输入状态，每帧 [`FreeCameraController::update`] 时统一
 //! 应用到相机，避免在事件回调中直接修改相机造成顺序不一致。
@@ -10,7 +14,7 @@ use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, Win
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window};
 
-use super::Camera;
+use crate::camera::Camera;
 
 /// 第一人称式相机控制器。
 ///

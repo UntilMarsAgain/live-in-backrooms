@@ -10,7 +10,8 @@ use winit::event::{DeviceEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
-use crate::camera::{Camera, FreeCameraController};
+use crate::camera::Camera;
+use crate::controller::FreeCameraController;
 use crate::mesh::{Mesh, MeshKey, MeshLibrary};
 use crate::render::{DisplayHandle, Renderer, RendererError};
 use crate::scene::Scene;
