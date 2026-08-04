@@ -123,11 +123,38 @@ pub(super) struct EnvParams {
     pub(super) _pad: [u32; 2],
 }
 
-/// 环境参数 uniform（mesh 管线 @group(4) binding 3）：
-/// `intensity` = IBL 环境光强度，0 = 纯手动布光，1 = 满环境光。
+/// 中间灰 0.18 的 log2 值：`log2(0.18)`。
+/// 把"相对中间灰的 EV"换算成 shader 里的绝对 log2 锚点：`绝对 = EV + 该值`
+/// （如 -10 EV → -12.47393，+6.5 EV → 4.026069，即 Blender/Filament 的默认窗口）。
+pub(crate) const AGX_MIDDLE_GRAY_LOG2: f32 = -2.47393;
+
+/// AgX 默认 EV 窗口（相对中间灰的 EV 档位）：-10 ~ +6.5 EV，与 Blender 一致。
+pub(crate) const AGX_DEFAULT_EV_MIN: f32 = -10.0;
+pub(crate) const AGX_DEFAULT_EV_MAX: f32 = 6.5;
+
+/// 上述默认窗口换算后的绝对 log2 锚点（uniform 初值）。
+pub(super) const AGX_DEFAULT_MIN_EV: f32 = AGX_DEFAULT_EV_MIN + AGX_MIDDLE_GRAY_LOG2;
+pub(super) const AGX_DEFAULT_MAX_EV: f32 = AGX_DEFAULT_EV_MAX + AGX_MIDDLE_GRAY_LOG2;
+
+/// 环境参数 uniform（mesh 管线 @group(4) binding 3，天空盒管线 @group(1) binding 2）。
+/// `intensity` = IBL 环境光强度（天空盒侧兼作曝光），0 = 纯手动布光，1 = 满环境光；
+/// `agx_min_ev` / `agx_max_ev` = AgX 色调映射 EV 窗口，场景可按层级覆盖（默认 Blender 值）。
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct EnvironmentIntensity {
+pub(super) struct EnvironmentParams {
     pub(super) intensity: f32,
-    pub(super) _pad: [u32; 3],
+    pub(super) agx_min_ev: f32,
+    pub(super) agx_max_ev: f32,
+    pub(super) _pad: u32,
+}
+
+impl Default for EnvironmentParams {
+    fn default() -> Self {
+        Self {
+            intensity: 1.0,
+            agx_min_ev: AGX_DEFAULT_MIN_EV,
+            agx_max_ev: AGX_DEFAULT_MAX_EV,
+            _pad: 0,
+        }
+    }
 }

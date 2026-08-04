@@ -13,7 +13,7 @@ use wgpu::{
 };
 
 use crate::engine::core::environment::Environment;
-use super::uniform::{EnvParams, EnvironmentIntensity};
+use super::uniform::{EnvParams, EnvironmentParams};
 
 /// 环境立方体贴图每面尺寸。
 pub(super) const ENV_CUBEMAP_SIZE: u32 = 256;
@@ -119,6 +119,10 @@ fn create_default_environment(
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(sampler),
             },
+            BindGroupEntry {
+                binding: 2,
+                resource: intensity_buffer.as_entire_binding(),
+            },
         ],
     });
     EnvironmentGpu {
@@ -214,7 +218,7 @@ pub(super) struct EnvironmentResources {
     /// 环境采样器（ClampToEdge；过滤能力取决于设备）。
     pub(super) env_sampler: wgpu::Sampler,
     /// 环境强度 uniform（IBL 系数，mesh 管线 @group(4) binding 3）。
-    pub(super) env_intensity_buffer: wgpu::Buffer,
+    pub(super) env_params_buffer: wgpu::Buffer,
     /// equirect → cubemap 计算管线的绑定组布局。
     pub(super) env_convert_layout: wgpu::BindGroupLayout,
     /// cubemap → 辐照度图计算管线的绑定组布局。
@@ -326,6 +330,16 @@ impl EnvironmentResources {
                         }),
                         count: None,
                     },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -350,20 +364,17 @@ impl EnvironmentResources {
             ..Default::default()
         });
 
-        // 环境强度 uniform（mesh 管线 @group(4) binding 3），默认满环境光。
-        let env_intensity_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("environment intensity buffer"),
-            size: std::mem::size_of::<EnvironmentIntensity>() as u64,
+        // 环境参数 uniform（mesh 管线 @group(4) binding 3、天空盒 @group(1) binding 2）。
+        let env_params_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("environment params buffer"),
+            size: std::mem::size_of::<EnvironmentParams>() as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         queue.write_buffer(
-            &env_intensity_buffer,
+            &env_params_buffer,
             0,
-            bytemuck::bytes_of(&EnvironmentIntensity {
-                intensity: 1.0,
-                _pad: [0; 3],
-            }),
+            bytemuck::bytes_of(&EnvironmentParams::default()),
         );
 
         // 默认环境（黑色）：保证 @group(4) 与天空盒绑定组恒可用。
@@ -373,7 +384,7 @@ impl EnvironmentResources {
             &environment_bind_group_layout,
             &skybox_bind_group_layout,
             &env_sampler,
-            &env_intensity_buffer,
+            &env_params_buffer,
         );
 
         // 环境着色器：天空盒 + 计算转换入口。
@@ -564,7 +575,7 @@ impl EnvironmentResources {
             environment_bind_group_layout,
             skybox_bind_group_layout,
             env_sampler,
-            env_intensity_buffer,
+            env_params_buffer,
             env_convert_layout,
             irradiance_layout,
             env_convert_params,
@@ -655,7 +666,7 @@ impl EnvironmentResources {
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: self.env_intensity_buffer.as_entire_binding(),
+                    resource: self.env_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -670,6 +681,10 @@ impl EnvironmentResources {
                 BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.env_sampler),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: self.env_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -686,15 +701,19 @@ impl EnvironmentResources {
     }
 
     /// 设置环境强度（IBL 系数）：`0` = 纯手动布光（环境图只当背景天空盒），
-    /// `1` = 满环境光；可超 1 补亮。只写 uniform，不重建任何资源。
+    /// `1` = 满环境光；可超 1 补亮。只写 intensity 字段，不重建任何资源。
     pub(super) fn set_intensity(&self, queue: &wgpu::Queue, intensity: f32) {
+        queue.write_buffer(&self.env_params_buffer, 0, bytemuck::bytes_of(&intensity));
+    }
+
+    /// 设置 AgX 色调映射的 EV 窗口（场景级配置，默认与 Blender 一致）。
+    /// 只写 min/max 两个字段，不重建任何资源。
+    pub(super) fn set_agx_range(&self, queue: &wgpu::Queue, min_ev: f32, max_ev: f32) {
+        debug_assert!(min_ev < max_ev, "AgX EV 窗口要求 min_ev < max_ev");
         queue.write_buffer(
-            &self.env_intensity_buffer,
-            0,
-            bytemuck::bytes_of(&EnvironmentIntensity {
-                intensity,
-                _pad: [0; 3],
-            }),
+            &self.env_params_buffer,
+            4,
+            bytemuck::bytes_of(&[min_ev, max_ev]),
         );
     }
 

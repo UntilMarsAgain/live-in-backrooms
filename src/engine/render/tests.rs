@@ -269,6 +269,10 @@ use super::environment::create_cube_texture;
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&resources.env_sampler),
                 },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: resources.env_params_buffer.as_entire_binding(),
+                },
             ],
         });
         let data = render_skybox_rgb(&device, &queue, &resources, &camera_bind_group, &known_bind_group);

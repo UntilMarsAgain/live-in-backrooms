@@ -6,7 +6,7 @@
 //! - [`tests`]：WGSL 校验 + 无头冒烟测试（仅测试构建）。
 
 mod environment;
-mod uniform;
+pub(crate) mod uniform;
 #[cfg(test)]
 mod tests;
 
@@ -34,7 +34,7 @@ use super::core::texture::{Texture, TextureLibrary};
 use super::scene::Scene;
 
 use self::environment::{EnvConversionPath, EnvironmentGpu, EnvironmentResources};
-use self::uniform::{collect_lights, LightsUniform, ObjectData};
+use self::uniform::{collect_lights, AGX_MIDDLE_GRAY_LOG2, LightsUniform, ObjectData};
 
 /// 窗口的显示句柄，用于创建 wgpu 实例。
 pub type DisplayHandle = Box<dyn wgpu::wgt::WgpuHasDisplayHandle>;
@@ -619,6 +619,18 @@ impl Renderer {
     pub fn set_environment_intensity(&self, intensity: f32) {
         self.environment_resources
             .set_intensity(&self.queue, intensity);
+    }
+
+    /// 覆盖 AgX 色调映射的 EV 窗口（场景级风格配置，默认与 Blender 一致）。
+    ///
+    /// 参数是**相对中间灰 0.18 的 EV 档位**（如 -10 ~ +6.5），内部换算成
+    /// shader 需要的绝对 log2 锚点；只写 uniform，不重建任何资源。
+    pub fn set_environment_agx_ev(&self, ev_min: f32, ev_max: f32) {
+        self.environment_resources.set_agx_range(
+            &self.queue,
+            ev_min + AGX_MIDDLE_GRAY_LOG2,
+            ev_max + AGX_MIDDLE_GRAY_LOG2,
+        );
     }
 
     /// 加载场景：按物体数量重建动态 uniform 缓冲（网格资产已在 `upload_meshes` 中常驻）。

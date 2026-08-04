@@ -95,6 +95,9 @@ pub struct Scene {
     environment: Option<Arc<Environment>>,
     /// 环境强度（IBL 系数）：0 = 纯手动布光，1 = 满环境光。
     environment_intensity: f32,
+    /// AgX 色调映射的 EV 窗口（相对中间灰 0.18 的 EV 档位），默认与 Blender 一致。
+    agx_min_ev: f32,
+    agx_max_ev: f32,
 }
 
 impl Default for Scene {
@@ -104,6 +107,9 @@ impl Default for Scene {
             environment: None,
             // 默认满环境光：不显式设置强度时保持"环境图参与光照"的既有行为。
             environment_intensity: 1.0,
+            // 默认 EV 窗口 = Blender AgX（中间灰上下 -10 ~ +6.5 EV）。
+            agx_min_ev: crate::engine::render::uniform::AGX_DEFAULT_EV_MIN,
+            agx_max_ev: crate::engine::render::uniform::AGX_DEFAULT_EV_MAX,
         }
     }
 }
@@ -136,6 +142,29 @@ impl Scene {
     /// 场景的环境强度（默认 1.0）。
     pub fn environment_intensity(&self) -> f32 {
         self.environment_intensity
+    }
+
+    /// 覆盖 AgX 色调映射的 EV 窗口（场景级风格配置）。
+    ///
+    /// 参数是**相对中间灰 0.18 的 EV 档位**：默认 -10 ~ +6.5 EV（Blender 一致），
+    /// 一般无需修改；想让某个层级更亮/更暗或动态范围更宽/更窄时再调。
+    /// 窗口越宽曲线越平缓（整体偏灰），越窄对比越强；要求 `min_ev < max_ev`。
+    #[allow(dead_code)] // 公共配置 API：关卡数据构建场景时使用
+    pub fn with_environment_agx_ev(mut self, min_ev: f32, max_ev: f32) -> Self {
+        debug_assert!(min_ev < max_ev, "AgX EV 窗口要求 min_ev < max_ev");
+        self.agx_min_ev = min_ev;
+        self.agx_max_ev = max_ev;
+        self
+    }
+
+    /// 场景的 AgX EV 窗口下界（默认 -10，相对中间灰的 EV）。
+    pub fn agx_min_ev(&self) -> f32 {
+        self.agx_min_ev
+    }
+
+    /// 场景的 AgX EV 窗口上界（默认 +6.5，相对中间灰的 EV）。
+    pub fn agx_max_ev(&self) -> f32 {
+        self.agx_max_ev
     }
 
     /// 存活节点总数（含纯分组节点）。
@@ -291,7 +320,7 @@ impl Scene {
         // 方向光：从右上前方照向场景。
         let light_direction = Vec3::new(0.5, 0.6, 0.6).normalize();
         scene.add_object(SceneObject::new(
-            SceneObjectKind::Light(Light::WHITE),
+            SceneObjectKind::Light(Light::directional(Vec3::ONE, 0.7)),
             Transform::new(
                 Vec3::ZERO,
                 Quat::from_rotation_arc(Vec3::NEG_Z, light_direction),
@@ -300,12 +329,12 @@ impl Scene {
         ));
         // 点光（辅助灯）：暖色，放在演示物体右上方。
         scene.add_object(SceneObject::new(
-            SceneObjectKind::Light(Light::point(Vec3::new(1.0, 0.85, 0.6), 100.0)),
+            SceneObjectKind::Light(Light::point(Vec3::new(1.0, 0.85, 0.6), 18.0)),
             Transform::new(Vec3::new(2.2, 1.8, 0.8), Quat::IDENTITY, Vec3::ONE),
         ));
         // 面光（荧光灯面板）：朝下照亮扳手区域。
         scene.add_object(SceneObject::new(
-            SceneObjectKind::Light(Light::area(1.5, 0.6, Vec3::new(0.9, 0.95, 1.0), 45.0)),
+            SceneObjectKind::Light(Light::area(1.5, 0.6, Vec3::new(0.9, 0.95, 1.0), 20.0)),
             Transform::new(
                 Vec3::new(1.8, 2.8, -0.8),
                 Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),

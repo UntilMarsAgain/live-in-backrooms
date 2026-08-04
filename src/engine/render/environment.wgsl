@@ -1,7 +1,7 @@
 // 环境贴图管线：
 //   1) `equirect_to_cubemap` 计算入口：等距矩形（HDRI）→ 环境立方体贴图；
 //   2) `irradiance` 计算入口：环境立方体贴图 → 辐照度图（漫反射 IBL）；
-//   3) 天空盒顶点/片元：全屏三角形 + 逆 view_proj 反推视线方向。
+//   3) 天空盒顶点/片元：全屏三角形 + 逆 view_proj 反推视线方向 + AgX 色调映射。
 //
 // GPU 转换（入口 1、2）只在 Vulkan/Metal 等 storage 数组纹理可靠的后端启用；
 // GL 后端回退到 CPU 转换（core::environment），此时入口 1、2 不参与执行。
@@ -23,6 +23,16 @@ struct CameraUniform {
     inverse_view_proj: mat4x4<f32>,
 }
 
+// 环境参数 uniform（与 Rust 侧 EnvironmentParams 布局兼容）：
+// `intensity` 字段在此处作为全局曝光值使用；
+// `agx_min_ev` / `agx_max_ev` 为 AgX 色调映射的 EV 窗口（中间灰 0.18 锚定）。
+struct EnvironmentParams {
+    intensity: f32, // 曝光值
+    agx_min_ev: f32,
+    agx_max_ev: f32,
+    _pad0: u32,
+}
+
 // ---- 等距矩形 → 立方体贴图 ----
 @group(0) @binding(0) var<uniform> convert_params: EnvParams;
 @group(0) @binding(1) var equirect_tex: texture_2d<f32>;
@@ -39,30 +49,105 @@ struct CameraUniform {
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(1) @binding(0) var skybox_tex: texture_cube<f32>;
 @group(1) @binding(1) var skybox_sampler: sampler;
+@group(1) @binding(2) var<uniform> environment_params: EnvironmentParams;
+
+// ============================================================================
+// AgX Tone Mapping（与 Blender/Filament/three.js 同源实现）
+// 参考: https://github.com/mrdoob/three.js（tonemapping_pars_fragment）
+// ============================================================================
+
+// 线性 sRGB ↔ 线性 Rec.2020（AgX 在 Rec.2020 基色上工作）。
+// WGSL mat3x3 按列填充，以下每 3 个数为一列（r0, r1, r2）。
+const SRGB_TO_REC2020: mat3x3<f32> = mat3x3<f32>(
+    0.6274, 0.0691, 0.0164,
+    0.3293, 0.9195, 0.0880,
+    0.0433, 0.0113, 0.8956,
+);
+const REC2020_TO_SRGB: mat3x3<f32> = mat3x3<f32>(
+    1.6605, -0.1246, -0.0182,
+    -0.5876, 1.1329, -0.1006,
+    -0.0728, -0.0083, 1.1187,
+);
+
+// AgX Inset / Outset 色域矩阵。
+const AGX_INSET_MAT: mat3x3<f32> = mat3x3<f32>(
+    0.856627153315983, 0.137318972929847, 0.11189821299995,
+    0.0951212405381588, 0.761241990602591, 0.0767994186031903,
+    0.0482516061458583, 0.101439036467562, 0.811302368396859,
+);
+const AGX_OUTSET_MAT: mat3x3<f32> = mat3x3<f32>(
+    1.1271005818144368, -0.1413297634984383, -0.14132976349843826,
+    -0.11060664309660323, 1.157823702216272, -0.11060664309660294,
+    -0.016493938717834573, -0.016493938717834257, 1.2519364065950405,
+);
+
+// AgX Default 对比曲线（7 项多项式拟合，非 smoothstep；误差平方 ≈ 3.7e-6）。
+fn agx_default_contrast(x: vec3<f32>) -> vec3<f32> {
+    let x2 = x * x;
+    let x4 = x2 * x2;
+    return 15.5 * x4 * x2
+        - 40.14 * x4 * x
+        + 31.96 * x4
+        - 6.868 * x2 * x
+        + 0.4298 * x2
+        + 0.1191 * x
+        - 0.00232;
+}
+
+// AgX Default 色调映射（输入/输出均为线性 sRGB）。
+// EV 窗口来自 uniform（默认 -12.47393 / 4.026069，即中间灰上下 -10 ~ +6.5 EV），
+// 场景可覆盖，这是 AgX 相对 ACES 的核心优势：每个层级配置自己的动态范围窗口。
+fn agx_tone_map(color: vec3<f32>) -> vec3<f32> {
+    // 1. 线性 sRGB → Rec.2020 → AgX 基础色域。
+    var c = AGX_INSET_MAT * (SRGB_TO_REC2020 * color);
+
+    // 2. Log2 编码 + 归一化（EV 窗口以中间灰 0.18 为锚点）。
+    c = max(c, vec3<f32>(1e-10));
+    c = log2(c);
+    c = (c - vec3<f32>(environment_params.agx_min_ev))
+        / vec3<f32>(environment_params.agx_max_ev - environment_params.agx_min_ev);
+    c = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    // 3. AgX Default 对比曲线。
+    c = agx_default_contrast(c);
+
+    // 4. Outset 矩阵 + 2.2 线性化 → 转回线性 sRGB。
+    c = AGX_OUTSET_MAT * c;
+    c = pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
+    return REC2020_TO_SRGB * c;
+}
+
+// ACES Filmic Tone Mapping (Narkowicz 2015 拟合)
+// 保留作对比：中间调饱和度更高、高光滚降较硬、高亮区可能色相偏移。
+fn aces_filmic(color: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp(
+        (color * (a * color + b)) / (color * (c * color + d) + e),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+}
+
+// ============================================================================
+// 立方体面坐标工具函数（计算管线与天空盒共用逻辑保持一致）
+// ============================================================================
 
 // 立方体面内像素坐标 (u, v ∈ [0,1]) → 世界方向。
 fn face_dir(face: u32, u: f32, v: f32) -> vec3<f32> {
     let x = u * 2.0 - 1.0;
     let y = v * 2.0 - 1.0;
-    switch face {
-        case 0u: {  // +X
-            return vec3<f32>(1.0, -y, -x);
-        }
-        case 1u: {  // -X
-            return vec3<f32>(-1.0, -y, x);
-        }
-        case 2u: {  // +Y
-            return vec3<f32>(x, 1.0, y);
-        }
-        case 3u: {  // -Y
-            return vec3<f32>(x, -1.0, -y);
-        }
-        case 4u: {  // +Z
-            return vec3<f32>(x, -y, 1.0);
-        }
-        default: {  // -Z
-            return vec3<f32>(-x, -y, -1.0);
-        }
+    // WGSL switch 选择器必须用括号包裹
+    switch (face) {
+        case 0u: { return vec3<f32>(1.0, -y, -x); }  // +X
+        case 1u: { return vec3<f32>(-1.0, -y, x); }  // -X
+        case 2u: { return vec3<f32>(x, 1.0, y); }    // +Y
+        case 3u: { return vec3<f32>(x, -1.0, -y); }  // -Y
+        case 4u: { return vec3<f32>(x, -y, 1.0); }   // +Z
+        default: { return vec3<f32>(-x, -y, -1.0); } // -Z
     }
 }
 
@@ -73,6 +158,10 @@ fn dir_to_equirect(dir: vec3<f32>) -> vec2<f32> {
     let theta = acos(clamp(d.y, -1.0, 1.0));
     return vec2<f32>(0.5 + phi / (2.0 * PI), theta / PI);
 }
+
+// ============================================================================
+// Compute: Equirectangular → Cubemap
+// ============================================================================
 
 @compute @workgroup_size(8, 8)
 fn equirect_to_cubemap(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -86,6 +175,10 @@ fn equirect_to_cubemap(@builtin(global_invocation_id) gid: vec3<u32>) {
     let color = textureSampleLevel(equirect_tex, equirect_sampler, dir_to_equirect(dir), 0.0);
     textureStore(env_output, vec2<i32>(gid.xy), i32(gid.z), vec4<f32>(color.rgb, 1.0));
 }
+
+// ============================================================================
+// Compute: Cubemap → Irradiance Map (Diffuse IBL)
+// ============================================================================
 
 // 低差异序列：Hammersley 点集（i / n, 位反转的 Van der Corput）。
 fn radical_inverse_vdc(bits_in: u32) -> f32 {
@@ -112,6 +205,7 @@ fn cosine_sample_hemisphere(u: vec2<f32>) -> vec3<f32> {
 
 // 以法线为 +Z 构造正交基（避免与法线平行的轴）。
 fn tangent_basis(normal: vec3<f32>) -> mat3x3<f32> {
+    // WGSL select 需要 bool 条件；用 > 代替 step 返回浮点的行为
     let up = select(
         vec3<f32>(0.0, 0.0, 1.0),
         vec3<f32>(1.0, 0.0, 0.0),
@@ -135,8 +229,9 @@ fn irradiance(@builtin(global_invocation_id) gid: vec3<u32>) {
     // 余弦加权蒙特卡洛：E(n) = ∫ L cosθ dω ≈ π * avg。
     var acc = vec3<f32>(0.0);
     for (var i = 0u; i < irradiance_params.sample_count; i = i + 1u) {
-        let sample = cosine_sample_hemisphere(hammersley(i, irradiance_params.sample_count));
-        let l = normalize(basis * sample);
+        // 'sample' 是 WGSL 保留关键字，改用 wi
+        let wi = cosine_sample_hemisphere(hammersley(i, irradiance_params.sample_count));
+        let l = normalize(basis * wi);
         let n_dot_l = max(dot(n, l), 0.0);
         acc += textureSampleLevel(env_cube, env_sampler, l, 0.0).rgb * n_dot_l;
     }
@@ -149,7 +244,9 @@ fn irradiance(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
 }
 
-// ---- 天空盒 ----
+// ============================================================================
+// Skybox Render Pipeline
+// ============================================================================
 
 struct SkyboxOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -176,8 +273,13 @@ fn skybox_fs_main(in: SkyboxOutput) -> @location(0) vec4<f32> {
     let p = camera.inverse_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
     let dir = normalize(p.xyz / p.w);
     let radiance = textureSampleLevel(skybox_tex, skybox_sampler, dir, 0.0).rgb;
-    // 曝光 + 指数色调映射（输出线性色，由 sRGB 交换链完成编码）。
-    let exposure = 1.0;
-    let mapped = vec3<f32>(1.0) - exp(-exposure * radiance);
+
+    // 应用曝光（复用 environment_params.intensity 作为曝光值）
+    let exposed = radiance * environment_params.intensity;
+
+    // 色调映射（输入/输出均为线性空间）；当前用修正后的 AgX，ACES 保留作对比。
+    let mapped = agx_tone_map(exposed);
+
+    // 输出线性色，由 sRGB 交换链自动完成编码
     return vec4<f32>(mapped, 1.0);
 }

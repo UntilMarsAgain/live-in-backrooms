@@ -182,6 +182,8 @@ impl App {
             self.renderer.set_environment(env);
             self.renderer
                 .set_environment_intensity(scene.environment_intensity());
+            self.renderer
+                .set_environment_agx_ev(scene.agx_min_ev(), scene.agx_max_ev());
         }
         self.renderer.load_scene(&scene);
         self.scene = scene;
