@@ -4,6 +4,7 @@ mod controller;
 mod mesh;
 mod render;
 mod scene;
+mod transform;
 
 use std::error::Error;
 use std::sync::Arc;

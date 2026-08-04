@@ -447,9 +447,9 @@ impl Renderer {
                 );
 
                 // 每个物体：绑定它的世界矩阵（动态偏移），按句柄直取网格区间；
-                // 纯分组节点（无网格）跳过。
+                // 非网格节点（分组、未来的灯光/相机等）跳过。
                 for (i, (_, object)) in scene.objects().enumerate() {
-                    let Some(mesh_key) = object.mesh else { continue; };
+                    let Some(mesh_key) = object.mesh_key() else { continue; };
                     let range = mesh_buffer.mesh_ranges[mesh_key.index()];
                     let offset = (i * self.object_stride as usize) as u32;
                     pass.set_bind_group(1, &self.object_bind_group, &[offset]);

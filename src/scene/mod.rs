@@ -13,37 +13,55 @@
 //! - 成环在库层就被禁止（`append`/`checked_append` 拒绝自挂与挂祖先），
 //!   [`Scene::reparent`] 也会预检查后代关系，因此遍历不需要环保护。
 //!
-//! 网格资产由 `MeshLibrary` 永久持有，不属于某个场景；`SceneObject::mesh` 为
-//! `None` 表示纯分组节点（只承载子节点）。切换场景由 App 层 API 触发。
+//! 网格资产由 `MeshLibrary` 永久持有，不属于某个场景；场景对象用
+//! [`SceneObjectKind`] 区分类型（网格 / 空分组节点，灯光、相机等后续加入）。
+//! 切换场景由 App 层 API 触发。
+
+use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3};
 use indextree::{Arena, NodeId};
 
 use crate::mesh::MeshKey;
+use crate::transform::Transform;
 
 /// 场景节点句柄：indextree 的节点 ID（带代际，删除后不失效复用）。
 pub type ObjectKey = NodeId;
 
-/// 场景节点数据：局部变换 + 可选网格。
+/// 场景对象的类型。
+///
+/// 灯光、相机等系统落地后，作为新的变体挂到这里；枚举让所有处理分支
+/// （渲染、剔除、灯光收集等）都能被编译器强制检查。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneObjectKind {
+    /// 纯分组节点：只承载子节点，本身不可见。
+    Empty,
+    /// 引用全局资产库里的网格。
+    Mesh(MeshKey),
+}
+
+/// 场景节点数据：局部变换 + 类型。
 ///
 /// 父子关系由 `indextree` 的 arena 树维护，本结构不存任何句柄/指针。
 #[derive(Debug, Clone)]
 pub struct SceneObject {
-    pub position: Vec3,
-    pub rotation: Quat,
-    pub scale: Vec3,
-    /// 引用的全局网格资产；`None` 表示纯分组节点（只承载子节点）。
-    pub mesh: Option<MeshKey>,
+    /// 相对父节点的局部变换；没有父节点时即世界变换。
+    pub transform: Transform,
+    /// 场景对象的类型。
+    pub kind: SceneObjectKind,
 }
 
 impl SceneObject {
     /// 新建一个节点。要挂到树上用 [`Scene::attach`] 或 [`Scene::reparent`]。
-    pub fn new(mesh: Option<MeshKey>, position: Vec3, rotation: Quat, scale: Vec3) -> Self {
-        Self {
-            position,
-            rotation,
-            scale,
-            mesh,
+    pub fn new(kind: SceneObjectKind, transform: Transform) -> Self {
+        Self { transform, kind }
+    }
+
+    /// 若该对象是网格，返回其 `MeshKey`；否则返回 `None`。
+    pub fn mesh_key(&self) -> Option<MeshKey> {
+        match self.kind {
+            SceneObjectKind::Mesh(key) => Some(key),
+            SceneObjectKind::Empty => None,
         }
     }
 }
@@ -141,6 +159,27 @@ impl Scene {
         Some(removed)
     }
 
+    /// 把 `other` 中的所有物体复制进本场景（保持层级关系），返回新复制的根节点句柄。
+    ///
+    /// 用于把 glTF 等外部场景并入现有场景（例如并进演示场景）。
+    pub fn merge(&mut self, other: &Scene) -> Vec<ObjectKey> {
+        // 第一遍：复制所有节点，记录旧句柄 → 新句柄。
+        let mut remap: HashMap<ObjectKey, ObjectKey> = HashMap::new();
+        for (old_key, object) in other.objects() {
+            let new_key = self.add_object(SceneObject::new(object.kind, object.transform));
+            remap.insert(old_key, new_key);
+        }
+        // 第二遍：按旧场景的父子关系重建层级。
+        for (old_key, _) in other.objects() {
+            if let Some(old_parent) = old_key.parent(&other.tree) {
+                let new_child = remap[&old_key];
+                let new_parent = remap[&old_parent];
+                let _ = self.reparent(new_child, Some(new_parent));
+            }
+        }
+        other.roots().map(|(key, _)| remap[&key]).collect()
+    }
+
     /// 沿祖先链向上累乘得到世界矩阵（O(深度)）。
     ///
     /// 树结构保证祖先链无环、必然终止；节点已失效时返回 `None`。
@@ -148,16 +187,16 @@ impl Scene {
         if key.is_removed(&self.tree) {
             return None;
         }
-        let mut chain = Vec::new();
-        for id in key.ancestors(&self.tree) {
-            let obj = &self.tree[id].get();
-            chain.push((obj.scale, obj.rotation, obj.position));
-        }
-        let mut world = Mat4::IDENTITY;
-        for (scale, rotation, position) in chain.iter().rev() {
-            world *= Mat4::from_scale_rotation_translation(*scale, *rotation, *position);
-        }
-        Some(world)
+        let chain: Vec<Transform> = key
+            .ancestors(&self.tree)
+            .map(|id| self.tree[id].get().transform)
+            .collect();
+        Some(
+            chain
+                .iter()
+                .rev()
+                .fold(Mat4::IDENTITY, |world, transform| world * transform.to_mat4()),
+        )
     }
 
     /// 按句柄访问（O(1)）；句柄失效时返回 `None`。
@@ -183,45 +222,49 @@ impl Scene {
     pub fn demo(triangle: MeshKey, quad: MeshKey, cube: MeshKey) -> Self {
         let mut scene = Self::new();
         scene.add_object(SceneObject::new(
-            Some(triangle),
-            Vec3::new(0.0, 0.0, 0.0),
-            Quat::IDENTITY,
-            Vec3::ONE,
+            SceneObjectKind::Mesh(triangle),
+            Transform::IDENTITY,
         ));
         scene.add_object(SceneObject::new(
-            Some(triangle),
-            Vec3::new(1.8, 0.0, 0.6),
-            Quat::from_rotation_y(0.9),
-            Vec3::ONE,
+            SceneObjectKind::Mesh(triangle),
+            Transform::new(
+                Vec3::new(1.8, 0.0, 0.6),
+                Quat::from_rotation_y(0.9),
+                Vec3::ONE,
+            ),
         ));
         // 四边形：X 轴拉长，演示非等比缩放。
         scene.add_object(SceneObject::new(
-            Some(quad),
-            Vec3::new(-1.8, 0.4, 0.8),
-            Quat::from_rotation_z(0.7),
-            Vec3::new(1.6, 1.0, 1.0),
+            SceneObjectKind::Mesh(quad),
+            Transform::new(
+                Vec3::new(-1.8, 0.4, 0.8),
+                Quat::from_rotation_z(0.7),
+                Vec3::new(1.6, 1.0, 1.0),
+            ),
         ));
         scene.add_object(SceneObject::new(
-            Some(triangle),
-            Vec3::new(0.6, 1.6, -0.8),
-            Quat::from_rotation_x(1.1),
-            Vec3::ONE,
+            SceneObjectKind::Mesh(triangle),
+            Transform::new(
+                Vec3::new(0.6, 1.6, -0.8),
+                Quat::from_rotation_x(1.1),
+                Vec3::ONE,
+            ),
         ));
         // 立方体：放在视野正上方偏后，绕 Y 和 X 各转一点，让多个面可见。
         let cube = scene.add_object(SceneObject::new(
-            Some(cube),
-            Vec3::new(0.0, 1.5, -1.6),
-            Quat::from_rotation_x(0.35) * Quat::from_rotation_y(0.6),
-            Vec3::splat(1.3),
+            SceneObjectKind::Mesh(cube),
+            Transform::new(
+                Vec3::new(0.0, 1.5, -1.6),
+                Quat::from_rotation_x(0.35) * Quat::from_rotation_y(0.6),
+                Vec3::splat(1.3),
+            ),
         ));
         // 小三角形挂在立方体正上方，跟随立方体一起旋转（验证层级）。
         let _ = scene.attach(
             cube,
             SceneObject::new(
-                Some(triangle),
-                Vec3::new(0.0, 1.2, 0.0),
-                Quat::IDENTITY,
-                Vec3::splat(0.4),
+                SceneObjectKind::Mesh(triangle),
+                Transform::new(Vec3::new(0.0, 1.2, 0.0), Quat::IDENTITY, Vec3::splat(0.4)),
             ),
         );
         scene
