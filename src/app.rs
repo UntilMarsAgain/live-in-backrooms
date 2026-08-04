@@ -11,20 +11,18 @@ use winit::event::{DeviceEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
-use crate::asset;
-use crate::camera::Camera;
-use crate::controller::FreeCameraController;
-use crate::mesh::{Mesh, MeshKey, MeshLibrary};
-use crate::render::{DisplayHandle, Renderer, RendererError};
-use crate::scene::Scene;
-use crate::texture::{Texture, TextureKey, TextureLibrary};
+use crate::engine::asset;
+use crate::engine::{
+    Camera, DisplayHandle, FreeCameraController, InputController, Mesh, MeshKey, MeshLibrary,
+    Renderer, RendererError, Scene, Texture, TextureKey, TextureLibrary,
+};
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
 pub struct App {
     window: Arc<Window>,
     renderer: Renderer,
     camera: Camera,
-    controller: FreeCameraController,
+    controller: Box<dyn InputController<Camera>>,
     last_frame: Instant,
     /// 全局网格资产库（永久驻留，跨场景共享）。
     mesh_library: MeshLibrary,
@@ -47,7 +45,7 @@ impl App {
             0.1,
             100.0,
         );
-        let controller = FreeCameraController::new();
+        let controller: Box<dyn InputController<Camera>> = Box::new(FreeCameraController::new());
         let renderer = Renderer::new(&window, display)?;
         let mut app = Self {
             window,
@@ -88,7 +86,7 @@ impl App {
             .pop()
             .expect("注册了 1 张贴图");
         let mut scene = Scene::demo(*triangle, *quad, *cube, Some(checker));
-        let test_glb = Path::new("src/asset/test.glb");
+        let test_glb = Path::new("src/engine/asset/test.glb");
         if test_glb.is_file() {
             match asset::load_scene(
                 test_glb,

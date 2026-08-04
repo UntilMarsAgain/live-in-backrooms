@@ -1,14 +1,6 @@
 mod app;
-mod asset;
-mod camera;
-mod controller;
-mod light;
-mod material;
-mod mesh;
-mod render;
-mod scene;
-mod texture;
-mod transform;
+mod engine;
+mod game;
 
 use std::error::Error;
 use std::sync::Arc;

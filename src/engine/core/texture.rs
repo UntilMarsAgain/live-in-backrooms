@@ -1,6 +1,6 @@
 //! 纹理模块：CPU 侧的贴图数据与全局纹理资产库。
 //!
-//! 与 [`MeshLibrary`](crate::mesh::MeshLibrary) 同一套模式：只追加、永久持有、
+//! 与 [`MeshLibrary`](super::mesh::MeshLibrary) 同一套模式：只追加、永久持有、
 //! 版本号驱动 GPU 侧增量上传。句柄是稠密编号（不删除因此稳定）。
 
 /// 纹理：RGBA8 未压缩像素（sRGB 语义，上传时按 `Rgba8UnormSrgb` 处理）。

@@ -17,11 +17,11 @@ use wgpu::{
 };
 use winit::window::Window;
 
-use crate::camera::{Camera, CameraUniform};
-use crate::light::LightKind;
-use crate::mesh::{MeshLibrary, Vertex};
-use crate::scene::{Scene, SceneObjectKind};
-use crate::texture::{Texture, TextureLibrary};
+use super::core::camera::{Camera, CameraUniform};
+use super::core::light::LightKind;
+use super::core::mesh::{MeshLibrary, Vertex};
+use super::scene::{Scene, SceneObjectKind};
+use super::core::texture::{Texture, TextureLibrary};
 
 /// 窗口的显示句柄，用于创建 wgpu 实例。
 pub type DisplayHandle = Box<dyn wgpu::wgt::WgpuHasDisplayHandle>;
@@ -160,7 +160,7 @@ pub struct Renderer {
     /// 纹理（材质贴图）绑定组相关。
     texture_bind_group_layout: wgpu::BindGroupLayout,
     texture_sampler: wgpu::Sampler,
-    /// 按 [`TextureKey`](crate::texture::TextureKey) 稠密编号索引的纹理视图。
+    /// 按 [`TextureKey`](super::core::texture::TextureKey) 稠密编号索引的纹理视图。
     texture_views: Vec<wgpu::TextureView>,
     /// 默认 1×1 白纹理视图（基础色/金属度粗糙度贴图兜底）。
     default_white_view: wgpu::TextureView,
@@ -191,7 +191,7 @@ struct MeshRange {
 }
 
 /// 全局网格的 GPU 表示：合并后的顶点/索引缓冲，以及每个网格的区间。
-/// 区间按 [`MeshKey`](crate::mesh::MeshKey) 的稠密编号索引（句柄即下标）。
+/// 区间按 [`MeshKey`](super::core::mesh::MeshKey) 的稠密编号索引（句柄即下标）。
 struct MeshGpu {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,

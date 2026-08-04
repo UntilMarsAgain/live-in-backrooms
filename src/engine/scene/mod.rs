@@ -22,11 +22,11 @@ use std::collections::HashMap;
 use glam::{Mat4, Quat, Vec3};
 use indextree::{Arena, NodeId};
 
-use crate::light::Light;
-use crate::material::Material;
-use crate::mesh::MeshKey;
-use crate::texture::TextureKey;
-use crate::transform::Transform;
+use super::core::light::Light;
+use super::core::material::Material;
+use super::core::mesh::MeshKey;
+use super::core::texture::TextureKey;
+use super::core::transform::Transform;
 
 /// 场景节点句柄：indextree 的节点 ID（带代际，删除后不失效复用）。
 pub type ObjectKey = NodeId;

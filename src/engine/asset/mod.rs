@@ -21,11 +21,11 @@ use glam::{Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use gltf::scene::Transform as GltfTransform;
 
-use crate::material::Material;
-use crate::mesh::{Mesh, MeshKey, MeshLibrary, Vertex};
-use crate::scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};
-use crate::texture::{Texture, TextureKey, TextureLibrary};
-use crate::transform::Transform;
+use super::core::material::Material;
+use super::core::mesh::{Mesh, MeshKey, MeshLibrary, Vertex};
+use super::scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};
+use super::core::texture::{Texture, TextureKey, TextureLibrary};
+use super::core::transform::Transform;
 
 /// 从 glTF 文件加载场景：网格资产注册进 `mesh_library`，返回带层级的 `Scene`。
 pub fn load_scene(
@@ -518,7 +518,7 @@ impl From<gltf::Error> for LoaderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mesh::MeshLibrary;
+    use crate::engine::core::mesh::MeshLibrary;
 
     /// 一个带位置/法线/UV/顶点色和索引的三角形 glTF（TRIANGLES 模式）。
     const TRIANGLE_JSON: &str = r#"{
@@ -636,7 +636,7 @@ mod tests {
     fn load_repo_test_glb() {
         let mut library = MeshLibrary::new();
         let mut textures = TextureLibrary::new();
-        let scene = load_scene(Path::new("src/asset/test.glb"), &mut library, &mut textures)
+        let scene = load_scene(Path::new("src/engine/asset/test.glb"), &mut library, &mut textures)
             .expect("仓库内的测试资产应能加载");
         assert!(!library.is_empty());
         assert!(!textures.is_empty(), "PBR 样例应带基础色贴图");

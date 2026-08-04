@@ -1,11 +1,4 @@
-//! 控制器模块：把输入翻译成相机运动。
-//!
-//! 与 [`crate::camera`] 解耦：相机模块只负责纯数学与 GPU 数据，不依赖任何输入；
-//! 本模块负责收集 winit 输入事件，并在每帧把积累的输入统一应用到相机。
-//! 后续的角色控制器（重力、碰撞、第一人称移动）也在这里接入。
-//!
-//! 事件回调里只记录输入状态，每帧 [`FreeCameraController::update`] 时统一
-//! 应用到相机，避免在事件回调中直接修改相机造成顺序不一致。
+//! 自由相机控制器：第一人称式输入 → 相机。
 
 use std::collections::HashSet;
 
@@ -14,7 +7,8 @@ use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, Win
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window};
 
-use crate::camera::Camera;
+use super::InputController;
+use crate::engine::core::camera::Camera;
 
 /// 第一人称式相机控制器。
 ///
@@ -62,8 +56,31 @@ impl FreeCameraController {
         }
     }
 
-    /// 处理 winit 窗口事件（只关心输入类事件，其余忽略）。
-    pub fn handle_event(&mut self, event: &WindowEvent, window: &Window) {
+    fn pressed(&self, code: KeyCode) -> bool {
+        self.keys.contains(&code)
+    }
+
+    fn capture_mouse(&mut self, window: &Window) {
+        if window.set_cursor_grab(CursorGrabMode::Locked).is_ok() {
+            window.set_cursor_visible(false);
+            self.mouse_captured = true;
+        } else if window.set_cursor_grab(CursorGrabMode::Confined).is_ok() {
+            // 部分平台不支持锁定光标，退而求其次限制在窗口内。
+            window.set_cursor_visible(false);
+            self.mouse_captured = true;
+        }
+    }
+
+    fn release_mouse(&mut self, window: &Window) {
+        let _ = window.set_cursor_grab(CursorGrabMode::None);
+        window.set_cursor_visible(true);
+        self.mouse_captured = false;
+        self.last_cursor = None;
+    }
+}
+
+impl InputController<Camera> for FreeCameraController {
+    fn handle_event(&mut self, event: &WindowEvent, window: &Window) {
         match event {
             WindowEvent::KeyboardInput { event: key_event, .. } => {
                 let PhysicalKey::Code(code) = key_event.physical_key else {
@@ -117,8 +134,7 @@ impl FreeCameraController {
         }
     }
 
-    /// 处理设备事件（鼠标相对位移等），捕获状态下提供自由视角。
-    pub fn handle_device_event(&mut self, event: &DeviceEvent) {
+    fn handle_device_event(&mut self, event: &DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.mouse_captured || self.dragging {
                 self.look_delta.0 += delta.0 as f32;
@@ -127,10 +143,9 @@ impl FreeCameraController {
         }
     }
 
-    /// 每帧调用：把积累的输入应用到相机。
-    pub fn update(&mut self, camera: &mut Camera, dt: f32) {
+    fn update(&mut self, target: &mut Camera, dt: f32) {
         // 1. 鼠标旋转（向下拖动鼠标 → 俯视）。
-        camera.rotate(
+        target.rotate(
             self.look_delta.0 * self.sensitivity,
             -self.look_delta.1 * self.sensitivity,
         );
@@ -146,16 +161,16 @@ impl FreeCameraController {
         // 3. 键盘移动。
         let mut movement = Vec3::ZERO;
         if self.pressed(KeyCode::KeyW) || self.pressed(KeyCode::ArrowUp) {
-            movement += camera.forward_horizontal();
+            movement += target.forward_horizontal();
         }
         if self.pressed(KeyCode::KeyS) || self.pressed(KeyCode::ArrowDown) {
-            movement -= camera.forward_horizontal();
+            movement -= target.forward_horizontal();
         }
         if self.pressed(KeyCode::KeyD) || self.pressed(KeyCode::ArrowRight) {
-            movement += camera.right();
+            movement += target.right();
         }
         if self.pressed(KeyCode::KeyA) || self.pressed(KeyCode::ArrowLeft) {
-            movement -= camera.right();
+            movement -= target.right();
         }
         if self.pressed(KeyCode::Space) {
             movement += Vec3::Y;
@@ -165,30 +180,8 @@ impl FreeCameraController {
         }
 
         if movement != Vec3::ZERO {
-            camera.translate(movement.normalize_or_zero() * self.speed * dt);
+            target.translate(movement.normalize_or_zero() * self.speed * dt);
         }
-    }
-
-    fn pressed(&self, code: KeyCode) -> bool {
-        self.keys.contains(&code)
-    }
-
-    fn capture_mouse(&mut self, window: &Window) {
-        if window.set_cursor_grab(CursorGrabMode::Locked).is_ok() {
-            window.set_cursor_visible(false);
-            self.mouse_captured = true;
-        } else if window.set_cursor_grab(CursorGrabMode::Confined).is_ok() {
-            // 部分平台不支持锁定光标，退而求其次限制在窗口内。
-            window.set_cursor_visible(false);
-            self.mouse_captured = true;
-        }
-    }
-
-    fn release_mouse(&mut self, window: &Window) {
-        let _ = window.set_cursor_grab(CursorGrabMode::None);
-        window.set_cursor_visible(true);
-        self.mouse_captured = false;
-        self.last_cursor = None;
     }
 }
 
