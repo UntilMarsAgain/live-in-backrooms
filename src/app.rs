@@ -13,8 +13,8 @@ use winit::window::Window;
 
 use crate::engine::asset;
 use crate::engine::{
-    Camera, DisplayHandle, FreeCameraController, InputController, Mesh, MeshKey, MeshLibrary,
-    Renderer, RendererError, Scene, Texture, TextureKey, TextureLibrary,
+    Camera, DisplayHandle, Environment, FreeCameraController, InputController, Mesh, MeshKey,
+    MeshLibrary, Renderer, RendererError, Scene, Texture, TextureKey, TextureLibrary,
 };
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
@@ -64,6 +64,9 @@ impl App {
     /// 启动场景：优先加载 `BACKROOMS_GLTF` 环境变量指定的 glTF 文件，
     /// 其次尝试 `assets/scene.glb`；都不可用时回退到内置演示场景。
     fn load_startup_scene(&mut self) {
+        // 环境贴图（天空盒 + IBL）：关卡级资产，先于场景加载。
+        self.load_environment();
+
         if let Some(path) = std::env::var_os("BACKROOMS_GLTF") {
             if self.try_load_gltf(Path::new(&path)) {
                 return;
@@ -109,6 +112,25 @@ impl App {
             }
         }
         self.load_scene(scene);
+    }
+
+    /// 加载环境贴图：`BACKROOMS_ENV` 环境变量优先，否则尝试 `assets/environments/test.hdr`。
+    fn load_environment(&mut self) {
+        let path = std::env::var_os("BACKROOMS_ENV")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("assets/environments/test.hdr"));
+        match Environment::from_hdr_file(&path) {
+            Ok(env) => {
+                eprintln!(
+                    "环境贴图 {} 加载成功（{}×{}）",
+                    path.display(),
+                    env.width,
+                    env.height
+                );
+                self.renderer.set_environment(&env);
+            }
+            Err(e) => eprintln!("环境贴图加载失败 {}：{e}", path.display()),
+        }
     }
 
     /// 尝试从 glTF 文件加载场景；成功返回 `true`，失败打印原因并返回 `false`。

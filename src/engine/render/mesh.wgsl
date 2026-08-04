@@ -1,7 +1,8 @@
-// 相机 uniform：内存布局与 Rust 侧 CameraUniform 保持一致（80 字节）。
+// 相机 uniform：内存布局与 Rust 侧 CameraUniform 保持一致（144 字节）。
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     position: vec3<f32>,
+    inverse_view_proj: mat4x4<f32>,
 }
 
 // 物体数据：模型矩阵 + 法线矩阵 + PBR 材质参数。
@@ -49,6 +50,9 @@ const PI: f32 = 3.141592653589793;
 @group(3) @binding(1) var base_color_sampler: sampler;
 @group(3) @binding(2) var metallic_roughness_tex: texture_2d<f32>;
 @group(3) @binding(3) var normal_tex: texture_2d<f32>;
+@group(4) @binding(0) var irradiance_tex: texture_cube<f32>;
+@group(4) @binding(1) var environment_tex: texture_cube<f32>;
+@group(4) @binding(2) var environment_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -130,8 +134,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let n_dot_v = max(dot(n, v), 0.0);
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
-    // 环境光近似（非 IBL）：保持简单，金属材质在这里会偏暗，后续可换 IBL。
-    var color = albedo * 0.08;
+    // IBL 漫反射：辐照度图已含 π 因子（E(n) = π * avg），这里除以 π 恢复物理量。
+    // Phase 1 暂无镜面 IBL（预过滤环境图 + BRDF LUT），金属材质的环境高光暂缺。
+    let irradiance = textureSampleLevel(irradiance_tex, environment_sampler, n, 0.0).rgb;
+    let k_d_ambient = (vec3<f32>(1.0) - f0) * (1.0 - metallic);
+    let ambient_diffuse = k_d_ambient * albedo / PI * irradiance;
+    var color = ambient_diffuse;
 
     for (var i = 0u; i < lights.count; i = i + 1u) {
         let light = lights.lights[i];

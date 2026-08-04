@@ -916,6 +916,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.2",
  "gltf",
+ "image",
  "indextree",
  "mikktspace",
  "naga",
