@@ -4,7 +4,6 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use glam::Mat4;
 use wgpu::util::DeviceExt;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
@@ -375,13 +374,15 @@ impl Renderer {
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
 
-        // 每帧把物体模型矩阵写入动态 uniform 缓冲（步长 = object_stride）。
+        // 每帧把物体世界矩阵写入动态 uniform 缓冲（步长 = object_stride）。
         if scene.object_count() > 0 {
             let stride = self.object_stride as usize;
             let mut bytes = vec![0u8; scene.object_count() * stride];
-            for (i, (_, object)) in scene.objects().enumerate() {
-                let model =
-                    Mat4::from_scale_rotation_translation(object.scale, object.rotation, object.position);
+            for (i, (key, _)) in scene.objects().enumerate() {
+                // 层级场景：世界矩阵由 Scene 沿祖先链累乘得到。
+                let model = scene
+                    .world_transform(key)
+                    .expect("objects() 只产出存活节点，world_transform 必然有值");
                 bytes[i * stride..i * stride + 64].copy_from_slice(bytemuck::bytes_of(&model));
             }
             self.queue.write_buffer(&self.object_data_buffer, 0, &bytes);
@@ -445,9 +446,11 @@ impl Renderer {
                     wgpu::IndexFormat::Uint32,
                 );
 
-                // 每个物体：绑定它的模型矩阵（动态偏移），按句柄直取网格区间。
+                // 每个物体：绑定它的世界矩阵（动态偏移），按句柄直取网格区间；
+                // 纯分组节点（无网格）跳过。
                 for (i, (_, object)) in scene.objects().enumerate() {
-                    let range = mesh_buffer.mesh_ranges[object.mesh.index()];
+                    let Some(mesh_key) = object.mesh else { continue; };
+                    let range = mesh_buffer.mesh_ranges[mesh_key.index()];
                     let offset = (i * self.object_stride as usize) as u32;
                     pass.set_bind_group(1, &self.object_bind_group, &[offset]);
                     pass.draw_indexed(

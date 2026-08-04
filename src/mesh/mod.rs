@@ -198,7 +198,6 @@ impl MeshLibrary {
     }
 
     /// 注册单个网格（内部走批量路径）。
-    #[allow(dead_code)] // 预留：单条注册 API
     pub fn register(&mut self, mesh: Mesh) -> MeshKey {
         self.register_many([mesh])[0]
     }
@@ -214,7 +213,6 @@ impl MeshLibrary {
         keys
     }
 
-    #[allow(dead_code)] // 预留：按句柄读取资产
     pub fn mesh(&self, key: MeshKey) -> Option<&Mesh> {
         self.meshes.get(key.0)
     }
@@ -223,7 +221,6 @@ impl MeshLibrary {
         self.meshes.len()
     }
 
-    #[allow(dead_code)] // 预留
     pub fn is_empty(&self) -> bool {
         self.meshes.is_empty()
     }
