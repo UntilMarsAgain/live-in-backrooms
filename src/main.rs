@@ -1,4 +1,5 @@
 mod app;
+mod asset;
 mod camera;
 mod controller;
 mod mesh;

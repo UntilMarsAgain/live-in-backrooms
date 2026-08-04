@@ -3,6 +3,7 @@
 //! 这里持有窗口与渲染器等子系统，把 winit 事件翻译成上层逻辑。
 //! 后续的输入、游戏逻辑、场景管理都可以从这里接入。
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -10,6 +11,7 @@ use winit::event::{DeviceEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
+use crate::asset;
 use crate::camera::Camera;
 use crate::controller::FreeCameraController;
 use crate::mesh::{Mesh, MeshKey, MeshLibrary};
@@ -53,13 +55,61 @@ impl App {
             mesh_library: MeshLibrary::new(),
             scene: Scene::default(),
         };
-        // 启动时注册演示资产并加载演示场景。
-        let keys = app.register_meshes(vec![Mesh::triangle(), Mesh::quad(), Mesh::cube()]);
+        app.load_startup_scene();
+        Ok(app)
+    }
+
+    /// 启动场景：优先加载 `BACKROOMS_GLTF` 环境变量指定的 glTF 文件，
+    /// 其次尝试 `assets/scene.glb`；都不可用时回退到内置演示场景。
+    fn load_startup_scene(&mut self) {
+        if let Some(path) = std::env::var_os("BACKROOMS_GLTF") {
+            if self.try_load_gltf(Path::new(&path)) {
+                return;
+            }
+            eprintln!("回退到演示场景");
+        } else {
+            let default = Path::new("assets/scene.glb");
+            if default.is_file() && self.try_load_gltf(default) {
+                return;
+            }
+        }
+        // 回退：内置演示场景；仓库内的 src/asset/test.glb 作为代码资产一并并入。
+        let keys = self.register_meshes(vec![Mesh::triangle(), Mesh::quad(), Mesh::cube()]);
         let [triangle, quad, cube] = keys.as_slice() else {
             unreachable!("demo 注册了 3 个网格")
         };
-        app.load_scene(Scene::demo(*triangle, *quad, *cube));
-        Ok(app)
+        let mut scene = Scene::demo(*triangle, *quad, *cube);
+        let test_glb = Path::new("src/asset/test.glb");
+        if test_glb.is_file() {
+            match asset::load_scene(test_glb, &mut self.mesh_library) {
+                Ok(gltf_scene) => {
+                    // 把测试模型挪到演示物体右前方，避免和原点处的三角形重叠。
+                    for key in scene.merge(&gltf_scene) {
+                        if let Some(object) = scene.object_mut(key) {
+                            object.transform.position += glam::Vec3::new(1.8, 0.0, -1.2);
+                        }
+                    }
+                    self.renderer.upload_meshes(&self.mesh_library);
+                }
+                Err(e) => eprintln!("加载 {} 失败：{e}", test_glb.display()),
+            }
+        }
+        self.load_scene(scene);
+    }
+
+    /// 尝试从 glTF 文件加载场景；成功返回 `true`，失败打印原因并返回 `false`。
+    fn try_load_gltf(&mut self, path: &Path) -> bool {
+        match asset::load_scene(path, &mut self.mesh_library) {
+            Ok(scene) => {
+                self.renderer.upload_meshes(&self.mesh_library);
+                self.load_scene(scene);
+                true
+            }
+            Err(e) => {
+                eprintln!("加载 glTF {} 失败：{e}", path.display());
+                false
+            }
+        }
     }
 
     /// 批量注册网格：追加进全局资产库并整体重传 GPU 合并缓冲，返回句柄列表。
