@@ -15,13 +15,17 @@
 //!
 //! 网格资产由 `MeshLibrary` 永久持有，不属于某个场景；场景对象用
 //! [`SceneObjectKind`] 区分类型（网格 / 空分组节点，灯光、相机等后续加入）。
+//! 关卡环境（天空盒 + IBL）跟随场景：加载场景时由 App 层一并上传，
+//! 模组作者按"一个关卡 = 场景 + 环境"来组织资产。
 //! 切换场景由 App 层 API 触发。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use glam::{Mat4, Quat, Vec3};
 use indextree::{Arena, NodeId};
 
+use super::core::environment::Environment;
 use super::core::light::Light;
 use super::core::material::Material;
 use super::core::mesh::MeshKey;
@@ -84,14 +88,54 @@ impl SceneObject {
 }
 
 /// 场景：层级化的物体树（网格资产在全局 `MeshLibrary` 中）。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Scene {
     tree: Arena<SceneObject>,
+    /// 关卡环境（天空盒 + IBL）。`None` = 纯手动布光 / 保持默认黑环境。
+    environment: Option<Arc<Environment>>,
+    /// 环境强度（IBL 系数）：0 = 纯手动布光，1 = 满环境光。
+    environment_intensity: f32,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            tree: Arena::default(),
+            environment: None,
+            // 默认满环境光：不显式设置强度时保持"环境图参与光照"的既有行为。
+            environment_intensity: 1.0,
+        }
+    }
 }
 
 impl Scene {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 给场景绑定环境（天空盒 + IBL）；`load_scene` 时自动上传。
+    ///
+    /// `Arc` 避免环境像素（MB 级）在场景间复制；多个关卡可共享同一环境。
+    pub fn with_environment(mut self, environment: Arc<Environment>) -> Self {
+        self.environment = Some(environment);
+        self
+    }
+
+    /// 场景绑定的环境（无则 `None`）。
+    pub fn environment(&self) -> Option<&Environment> {
+        self.environment.as_deref()
+    }
+
+    /// 设置环境强度（IBL 系数）：0 = 纯手动布光，1 = 满环境光。
+    #[allow(dead_code)] // 公共配置 API：关卡数据构建场景时使用
+    pub fn with_environment_intensity(mut self, intensity: f32) -> Self {
+        self.environment_intensity = intensity;
+        self
+    }
+
+    /// 场景的环境强度（默认 1.0）。
+    pub fn environment_intensity(&self) -> f32 {
+        self.environment_intensity
     }
 
     /// 存活节点总数（含纯分组节点）。
@@ -326,6 +370,12 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 环境强度默认应为 1.0（满环境光），避免手误改成 0 后物体失去环境光。
+    #[test]
+    fn default_environment_intensity_is_full() {
+        assert_eq!(Scene::new().environment_intensity(), 1.0);
+    }
 
     /// 世界变换 = 根 × 父 × 自身（平移链沿祖先累乘）。
     #[test]

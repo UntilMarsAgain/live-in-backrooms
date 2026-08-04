@@ -6,6 +6,14 @@
 
 本仓库不包含美术资产。具体获取方法见 [assets/ASSETS.md](assets/ASSETS.md)。
 
+## 文档
+
+项目说明文档放在 [docs/](docs/)：
+
+- [TODO.md](docs/TODO.md) —— 未实现的功能与方向
+- [optimizations.md](docs/optimizations.md) —— 确认过但暂缓的优化点
+- [BUG.md](docs/BUG.md) —— 已知 bug、根因与当前方案
+
 ## 许可证
 
 - 代码采用 GPL v3 许可，见 [LICENSE](LICENSE)。

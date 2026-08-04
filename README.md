@@ -7,6 +7,14 @@
 This repository does not include art assets. See
 [assets/ASSETS.md](assets/ASSETS.md) for how to obtain them.
 
+## Documentation
+
+Project notes live in [docs/](docs/):
+
+- [TODO.md](docs/TODO.md) — unimplemented features and directions
+- [optimizations.md](docs/optimizations.md) — confirmed-but-deferred optimizations
+- [BUG.md](docs/BUG.md) — known bugs, root causes, and current workarounds
+
 ## License
 
 - Code is licensed under GPL v3. See [LICENSE](LICENSE).

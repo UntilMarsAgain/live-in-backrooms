@@ -83,7 +83,7 @@
   法线贴图（切线空间 → 世界，Gram-Schmidt）、金属度/粗糙度贴图已接入。
 - **环境管线（已落地）**：HDRI → 环境立方体贴图（256²×6）→ 辐照度图（32²×6）
   → 天空盒 + mesh @group(4) 漫反射 IBL；转换按后端分流（Vulkan/Metal GPU
-  compute、GL 回退 CPU，见 BUG.md），`FLOAT32_FILTERABLE` 不支持时回退点采样。
+  compute、GL 回退 CPU，见 [BUG.md](./BUG.md)），`FLOAT32_FILTERABLE` 不支持时回退点采样。
 - **已知简化（Phase 1 的偷懒）**：
   - 只有漫反射 IBL，**没有镜面 IBL**（预过滤环境图 + BRDF LUT）——金属材质
     的环境高光缺失，阴影里的金属仍偏暗；路已铺好（`EnvironmentGpu` 保留环境

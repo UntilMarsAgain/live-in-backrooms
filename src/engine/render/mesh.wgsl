@@ -41,6 +41,14 @@ struct Lights {
     lights: array<LightData, MAX_LIGHTS>,
 }
 
+// 环境参数：`intensity` = IBL 环境光强度（0 = 纯手动布光，1 = 满环境光）。
+struct EnvironmentParams {
+    intensity: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
 const PI: f32 = 3.141592653589793;
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
@@ -53,6 +61,7 @@ const PI: f32 = 3.141592653589793;
 @group(4) @binding(0) var irradiance_tex: texture_cube<f32>;
 @group(4) @binding(1) var environment_tex: texture_cube<f32>;
 @group(4) @binding(2) var environment_sampler: sampler;
+@group(4) @binding(3) var<uniform> environment_params: EnvironmentParams;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -138,7 +147,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Phase 1 暂无镜面 IBL（预过滤环境图 + BRDF LUT），金属材质的环境高光暂缺。
     let irradiance = textureSampleLevel(irradiance_tex, environment_sampler, n, 0.0).rgb;
     let k_d_ambient = (vec3<f32>(1.0) - f0) * (1.0 - metallic);
-    let ambient_diffuse = k_d_ambient * albedo / PI * irradiance;
+    let ambient_diffuse = k_d_ambient * albedo / PI * irradiance * environment_params.intensity;
     var color = ambient_diffuse;
 
     for (var i = 0u; i < lights.count; i = i + 1u) {

@@ -64,17 +64,18 @@ impl App {
     /// 启动场景：优先加载 `BACKROOMS_GLTF` 环境变量指定的 glTF 文件，
     /// 其次尝试 `assets/scene.glb`；都不可用时回退到内置演示场景。
     fn load_startup_scene(&mut self) {
-        // 环境贴图（天空盒 + IBL）：关卡级资产，先于场景加载。
-        self.load_environment();
+        // 环境（天空盒 + IBL）是关卡数据的一部分：解码后绑定到场景上，
+        // 由 `load_scene` 统一上传，而不是单独加载。
+        let environment = self.load_environment();
 
         if let Some(path) = std::env::var_os("BACKROOMS_GLTF") {
-            if self.try_load_gltf(Path::new(&path)) {
+            if self.try_load_gltf(Path::new(&path), environment.as_ref()) {
                 return;
             }
             eprintln!("回退到演示场景");
         } else {
             let default = Path::new("assets/scene.glb");
-            if default.is_file() && self.try_load_gltf(default) {
+            if default.is_file() && self.try_load_gltf(default, environment.as_ref()) {
                 return;
             }
         }
@@ -89,6 +90,9 @@ impl App {
             .pop()
             .expect("注册了 1 张贴图");
         let mut scene = Scene::demo(*triangle, *quad, *cube, Some(checker));
+        if let Some(env) = &environment {
+            scene = scene.with_environment(env.clone());
+        }
         let test_glb = Path::new("src/engine/asset/test.glb");
         if test_glb.is_file() {
             match asset::load_scene(
@@ -115,11 +119,12 @@ impl App {
     }
 
     /// 加载环境贴图：`BACKROOMS_ENV` 环境变量优先，否则尝试 `assets/environments/test.hdr`。
-    fn load_environment(&mut self) {
+    /// 按文件内容自动识别 HDR / LDR（PNG/JPEG 等）。
+    fn load_environment(&mut self) -> Option<Arc<Environment>> {
         let path = std::env::var_os("BACKROOMS_ENV")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("assets/environments/test.hdr"));
-        match Environment::from_hdr_file(&path) {
+        match Environment::from_file(&path) {
             Ok(env) => {
                 eprintln!(
                     "环境贴图 {} 加载成功（{}×{}）",
@@ -127,18 +132,25 @@ impl App {
                     env.width,
                     env.height
                 );
-                self.renderer.set_environment(&env);
+                Some(Arc::new(env))
             }
-            Err(e) => eprintln!("环境贴图加载失败 {}：{e}", path.display()),
+            Err(e) => {
+                eprintln!("环境贴图加载失败 {}：{e}", path.display());
+                None
+            }
         }
     }
 
     /// 尝试从 glTF 文件加载场景；成功返回 `true`，失败打印原因并返回 `false`。
-    fn try_load_gltf(&mut self, path: &Path) -> bool {
+    fn try_load_gltf(&mut self, path: &Path, environment: Option<&Arc<Environment>>) -> bool {
         match asset::load_scene(path, &mut self.mesh_library, &mut self.texture_library) {
             Ok(scene) => {
                 self.renderer.upload_meshes(&self.mesh_library);
                 self.renderer.upload_textures(&self.texture_library);
+                let scene = match environment {
+                    Some(env) => scene.with_environment(env.clone()),
+                    None => scene,
+                };
                 self.load_scene(scene);
                 true
             }
@@ -165,6 +177,12 @@ impl App {
 
     /// App 级别的场景切换 API：渲染器（GPU 数据）与后续游戏逻辑统一从这里换场景。
     pub fn load_scene(&mut self, scene: Scene) {
+        // 环境跟随场景：场景自带环境（天空盒 + IBL）时一并上传。
+        if let Some(env) = scene.environment() {
+            self.renderer.set_environment(env);
+            self.renderer
+                .set_environment_intensity(scene.environment_intensity());
+        }
         self.renderer.load_scene(&scene);
         self.scene = scene;
     }
