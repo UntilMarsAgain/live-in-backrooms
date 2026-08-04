@@ -1,7 +1,7 @@
 //! 网格模块：CPU 侧的顶点与索引（面）数据。
 //!
 //! 目前只保存静态几何数据，GPU 缓冲区的创建在 `render` 模块完成。
-//! 后续可以在这里扩展法线、UV 等顶点属性。
+//! 顶点属性对齐 glTF 2.0 的常用语义：POSITION / NORMAL / TEXCOORD_0 / COLOR_0。
 //!
 //! [`MeshLibrary`] 是全局网格资产库：只追加、永久持有、跨场景共享。
 //! 句柄是库里的稠密编号（不删除因此稳定），GPU 侧把全部网格合并成
@@ -10,13 +10,17 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::{VertexAttribute, VertexBufferLayout, VertexFormat, VertexStepMode};
 
-/// 顶点：位置 + 颜色。
+/// 顶点：位置 + 法线 + UV + 顶点色。
 ///
-/// 本阶段没有物体变换，位置即世界坐标。
+/// 对应 glTF 2.0 的 POSITION / NORMAL / TEXCOORD_0 / COLOR_0 四个属性；
+/// 加载器会把 glTF 的各种存储格式统一转换成这里的 f32 布局。
+/// 后续加入切线（TANGENT）和蒙皮（JOINTS_0/WEIGHTS_0）时再扩展。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub tex_coord: [f32; 2],
     pub color: [f32; 3],
 }
 
@@ -25,7 +29,7 @@ impl Vertex {
     ///
     /// 与顶点数据绑定，放在这里而不放在 render 模块，方便其他渲染路径复用。
     pub fn layout() -> VertexBufferLayout<'static> {
-        const ATTRIBUTES: [VertexAttribute; 2] = [
+        const ATTRIBUTES: [VertexAttribute; 4] = [
             VertexAttribute {
                 format: VertexFormat::Float32x3,
                 offset: 0,
@@ -35,6 +39,16 @@ impl Vertex {
                 format: VertexFormat::Float32x3,
                 offset: 12,
                 shader_location: 1,
+            },
+            VertexAttribute {
+                format: VertexFormat::Float32x2,
+                offset: 24,
+                shader_location: 2,
+            },
+            VertexAttribute {
+                format: VertexFormat::Float32x3,
+                offset: 32,
+                shader_location: 3,
             },
         ];
         VertexBufferLayout {
@@ -73,14 +87,20 @@ impl Mesh {
             vec![
                 Vertex {
                     position: [-0.5, -0.5, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [0.0, 0.0],
                     color: [1.0, 0.0, 0.0],
                 },
                 Vertex {
                     position: [0.5, -0.5, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [1.0, 0.0],
                     color: [0.0, 1.0, 0.0],
                 },
                 Vertex {
                     position: [0.0, 0.5, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [0.5, 1.0],
                     color: [0.0, 0.0, 1.0],
                 },
             ],
@@ -96,18 +116,26 @@ impl Mesh {
             vec![
                 Vertex {
                     position: [-0.5, -0.5, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [0.0, 0.0],
                     color: [0.9, 0.85, 0.6],
                 },
                 Vertex {
                     position: [0.5, -0.5, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [1.0, 0.0],
                     color: [0.9, 0.85, 0.6],
                 },
                 Vertex {
                     position: [-0.5, 0.5, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [0.0, 1.0],
                     color: [0.9, 0.85, 0.6],
                 },
                 Vertex {
                     position: [0.5, 0.5, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [1.0, 1.0],
                     color: [0.9, 0.85, 0.6],
                 },
             ],
@@ -123,11 +151,14 @@ impl Mesh {
         let s = 0.5;
         let mut vertices = Vec::with_capacity(24);
         let mut indices = Vec::with_capacity(36);
-        let mut push_face = |corners: [(f32, f32, f32); 4], color: [f32; 3]| {
+        let mut push_face = |corners: [(f32, f32, f32); 4], normal: [f32; 3], color: [f32; 3]| {
             let base = vertices.len() as u32;
-            for (x, y, z) in corners {
+            let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+            for (i, (x, y, z)) in corners.into_iter().enumerate() {
                 vertices.push(Vertex {
                     position: [x, y, z],
+                    normal,
+                    tex_coord: uvs[i],
                     color,
                 });
             }
@@ -145,26 +176,32 @@ impl Mesh {
         // 六面（从外侧看逆时针）：+Z 红、-Z 绿、+X 蓝、-X 黄、+Y 青、-Y 品红。
         push_face(
             [(-s, -s, s), (s, -s, s), (s, s, s), (-s, s, s)],
+            [0.0, 0.0, 1.0],
             [1.0, 0.0, 0.0],
         );
         push_face(
             [(-s, s, -s), (s, s, -s), (s, -s, -s), (-s, -s, -s)],
+            [0.0, 0.0, -1.0],
             [0.0, 1.0, 0.0],
         );
         push_face(
             [(s, -s, -s), (s, s, -s), (s, s, s), (s, -s, s)],
+            [1.0, 0.0, 0.0],
             [0.0, 0.0, 1.0],
         );
         push_face(
             [(-s, -s, s), (-s, s, s), (-s, s, -s), (-s, -s, -s)],
+            [-1.0, 0.0, 0.0],
             [1.0, 1.0, 0.0],
         );
         push_face(
             [(-s, s, s), (s, s, s), (s, s, -s), (-s, s, -s)],
+            [0.0, 1.0, 0.0],
             [0.0, 1.0, 1.0],
         );
         push_face(
             [(-s, -s, -s), (s, -s, -s), (s, -s, s), (-s, -s, s)],
+            [0.0, -1.0, 0.0],
             [1.0, 0.0, 1.0],
         );
 
