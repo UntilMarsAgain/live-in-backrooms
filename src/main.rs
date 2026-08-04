@@ -2,6 +2,7 @@ mod app;
 mod asset;
 mod camera;
 mod controller;
+mod light;
 mod mesh;
 mod render;
 mod scene;

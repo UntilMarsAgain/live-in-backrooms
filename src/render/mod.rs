@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
+use glam::{Mat3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
@@ -18,10 +19,45 @@ use winit::window::Window;
 
 use crate::camera::{Camera, CameraUniform};
 use crate::mesh::{MeshLibrary, Vertex};
-use crate::scene::Scene;
+use crate::scene::{Scene, SceneObjectKind};
 
 /// 窗口的显示句柄，用于创建 wgpu 实例。
 pub type DisplayHandle = Box<dyn wgpu::wgt::WgpuHasDisplayHandle>;
+
+/// 从场景收集方向光（世界方向由物体的世界旋转决定）。
+///
+/// 在 `load_scene` 时调用一次：静态光源不需要每帧重新推导。
+/// 将来出现会动的光源（移动/闪烁/玩家手电）时，再从这里加刷新入口。
+fn collect_lights(scene: &Scene) -> LightsUniform {
+    let mut light_uniform = LightsUniform {
+        count: 0,
+        _pad: [0; 3],
+        lights: [DirectionalLightUniform {
+            direction: [0.0; 3],
+            intensity: 0.0,
+            color: [0.0; 3],
+            _pad: 0.0,
+        }; MAX_LIGHTS],
+    };
+    for (key, object) in scene.objects() {
+        if light_uniform.count as usize >= MAX_LIGHTS {
+            break;
+        }
+        let SceneObjectKind::Light(light) = object.kind else {
+            continue;
+        };
+        let world = scene
+            .world_transform(key)
+            .expect("objects() 只产出存活节点");
+        let (_, rotation, _) = world.to_scale_rotation_translation();
+        let entry = &mut light_uniform.lights[light_uniform.count as usize];
+        entry.direction = (rotation * Vec3::NEG_Z).to_array();
+        entry.intensity = light.intensity;
+        entry.color = light.color.to_array();
+        light_uniform.count += 1;
+    }
+    light_uniform
+}
 
 /// 初始背景色：暗黄绿的"后室"氛围色，后续可改为可配置。
 pub const CLEAR_COLOR: Color = Color {
@@ -30,6 +66,40 @@ pub const CLEAR_COLOR: Color = Color {
     b: 0.05,
     a: 1.0,
 };
+
+/// 最多同时支持的方向光数量（与 WGSL 中 `MAX_LIGHTS` 一致）。
+const MAX_LIGHTS: usize = 8;
+
+/// 每物体 uniform：模型矩阵 + 法线矩阵（逆转置，正确处理非等比缩放）。
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ObjectData {
+    model: Mat4,
+    /// 法线矩阵（WGSL `mat3x3<f32>` 布局：每列 16 字节，含填充）。
+    normal_matrix: [[f32; 4]; 3],
+}
+
+/// 单个方向光在 uniform 缓冲里的布局（32 字节，std140 兼容）。
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DirectionalLightUniform {
+    /// 世界空间方向：从表面指向光源。
+    direction: [f32; 3],
+    intensity: f32,
+    color: [f32; 3],
+    _pad: f32,
+}
+
+/// 灯光 uniform：数量 + 固定大小数组。
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LightsUniform {
+    count: u32,
+    _pad: [u32; 3],
+    lights: [DirectionalLightUniform; MAX_LIGHTS],
+}
+
+const _: () = assert!(std::mem::size_of::<LightsUniform>() == 16 + 32 * MAX_LIGHTS);
 
 /// wgpu 渲染器：持有 surface / device / queue，负责清屏渲染。
 pub struct Renderer {
@@ -47,6 +117,9 @@ pub struct Renderer {
     object_bind_group: wgpu::BindGroup,
     /// 物体数据步长：每个物体的矩阵在缓冲中的间隔（满足设备对齐要求）。
     object_stride: u32,
+    /// 灯光 uniform（方向光数组，场景级数据）。
+    light_buffer: wgpu::Buffer,
+    light_bind_group: wgpu::BindGroup,
     /// 网格渲染管线。
     pipeline: wgpu::RenderPipeline,
     /// 深度缓冲（纹理 + 视图），随窗口尺寸重建。
@@ -171,17 +244,17 @@ impl Renderer {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(64),
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<ObjectData>() as u64),
                     },
                     count: None,
                 }],
             });
 
-        // 物体矩阵至少 64 字节，且动态偏移必须是设备对齐值的整数倍。
+        // 物体数据至少一个 ObjectData 大小，且动态偏移必须是设备对齐值的整数倍。
         let object_stride = device
             .limits()
             .min_uniform_buffer_offset_alignment
-            .max(64);
+            .max(std::mem::size_of::<ObjectData>() as u32);
         let object_data_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("object data buffer"),
             size: object_stride as u64,
@@ -198,12 +271,42 @@ impl Renderer {
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &object_data_buffer,
                     offset: 0,
-                    size: wgpu::BufferSize::new(64),
+                    size: wgpu::BufferSize::new(std::mem::size_of::<ObjectData>() as u64),
                 }),
             }],
         });
 
-        // 6. 渲染管线：网格 + 相机/物体 uniform。
+        // 5.5 灯光 uniform：方向光数组（场景级，每帧写入）。
+        let light_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("light bind group layout"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let light_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("light uniform buffer"),
+            size: std::mem::size_of::<LightsUniform>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let light_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("light bind group"),
+            layout: &light_bind_group_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: light_buffer.as_entire_binding(),
+            }],
+        });
+
+        // 6. 渲染管线：网格 + 相机/物体/灯光 uniform。
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("mesh shader"),
             source: ShaderSource::Wgsl(include_str!("mesh.wgsl").into()),
@@ -214,6 +317,7 @@ impl Renderer {
             bind_group_layouts: &[
                 Some(&camera_bind_group_layout),
                 Some(&object_bind_group_layout),
+                Some(&light_bind_group_layout),
             ],
             immediate_size: 0,
         });
@@ -269,6 +373,8 @@ impl Renderer {
             object_data_buffer,
             object_bind_group,
             object_stride: object_stride as u32,
+            light_buffer,
+            light_bind_group,
             pipeline,
             depth_texture,
             depth_view,
@@ -329,7 +435,7 @@ impl Renderer {
             .device
             .limits()
             .min_uniform_buffer_offset_alignment
-            .max(64);
+            .max(std::mem::size_of::<ObjectData>() as u32);
         let object_data_buffer = self.device.create_buffer(&BufferDescriptor {
             label: Some("object data buffer"),
             size: (scene.object_count() as u64).max(1) * stride as u64,
@@ -344,7 +450,7 @@ impl Renderer {
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &object_data_buffer,
                     offset: 0,
-                    size: wgpu::BufferSize::new(64),
+                    size: wgpu::BufferSize::new(std::mem::size_of::<ObjectData>() as u64),
                 }),
             }],
         });
@@ -352,6 +458,11 @@ impl Renderer {
         self.object_data_buffer = object_data_buffer;
         self.object_bind_group = object_bind_group;
         self.object_stride = stride as u32;
+
+        // 灯光是静态场景数据：加载时收集一次并上传，渲染时只绑定。
+        let light_uniform = collect_lights(scene);
+        self.queue
+            .write_buffer(&self.light_buffer, 0, bytemuck::bytes_of(&light_uniform));
     }
 
     /// 窗口尺寸变化时重建交换链。
@@ -374,16 +485,29 @@ impl Renderer {
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
 
-        // 每帧把物体世界矩阵写入动态 uniform 缓冲（步长 = object_stride）。
+        // 每帧把物体世界矩阵 + 法线矩阵写入动态 uniform 缓冲（步长 = object_stride）。
         if scene.object_count() > 0 {
             let stride = self.object_stride as usize;
+            let entry_size = std::mem::size_of::<ObjectData>();
             let mut bytes = vec![0u8; scene.object_count() * stride];
             for (i, (key, _)) in scene.objects().enumerate() {
-                // 层级场景：世界矩阵由 Scene 沿祖先链累乘得到。
                 let model = scene
                     .world_transform(key)
                     .expect("objects() 只产出存活节点，world_transform 必然有值");
-                bytes[i * stride..i * stride + 64].copy_from_slice(bytemuck::bytes_of(&model));
+                // 法线矩阵 = 模型上三角的逆转置，非等比缩放下法线方向才正确。
+                let m = Mat3::from_mat4(model).inverse().transpose();
+                let cols = m.to_cols_array();
+                let normal_matrix = [
+                    [cols[0], cols[1], cols[2], 0.0],
+                    [cols[3], cols[4], cols[5], 0.0],
+                    [cols[6], cols[7], cols[8], 0.0],
+                ];
+                let data = ObjectData {
+                    model,
+                    normal_matrix,
+                };
+                bytes[i * stride..i * stride + entry_size]
+                    .copy_from_slice(bytemuck::bytes_of(&data));
             }
             self.queue.write_buffer(&self.object_data_buffer, 0, &bytes);
         }
@@ -440,6 +564,7 @@ impl Renderer {
 
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_bind_group(2, &self.light_bind_group, &[]);
                 pass.set_vertex_buffer(0, mesh_buffer.vertex_buffer.slice(..));
                 pass.set_index_buffer(
                     mesh_buffer.index_buffer.slice(..),

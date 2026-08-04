@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use glam::{Mat4, Quat, Vec3};
 use indextree::{Arena, NodeId};
 
+use crate::light::Light;
 use crate::mesh::MeshKey;
 use crate::transform::Transform;
 
@@ -32,12 +33,14 @@ pub type ObjectKey = NodeId;
 ///
 /// 灯光、相机等系统落地后，作为新的变体挂到这里；枚举让所有处理分支
 /// （渲染、剔除、灯光收集等）都能被编译器强制检查。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SceneObjectKind {
     /// 纯分组节点：只承载子节点，本身不可见。
     Empty,
     /// 引用全局资产库里的网格。
     Mesh(MeshKey),
+    /// 方向光：方向由物体旋转决定（局部 -Z 指向场景）。
+    Light(Light),
 }
 
 /// 场景节点数据：局部变换 + 类型。
@@ -61,7 +64,7 @@ impl SceneObject {
     pub fn mesh_key(&self) -> Option<MeshKey> {
         match self.kind {
             SceneObjectKind::Mesh(key) => Some(key),
-            SceneObjectKind::Empty => None,
+            SceneObjectKind::Empty | SceneObjectKind::Light(_) => None,
         }
     }
 }
@@ -221,6 +224,16 @@ impl Scene {
     /// 用来验证层级变换（world_transform）工作正常。
     pub fn demo(triangle: MeshKey, quad: MeshKey, cube: MeshKey) -> Self {
         let mut scene = Self::new();
+        // 方向光：从右上前方照向场景。
+        let light_direction = Vec3::new(0.5, 0.6, 0.6).normalize();
+        scene.add_object(SceneObject::new(
+            SceneObjectKind::Light(Light::WHITE),
+            Transform::new(
+                Vec3::ZERO,
+                Quat::from_rotation_arc(Vec3::NEG_Z, light_direction),
+                Vec3::ONE,
+            ),
+        ));
         scene.add_object(SceneObject::new(
             SceneObjectKind::Mesh(triangle),
             Transform::IDENTITY,
@@ -268,5 +281,59 @@ impl Scene {
             ),
         );
         scene
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 世界变换 = 根 × 父 × 自身（平移链沿祖先累乘）。
+    #[test]
+    fn world_transform_multiplies_parent_chain() {
+        let mut scene = Scene::new();
+        let root = scene.add_object(SceneObject::new(
+            SceneObjectKind::Empty,
+            Transform::new(Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE),
+        ));
+        let child = scene
+            .attach(
+                root,
+                SceneObject::new(
+                    SceneObjectKind::Empty,
+                    Transform::new(Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY, Vec3::ONE),
+                ),
+            )
+            .expect("父节点存活");
+
+        let world = scene.world_transform(child).unwrap();
+        // 子节点原点的世界位置 = (1, 2, 0)
+        assert_eq!(world.transform_point3(Vec3::ZERO), Vec3::new(1.0, 2.0, 0.0));
+    }
+
+    /// 子节点跟随父节点旋转：父绕 Y 转 90°，子局部 +X 方向点应落到 ±Z 轴上。
+    #[test]
+    fn world_transform_follows_parent_rotation() {
+        let mut scene = Scene::new();
+        let root = scene.add_object(SceneObject::new(
+            SceneObjectKind::Empty,
+            Transform::new(Vec3::ZERO, Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::ONE),
+        ));
+        let child = scene
+            .attach(
+                root,
+                SceneObject::new(
+                    SceneObjectKind::Empty,
+                    Transform::new(Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE),
+                ),
+            )
+            .expect("父节点存活");
+
+        let world = scene.world_transform(child).unwrap();
+        let p = world.transform_point3(Vec3::ZERO);
+        // 局部 (1,0,0) 旋转 90° 后落在 (0,0,±1)
+        assert!(p.z.abs() > 0.99, "p = {p:?}");
+        assert!(p.x.abs() < 0.01, "p = {p:?}");
+        assert!(p.y.abs() < 0.01, "p = {p:?}");
     }
 }
