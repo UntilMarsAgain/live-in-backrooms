@@ -17,6 +17,7 @@ use crate::controller::FreeCameraController;
 use crate::mesh::{Mesh, MeshKey, MeshLibrary};
 use crate::render::{DisplayHandle, Renderer, RendererError};
 use crate::scene::Scene;
+use crate::texture::{Texture, TextureKey, TextureLibrary};
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
 pub struct App {
@@ -27,6 +28,8 @@ pub struct App {
     last_frame: Instant,
     /// 全局网格资产库（永久驻留，跨场景共享）。
     mesh_library: MeshLibrary,
+    /// 全局纹理资产库（永久驻留，跨场景共享）。
+    texture_library: TextureLibrary,
     scene: Scene,
 }
 
@@ -53,6 +56,7 @@ impl App {
             controller,
             last_frame: Instant::now(),
             mesh_library: MeshLibrary::new(),
+            texture_library: TextureLibrary::new(),
             scene: Scene::default(),
         };
         app.load_startup_scene();
@@ -73,23 +77,35 @@ impl App {
                 return;
             }
         }
-        // 回退：内置演示场景；仓库内的 src/asset/test.glb 作为代码资产一并并入。
+        // 回退：内置演示场景；仓库内的 src/asset/test2.glb（全套 PBR 样例）一并并入。
         let keys = self.register_meshes(vec![Mesh::triangle(), Mesh::quad(), Mesh::cube()]);
         let [triangle, quad, cube] = keys.as_slice() else {
             unreachable!("demo 注册了 3 个网格")
         };
-        let mut scene = Scene::demo(*triangle, *quad, *cube);
+        // 演示贴图：棋盘格贴到立方体上，验证纹理采样。
+        let checker = self
+            .register_textures(vec![Texture::checkerboard(64, 8)])
+            .pop()
+            .expect("注册了 1 张贴图");
+        let mut scene = Scene::demo(*triangle, *quad, *cube, Some(checker));
         let test_glb = Path::new("src/asset/test.glb");
         if test_glb.is_file() {
-            match asset::load_scene(test_glb, &mut self.mesh_library) {
+            match asset::load_scene(
+                test_glb,
+                &mut self.mesh_library,
+                &mut self.texture_library,
+            ) {
                 Ok(gltf_scene) => {
-                    // 把测试模型挪到演示物体右前方，避免和原点处的三角形重叠。
+                    // 把测试模型放大 5 倍（等比），并挪到演示物体右前方，
+                    // 避免和原点处的三角形重叠。
                     for key in scene.merge(&gltf_scene) {
                         if let Some(object) = scene.object_mut(key) {
+                            object.transform.scale *= 5.0;
                             object.transform.position += glam::Vec3::new(1.8, 0.0, -1.2);
                         }
                     }
                     self.renderer.upload_meshes(&self.mesh_library);
+                    self.renderer.upload_textures(&self.texture_library);
                 }
                 Err(e) => eprintln!("加载 {} 失败：{e}", test_glb.display()),
             }
@@ -99,9 +115,10 @@ impl App {
 
     /// 尝试从 glTF 文件加载场景；成功返回 `true`，失败打印原因并返回 `false`。
     fn try_load_gltf(&mut self, path: &Path) -> bool {
-        match asset::load_scene(path, &mut self.mesh_library) {
+        match asset::load_scene(path, &mut self.mesh_library, &mut self.texture_library) {
             Ok(scene) => {
                 self.renderer.upload_meshes(&self.mesh_library);
+                self.renderer.upload_textures(&self.texture_library);
                 self.load_scene(scene);
                 true
             }
@@ -116,6 +133,13 @@ impl App {
     pub fn register_meshes(&mut self, meshes: Vec<Mesh>) -> Vec<MeshKey> {
         let keys = self.mesh_library.register_many(meshes);
         self.renderer.upload_meshes(&self.mesh_library);
+        keys
+    }
+
+    /// 批量注册贴图：追加进全局纹理库并增量上传 GPU 纹理，返回句柄列表。
+    pub fn register_textures(&mut self, textures: Vec<Texture>) -> Vec<TextureKey> {
+        let keys = self.texture_library.register_many(textures);
+        self.renderer.upload_textures(&self.texture_library);
         keys
     }
 

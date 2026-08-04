@@ -20,6 +20,7 @@ use winit::window::Window;
 use crate::camera::{Camera, CameraUniform};
 use crate::mesh::{MeshLibrary, Vertex};
 use crate::scene::{Scene, SceneObjectKind};
+use crate::texture::{Texture, TextureLibrary};
 
 /// 窗口的显示句柄，用于创建 wgpu 实例。
 pub type DisplayHandle = Box<dyn wgpu::wgt::WgpuHasDisplayHandle>;
@@ -77,6 +78,8 @@ struct ObjectData {
     model: Mat4,
     /// 法线矩阵（WGSL `mat3x3<f32>` 布局：每列 16 字节，含填充）。
     normal_matrix: [[f32; 4]; 3],
+    /// 材质基础色因子（RGBA）。
+    base_color: [f32; 4],
 }
 
 /// 单个方向光在 uniform 缓冲里的布局（32 字节，std140 兼容）。
@@ -120,6 +123,15 @@ pub struct Renderer {
     /// 灯光 uniform（方向光数组，场景级数据）。
     light_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
+    /// 纹理（材质基础色）绑定组相关。
+    texture_bind_group_layout: wgpu::BindGroupLayout,
+    texture_sampler: wgpu::Sampler,
+    /// 按 [`TextureKey`](crate::texture::TextureKey) 稠密编号索引的绑定组。
+    texture_bind_groups: Vec<wgpu::BindGroup>,
+    /// 无贴图材质的默认 1×1 白纹理绑定组。
+    default_texture_bind_group: wgpu::BindGroup,
+    /// 已上传的纹理库版本。
+    uploaded_texture_version: u64,
     /// 网格渲染管线。
     pipeline: wgpu::RenderPipeline,
     /// 深度缓冲（纹理 + 视图），随窗口尺寸重建。
@@ -168,6 +180,49 @@ fn create_depth_texture(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
+}
+
+/// 把 CPU 侧 RGBA8 纹理上传为 GPU 纹理并返回视图。
+///
+/// `write_texture` 没有行字节 256 对齐的要求（那是 `copy_buffer_to_texture` 的限制），
+/// 因此可以直接整块上传。
+fn create_texture_view(device: &wgpu::Device, queue: &wgpu::Queue, texture: &Texture) -> wgpu::TextureView {
+    let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("texture"),
+        size: wgpu::Extent3d {
+            width: texture.width,
+            height: texture.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &gpu_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &texture.rgba8,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(texture.width * 4),
+            rows_per_image: Some(texture.height),
+        },
+        wgpu::Extent3d {
+            width: texture.width,
+            height: texture.height,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    gpu_texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 impl Renderer {
@@ -240,7 +295,8 @@ impl Renderer {
                 label: Some("object bind group layout"),
                 entries: &[BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: ShaderStages::VERTEX,
+                    // 顶点用模型/法线矩阵，片元用 base_color 因子。
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: true,
@@ -306,7 +362,57 @@ impl Renderer {
             }],
         });
 
-        // 6. 渲染管线：网格 + 相机/物体/灯光 uniform。
+        // 5.6 纹理绑定组：基础色贴图 + 采样器（材质级，@group(3)）。
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("texture bind group layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("texture sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        // 默认 1×1 白纹理：无贴图材质直接采样它，着色器无需分支。
+        let default_texture_view = create_texture_view(&device, &queue, &Texture::white());
+        let default_texture_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("default texture bind group"),
+            layout: &texture_bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&default_texture_view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&texture_sampler),
+                },
+            ],
+        });
+
+        // 6. 渲染管线：网格 + 相机/物体/灯光/纹理。
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("mesh shader"),
             source: ShaderSource::Wgsl(include_str!("mesh.wgsl").into()),
@@ -318,6 +424,7 @@ impl Renderer {
                 Some(&camera_bind_group_layout),
                 Some(&object_bind_group_layout),
                 Some(&light_bind_group_layout),
+                Some(&texture_bind_group_layout),
             ],
             immediate_size: 0,
         });
@@ -375,6 +482,11 @@ impl Renderer {
             object_stride: object_stride as u32,
             light_buffer,
             light_bind_group,
+            texture_bind_group_layout,
+            texture_sampler,
+            texture_bind_groups: Vec::new(),
+            default_texture_bind_group,
+            uploaded_texture_version: 0,
             pipeline,
             depth_texture,
             depth_view,
@@ -426,6 +538,32 @@ impl Renderer {
             mesh_ranges,
         });
         self.mesh_uploaded_version = library.version();
+    }
+
+    /// 把纹理库中新增的贴图上传为 GPU 纹理并建好绑定组（只追加，增量上传）。
+    pub fn upload_textures(&mut self, library: &TextureLibrary) {
+        if library.version() == self.uploaded_texture_version {
+            return;
+        }
+        for texture in library.textures().iter().skip(self.texture_bind_groups.len()) {
+            let view = create_texture_view(&self.device, &self.queue, texture);
+            let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                label: Some("texture bind group"),
+                layout: &self.texture_bind_group_layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.texture_sampler),
+                    },
+                ],
+            });
+            self.texture_bind_groups.push(bind_group);
+        }
+        self.uploaded_texture_version = library.version();
     }
 
     /// 加载场景：按物体数量重建动态 uniform 缓冲（网格资产已在 `upload_meshes` 中常驻）。
@@ -490,7 +628,7 @@ impl Renderer {
             let stride = self.object_stride as usize;
             let entry_size = std::mem::size_of::<ObjectData>();
             let mut bytes = vec![0u8; scene.object_count() * stride];
-            for (i, (key, _)) in scene.objects().enumerate() {
+            for (i, (key, object)) in scene.objects().enumerate() {
                 let model = scene
                     .world_transform(key)
                     .expect("objects() 只产出存活节点，world_transform 必然有值");
@@ -505,6 +643,7 @@ impl Renderer {
                 let data = ObjectData {
                     model,
                     normal_matrix,
+                    base_color: object.material.base_color,
                 };
                 bytes[i * stride..i * stride + entry_size]
                     .copy_from_slice(bytemuck::bytes_of(&data));
@@ -577,7 +716,14 @@ impl Renderer {
                     let Some(mesh_key) = object.mesh_key() else { continue; };
                     let range = mesh_buffer.mesh_ranges[mesh_key.index()];
                     let offset = (i * self.object_stride as usize) as u32;
+                    // 材质基础色贴图：无贴图时用默认白纹理。
+                    let texture_group = object
+                        .material
+                        .base_color_texture
+                        .map(|key| &self.texture_bind_groups[key.index()])
+                        .unwrap_or(&self.default_texture_bind_group);
                     pass.set_bind_group(1, &self.object_bind_group, &[offset]);
+                    pass.set_bind_group(3, texture_group, &[]);
                     pass.draw_indexed(
                         range.index_offset..range.index_offset + range.index_count,
                         0,

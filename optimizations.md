@@ -56,15 +56,18 @@
 - **阴影**：从灯光视角渲染深度（独立 pass，不是"灯光的着色器"），跟材质着色器并存。
 - **触发时机**：视觉效果需要时；PBR 不依赖其他结构改动。
 
-## 纹理与 glTF 材质
+## 纹理：基础色已接入，PBR 通道待补
 
-- **现状**：顶点有 `tex_coord`/`normal`，但着色器不采样；glTF 加载器忽略
-  `images`、材质（`baseColorFactor`/`baseColorTexture`）、动画、蒙皮。
-- **已铺好的路**：`Vertex::layout()` 显式 offset，扩展属性不动管线；`Vertex` 已有
-  `tex_coord` 字段。
-- **要做**：图片解码（image/png crate）+ wgpu 纹理/采样器 + 绑定组 + 着色器采样；
-  注意 UV 的 v 翻转约定（OBJ/glTF 与 wgpu 采样原点差异）要定一个。
-- **法线贴图**：需要 TANGENT（glTF 通常自带或要按 MikkTSpace 算）。
+- **现状**：`TextureLibrary`（只追加、版本号驱动增量上传）+ `Material`
+  （base_color 因子 + 贴图）已落地；glTF 的 `baseColorTexture`/`baseColorFactor`
+  加载并采样，无贴图材质用 1×1 白纹理兜底；`write_texture` 整块上传
+  （无 256 行对齐要求，那是 `copy_buffer_to_texture` 的限制）。
+- **待补通道**：金属度/粗糙度（glTF metallic-roughness：B=粗糙度、G=金属度）、
+  法线（需要 TANGENT，glTF 自带或按 MikkTSpace 算）、自发光、AO——都是
+  "多一个采样器 + 多一个绑定"的同样模式，但要等 PBR BRDF（GGX/菲涅尔）
+  落地才能显示效果（见"着色器"一条）。
+- **待办**：mipmap 生成（现在是 1 级，远处纹理会闪烁）、纹理驻留/卸载
+  （多 Level 后）、UV 的 v 翻转约定验证（glTF 与 wgpu 采样原点实测为准）。
 
 ## 半透明物体
 

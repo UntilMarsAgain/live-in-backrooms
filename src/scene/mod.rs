@@ -23,7 +23,9 @@ use glam::{Mat4, Quat, Vec3};
 use indextree::{Arena, NodeId};
 
 use crate::light::Light;
+use crate::material::Material;
 use crate::mesh::MeshKey;
+use crate::texture::TextureKey;
 use crate::transform::Transform;
 
 /// 场景节点句柄：indextree 的节点 ID（带代际，删除后不失效复用）。
@@ -52,12 +54,24 @@ pub struct SceneObject {
     pub transform: Transform,
     /// 场景对象的类型。
     pub kind: SceneObjectKind,
+    /// 表面材质（仅 `Mesh` 类型生效）。
+    pub material: Material,
 }
 
 impl SceneObject {
     /// 新建一个节点。要挂到树上用 [`Scene::attach`] 或 [`Scene::reparent`]。
     pub fn new(kind: SceneObjectKind, transform: Transform) -> Self {
-        Self { transform, kind }
+        Self {
+            transform,
+            kind,
+            material: Material::default(),
+        }
+    }
+
+    /// 设置材质（构建时链式调用）。
+    pub fn with_material(mut self, material: Material) -> Self {
+        self.material = material;
+        self
     }
 
     /// 若该对象是网格，返回其 `MeshKey`；否则返回 `None`。
@@ -222,7 +236,12 @@ impl Scene {
     ///
     /// 最后一个物体故意挂在立方体下：小三角形会跟随立方体一起旋转，
     /// 用来验证层级变换（world_transform）工作正常。
-    pub fn demo(triangle: MeshKey, quad: MeshKey, cube: MeshKey) -> Self {
+    pub fn demo(
+        triangle: MeshKey,
+        quad: MeshKey,
+        cube: MeshKey,
+        cube_texture: Option<TextureKey>,
+    ) -> Self {
         let mut scene = Self::new();
         // 方向光：从右上前方照向场景。
         let light_direction = Vec3::new(0.5, 0.6, 0.6).normalize();
@@ -271,7 +290,11 @@ impl Scene {
                 Quat::from_rotation_x(0.35) * Quat::from_rotation_y(0.6),
                 Vec3::splat(1.3),
             ),
-        ));
+        )
+        .with_material(Material {
+            base_color: [1.0; 4],
+            base_color_texture: cube_texture,
+        }));
         // 小三角形挂在立方体正上方，跟随立方体一起旋转（验证层级）。
         let _ = scene.attach(
             cube,

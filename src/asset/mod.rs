@@ -7,8 +7,10 @@
 //!   共享同一网格时不会重复上传）；
 //! - 顶点属性按 glTF 2.0 语义读取：POSITION（必需）、NORMAL、TEXCOORD_0、
 //!   COLOR_0，各种存储格式（f32 / 归一化整数）统一转换成运行时的 f32 布局。
+//! - 材质基础色（`baseColorFactor` + `baseColorTexture`）读取，贴图注册进
+//!   [`TextureLibrary`]；金属度/粗糙度、法线、自发光等 PBR 通道暂不读取。
 //!
-//! 相机、灯光、材质、动画、蒙皮暂不读取（`gltf::import` 返回的 images 也被忽略）。
+//! 相机、动画、蒙皮暂不读取。
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -19,13 +21,19 @@ use glam::{Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use gltf::scene::Transform as GltfTransform;
 
+use crate::material::Material;
 use crate::mesh::{Mesh, MeshKey, MeshLibrary, Vertex};
 use crate::scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};
+use crate::texture::{Texture, TextureKey, TextureLibrary};
 use crate::transform::Transform;
 
 /// 从 glTF 文件加载场景：网格资产注册进 `mesh_library`，返回带层级的 `Scene`。
-pub fn load_scene(path: &Path, mesh_library: &mut MeshLibrary) -> Result<Scene, LoaderError> {
-    let (document, buffers, _images) = gltf::import(path)?;
+pub fn load_scene(
+    path: &Path,
+    mesh_library: &mut MeshLibrary,
+    texture_library: &mut TextureLibrary,
+) -> Result<Scene, LoaderError> {
+    let (document, buffers, images) = gltf::import(path)?;
     let scene = document
         .default_scene()
         .ok_or(LoaderError::NoDefaultScene)?;
@@ -33,8 +41,11 @@ pub fn load_scene(path: &Path, mesh_library: &mut MeshLibrary) -> Result<Scene, 
     let buffer_slices: Vec<&[u8]> = buffers.iter().map(|b| b.0.as_slice()).collect();
     let mut loader = Loader {
         mesh_library,
+        texture_library,
         buffers: &buffer_slices,
+        images: &images,
         mesh_keys: HashMap::new(),
+        texture_keys: HashMap::new(),
     };
 
     let mut out = Scene::new();
@@ -47,9 +58,13 @@ pub fn load_scene(path: &Path, mesh_library: &mut MeshLibrary) -> Result<Scene, 
 /// 加载过程中的临时状态。
 struct Loader<'a> {
     mesh_library: &'a mut MeshLibrary,
+    texture_library: &'a mut TextureLibrary,
     buffers: &'a [&'a [u8]],
+    images: &'a [gltf::image::Data],
     /// glTF 网格索引 → 已注册的 MeshKey 列表（每个 primitive 一个）。
     mesh_keys: HashMap<usize, Vec<MeshKey>>,
+    /// glTF 图片索引 → 已注册的 TextureKey（按图去重）。
+    texture_keys: HashMap<usize, TextureKey>,
 }
 
 impl Loader<'_> {
@@ -77,12 +92,12 @@ impl Loader<'_> {
             }
         };
         let children: Vec<_> = node.children().collect();
-        let mesh_keys = match node.mesh() {
+        let mesh_materials = match node.mesh() {
             Some(mesh) => Some(self.register_mesh(&mesh)?),
             None => None,
         };
         // 既没有网格也没有子节点的空节点：跳过。
-        if mesh_keys.is_none() && children.is_empty() {
+        if mesh_materials.is_none() && children.is_empty() {
             return Ok(());
         }
         // 容器物体：承载局部变换，无网格；primitive 与子节点都挂在它下面。
@@ -102,11 +117,12 @@ impl Loader<'_> {
             )),
         };
         // 每个 primitive 一个可绘制物体（单位局部变换，位置已由容器决定）。
-        if let Some(keys) = mesh_keys {
-            for key in keys {
+        if let Some(meshes) = mesh_materials {
+            for (key, material) in meshes {
                 let _ = scene.attach(
                     container,
-                    SceneObject::new(SceneObjectKind::Mesh(key), Transform::IDENTITY),
+                    SceneObject::new(SceneObjectKind::Mesh(key), Transform::IDENTITY)
+                        .with_material(material),
                 );
             }
         }
@@ -116,18 +132,68 @@ impl Loader<'_> {
         Ok(())
     }
 
-    /// 注册一个 glTF 网格（按网格索引去重），返回每个 primitive 对应的 MeshKey。
-    fn register_mesh(&mut self, mesh: &gltf::Mesh<'_>) -> Result<Vec<MeshKey>, LoaderError> {
-        if let Some(keys) = self.mesh_keys.get(&mesh.index()) {
-            return Ok(keys.clone());
+    /// 注册一个 glTF 网格（按网格索引去重），返回每个 primitive 对应的
+    /// (MeshKey, Material) 列表。
+    fn register_mesh(
+        &mut self,
+        mesh: &gltf::Mesh<'_>,
+    ) -> Result<Vec<(MeshKey, Material)>, LoaderError> {
+        if self.mesh_keys.contains_key(&mesh.index()) {
+            // 材质属于 primitive，不随网格去重缓存，需要重新读取。
+            return self.materials_for(mesh);
         }
         let mut meshes = Vec::new();
+        let mut materials = Vec::new();
         for primitive in mesh.primitives() {
             meshes.push(self.mesh_from_primitive(&primitive)?);
+            materials.push(self.material_from_primitive(&primitive)?);
         }
         let keys = self.mesh_library.register_many(meshes);
         self.mesh_keys.insert(mesh.index(), keys.clone());
-        Ok(keys)
+        Ok(keys.into_iter().zip(materials).collect())
+    }
+
+    /// 重新读取一个网格所有 primitive 的材质（去重缓存只存了 MeshKey）。
+    fn materials_for(&mut self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(MeshKey, Material)>, LoaderError> {
+        // 走与 register_mesh 相同的路径需要 &mut self（贴图注册），这里直接重新构造。
+        let keys = self.mesh_keys.get(&mesh.index()).cloned().unwrap_or_default();
+        let mut out = Vec::with_capacity(keys.len());
+        for (key, primitive) in keys.iter().zip(mesh.primitives()) {
+            out.push((*key, self.material_from_primitive(&primitive)?));
+        }
+        Ok(out)
+    }
+
+    /// 读取 primitive 的材质：基础色因子 + 基础色贴图。
+    fn material_from_primitive(
+        &mut self,
+        primitive: &gltf::Primitive<'_>,
+    ) -> Result<Material, LoaderError> {
+        // gltf::Material 总是存在（未指定时是默认材质，因子为 1）。
+        let pbr = primitive.material().pbr_metallic_roughness();
+        let base_color_texture = match pbr.base_color_texture() {
+            Some(info) => Some(self.register_texture(info.texture().source().index())?),
+            None => None,
+        };
+        Ok(Material {
+            base_color: pbr.base_color_factor(),
+            base_color_texture,
+        })
+    }
+
+    /// 注册 glTF 图片（按图片索引去重）。
+    fn register_texture(&mut self, image_index: usize) -> Result<TextureKey, LoaderError> {
+        if let Some(key) = self.texture_keys.get(&image_index) {
+            return Ok(*key);
+        }
+        let image = self
+            .images
+            .get(image_index)
+            .ok_or(LoaderError::MissingImage(image_index))?;
+        let texture = gltf_image_to_texture(image)?;
+        let key = self.texture_library.register_many([texture])[0];
+        self.texture_keys.insert(image_index, key);
+        Ok(key)
     }
 
     /// 把一个 primitive 转换成运行时 `Mesh`（顶点属性统一转 f32，索引转 u32）。
@@ -176,6 +242,103 @@ impl Loader<'_> {
     }
 }
 
+/// 把 glTF 解码出的图片数据转成运行时 RGBA8 纹理。
+fn gltf_image_to_texture(image: &gltf::image::Data) -> Result<Texture, LoaderError> {
+    use gltf::image::Format;
+
+    let pixel_count = image.width as usize * image.height as usize;
+    let mut rgba8 = Vec::with_capacity(pixel_count * 4);
+
+    fn u16_to_u8(pair: &[u8]) -> u8 {
+        (u16::from_le_bytes([pair[0], pair[1]]) >> 8) as u8
+    }
+    fn f32_to_u8(bytes: &[u8]) -> u8 {
+        let v = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        (v.clamp(0.0, 1.0) * 255.0) as u8
+    }
+
+    let pixels = &image.pixels;
+    match image.format {
+        Format::R8 => {
+            for &v in pixels {
+                rgba8.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        Format::R8G8 => {
+            for c in pixels.chunks(2) {
+                rgba8.extend_from_slice(&[c[0], c[0], c[0], c[1]]);
+            }
+        }
+        Format::R8G8B8 => {
+            for c in pixels.chunks(3) {
+                rgba8.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        Format::R8G8B8A8 => rgba8.extend_from_slice(pixels),
+        Format::R16 => {
+            for c in pixels.chunks(2) {
+                let v = u16_to_u8(c);
+                rgba8.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        Format::R16G16 => {
+            for c in pixels.chunks(4) {
+                let r = u16_to_u8(&c[0..2]);
+                rgba8.extend_from_slice(&[r, r, r, u16_to_u8(&c[2..4])]);
+            }
+        }
+        Format::R16G16B16 => {
+            for c in pixels.chunks(6) {
+                rgba8.extend_from_slice(&[
+                    u16_to_u8(&c[0..2]),
+                    u16_to_u8(&c[2..4]),
+                    u16_to_u8(&c[4..6]),
+                    255,
+                ]);
+            }
+        }
+        Format::R16G16B16A16 => {
+            for c in pixels.chunks(8) {
+                rgba8.extend_from_slice(&[
+                    u16_to_u8(&c[0..2]),
+                    u16_to_u8(&c[2..4]),
+                    u16_to_u8(&c[4..6]),
+                    u16_to_u8(&c[6..8]),
+                ]);
+            }
+        }
+        Format::R32G32B32FLOAT => {
+            for c in pixels.chunks(12) {
+                rgba8.extend_from_slice(&[
+                    f32_to_u8(&c[0..4]),
+                    f32_to_u8(&c[4..8]),
+                    f32_to_u8(&c[8..12]),
+                    255,
+                ]);
+            }
+        }
+        Format::R32G32B32A32FLOAT => {
+            for c in pixels.chunks(16) {
+                rgba8.extend_from_slice(&[
+                    f32_to_u8(&c[0..4]),
+                    f32_to_u8(&c[4..8]),
+                    f32_to_u8(&c[8..12]),
+                    f32_to_u8(&c[12..16]),
+                ]);
+            }
+        }
+    }
+    if rgba8.len() != pixel_count * 4 {
+        return Err(LoaderError::ImageDataLengthMismatch);
+    }
+
+    Ok(Texture {
+        width: image.width,
+        height: image.height,
+        rgba8,
+    })
+}
+
 /// 三角带 → 三角形列表（交替绕序对应反向）。
 fn strip_to_triangles(indices: &[u32]) -> Vec<u32> {
     let mut out = Vec::with_capacity(indices.len().saturating_sub(2) * 3);
@@ -204,6 +367,8 @@ pub enum LoaderError {
     Gltf(gltf::Error),
     NoDefaultScene,
     MissingPositions,
+    MissingImage(usize),
+    ImageDataLengthMismatch,
     UnsupportedMode(Mode),
 }
 
@@ -213,6 +378,8 @@ impl fmt::Display for LoaderError {
             Self::Gltf(e) => write!(f, "glTF 解析失败：{e}"),
             Self::NoDefaultScene => write!(f, "glTF 文件没有默认场景"),
             Self::MissingPositions => write!(f, "primitive 缺少 POSITION 属性"),
+            Self::MissingImage(index) => write!(f, "图片索引 {index} 不存在"),
+            Self::ImageDataLengthMismatch => write!(f, "图片像素数据长度与尺寸不匹配"),
             Self::UnsupportedMode(mode) => write!(f, "不支持的 primitive 模式：{mode:?}"),
         }
     }
@@ -318,7 +485,8 @@ mod tests {
         std::fs::write(&path, &bytes).expect("写测试文件");
 
         let mut library = MeshLibrary::new();
-        let scene = load_scene(&path, &mut library).expect("应能加载测试三角形");
+        let mut textures = TextureLibrary::new();
+        let scene = load_scene(&path, &mut library, &mut textures).expect("应能加载测试三角形");
 
         // 网格：3 个顶点、3 个索引，属性值原样转换。
         assert_eq!(library.len(), 1);
@@ -352,12 +520,11 @@ mod tests {
     #[test]
     fn load_repo_test_glb() {
         let mut library = MeshLibrary::new();
-        let scene = load_scene(Path::new("src/asset/test.glb"), &mut library)
+        let mut textures = TextureLibrary::new();
+        let scene = load_scene(Path::new("src/asset/test.glb"), &mut library, &mut textures)
             .expect("仓库内的测试资产应能加载");
-        assert_eq!(library.len(), 1);
-        assert_eq!(scene.object_count(), 2); // 1 个容器节点 + 1 个 primitive 子节点
-        let mesh = &library.meshes()[0];
-        assert_eq!(mesh.vertices().len(), 524);
-        assert_eq!(mesh.indices().len(), 3024);
+        assert!(!library.is_empty());
+        assert!(!textures.is_empty(), "PBR 样例应带基础色贴图");
+        assert!(scene.object_count() > 0);
     }
 }

@@ -4,10 +4,11 @@ struct CameraUniform {
     position: vec3<f32>,
 }
 
-// 物体数据：模型矩阵 + 法线矩阵（逆转置，非等比缩放下法线方向才正确）。
+// 物体数据：模型矩阵 + 法线矩阵 + 材质基础色因子。
 struct ObjectData {
     model: mat4x4<f32>,
     normal_matrix: mat3x3<f32>,
+    base_color: vec4<f32>,
 }
 
 // 方向光数组：材质着色器在片元阶段遍历灯光累加光照。
@@ -29,6 +30,8 @@ struct Lights {
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(1) @binding(0) var<uniform> object_data: ObjectData;
 @group(2) @binding(0) var<uniform> lights: Lights;
+@group(3) @binding(0) var base_color_tex: texture_2d<f32>;
+@group(3) @binding(1) var base_color_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -42,6 +45,7 @@ struct VertexOutput {
     @location(0) world_normal: vec3<f32>,
     @location(1) world_position: vec3<f32>,
     @location(2) color: vec3<f32>,
+    @location(3) tex_coord: vec2<f32>,
 }
 
 @vertex
@@ -53,19 +57,23 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     out.world_position = world_position.xyz;
     out.world_normal = object_data.normal_matrix * input.normal;
     out.color = input.color;
+    out.tex_coord = input.tex_coord;
     return out;
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let n = normalize(input.world_normal);
+    // 基础色 = 贴图采样 × 材质因子 × 顶点色（glTF 组合规则）。
+    let tex_color = textureSample(base_color_tex, base_color_sampler, input.tex_coord);
+    let albedo = tex_color.rgb * object_data.base_color.rgb * input.color;
     // 微弱环境光，避免背光面纯黑。
-    var color = input.color * 0.08;
+    var color = albedo * 0.08;
     // 基础光照：逐方向光累加 Lambert 漫反射。
     for (var i = 0u; i < lights.count; i = i + 1u) {
         let l = normalize(lights.lights[i].direction);
         let ndotl = max(dot(n, l), 0.0);
-        color += input.color * lights.lights[i].color * lights.lights[i].intensity * ndotl;
+        color += albedo * lights.lights[i].color * lights.lights[i].intensity * ndotl;
     }
     return vec4<f32>(color, 1.0);
 }

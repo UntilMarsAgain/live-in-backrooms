@@ -3,9 +3,11 @@ mod asset;
 mod camera;
 mod controller;
 mod light;
+mod material;
 mod mesh;
 mod render;
 mod scene;
+mod texture;
 mod transform;
 
 use std::error::Error;
