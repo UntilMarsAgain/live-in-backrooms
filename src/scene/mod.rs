@@ -183,7 +183,8 @@ impl Scene {
         // 第一遍：复制所有节点，记录旧句柄 → 新句柄。
         let mut remap: HashMap<ObjectKey, ObjectKey> = HashMap::new();
         for (old_key, object) in other.objects() {
-            let new_key = self.add_object(SceneObject::new(object.kind, object.transform));
+            // 整份复制（含材质）；之前只重建 kind+transform 会把材质丢掉。
+            let new_key = self.add_object(object.clone());
             remap.insert(old_key, new_key);
         }
         // 第二遍：按旧场景的父子关系重建层级。
@@ -253,6 +254,20 @@ impl Scene {
                 Vec3::ONE,
             ),
         ));
+        // 点光（辅助灯）：暖色，放在演示物体右上方。
+        scene.add_object(SceneObject::new(
+            SceneObjectKind::Light(Light::point(Vec3::new(1.0, 0.85, 0.6), 100.0)),
+            Transform::new(Vec3::new(2.2, 1.8, 0.8), Quat::IDENTITY, Vec3::ONE),
+        ));
+        // 面光（荧光灯面板）：朝下照亮扳手区域。
+        scene.add_object(SceneObject::new(
+            SceneObjectKind::Light(Light::area(1.5, 0.6, Vec3::new(0.9, 0.95, 1.0), 45.0)),
+            Transform::new(
+                Vec3::new(1.8, 2.8, -0.8),
+                Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                Vec3::ONE,
+            ),
+        ));
         scene.add_object(SceneObject::new(
             SceneObjectKind::Mesh(triangle),
             Transform::IDENTITY,
@@ -294,6 +309,7 @@ impl Scene {
         .with_material(Material {
             base_color: [1.0; 4],
             base_color_texture: cube_texture,
+            ..Material::default()
         }));
         // 小三角形挂在立方体正上方，跟随立方体一起旋转（验证层级）。
         let _ = scene.attach(
@@ -358,5 +374,23 @@ mod tests {
         assert!(p.z.abs() > 0.99, "p = {p:?}");
         assert!(p.x.abs() < 0.01, "p = {p:?}");
         assert!(p.y.abs() < 0.01, "p = {p:?}");
+    }
+
+    /// merge 必须保留材质（glTF 场景合并进演示场景时材质不能丢）。
+    #[test]
+    fn merge_preserves_material() {
+        let mut a = Scene::new();
+        a.add_object(
+            SceneObject::new(SceneObjectKind::Empty, Transform::IDENTITY).with_material(Material {
+                base_color: [0.2, 0.3, 0.4, 1.0],
+                ..Material::default()
+            }),
+        );
+
+        let mut b = Scene::new();
+        let merged = b.merge(&a);
+        assert_eq!(merged.len(), 1);
+        let obj = b.object(merged[0]).expect("合并后的节点应存活");
+        assert_eq!(obj.material.base_color, [0.2, 0.3, 0.4, 1.0]);
     }
 }

@@ -18,6 +18,7 @@ use wgpu::{
 use winit::window::Window;
 
 use crate::camera::{Camera, CameraUniform};
+use crate::light::LightKind;
 use crate::mesh::{MeshLibrary, Vertex};
 use crate::scene::{Scene, SceneObjectKind};
 use crate::texture::{Texture, TextureLibrary};
@@ -33,11 +34,17 @@ fn collect_lights(scene: &Scene) -> LightsUniform {
     let mut light_uniform = LightsUniform {
         count: 0,
         _pad: [0; 3],
-        lights: [DirectionalLightUniform {
+        lights: [LightUniform {
+            kind: 0,
+            _pad: [0; 3],
             direction: [0.0; 3],
-            intensity: 0.0,
+            _pad_direction: 0.0,
+            position: [0.0; 3],
+            _pad_position: 0.0,
             color: [0.0; 3],
-            _pad: 0.0,
+            intensity: 0.0,
+            size: [0.0; 2],
+            _pad_size: [0.0; 2],
         }; MAX_LIGHTS],
     };
     for (key, object) in scene.objects() {
@@ -50,9 +57,24 @@ fn collect_lights(scene: &Scene) -> LightsUniform {
         let world = scene
             .world_transform(key)
             .expect("objects() 只产出存活节点");
-        let (_, rotation, _) = world.to_scale_rotation_translation();
+        let (_, rotation, translation) = world.to_scale_rotation_translation();
         let entry = &mut light_uniform.lights[light_uniform.count as usize];
-        entry.direction = (rotation * Vec3::NEG_Z).to_array();
+        match light.kind {
+            LightKind::Directional => {
+                entry.kind = 0;
+                entry.direction = (rotation * Vec3::NEG_Z).to_array();
+            }
+            LightKind::Point => {
+                entry.kind = 1;
+                entry.position = translation.to_array();
+            }
+            LightKind::Area { width, height } => {
+                entry.kind = 2;
+                entry.direction = (rotation * Vec3::NEG_Z).to_array();
+                entry.position = translation.to_array();
+                entry.size = [width, height];
+            }
+        }
         entry.intensity = light.intensity;
         entry.color = light.color.to_array();
         light_uniform.count += 1;
@@ -80,17 +102,29 @@ struct ObjectData {
     normal_matrix: [[f32; 4]; 3],
     /// 材质基础色因子（RGBA）。
     base_color: [f32; 4],
+    metallic: f32,
+    roughness: f32,
+    _pad: [f32; 2],
 }
 
-/// 单个方向光在 uniform 缓冲里的布局（32 字节，std140 兼容）。
+/// 单个光源在 uniform 缓冲里的布局（80 字节，std140 兼容）。
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct DirectionalLightUniform {
-    /// 世界空间方向：从表面指向光源。
+struct LightUniform {
+    /// 0=方向光 1=点光 2=面光。
+    kind: u32,
+    _pad: [u32; 3],
+    /// 方向光/面光：世界空间光照方向（局部 -Z 经旋转）。
     direction: [f32; 3],
-    intensity: f32,
+    _pad_direction: f32,
+    /// 点光/面光：世界位置。
+    position: [f32; 3],
+    _pad_position: f32,
     color: [f32; 3],
-    _pad: f32,
+    intensity: f32,
+    /// 面光：面板尺寸（当前近似未直接使用，为 LTC 预留）。
+    size: [f32; 2],
+    _pad_size: [f32; 2],
 }
 
 /// 灯光 uniform：数量 + 固定大小数组。
@@ -99,10 +133,10 @@ struct DirectionalLightUniform {
 struct LightsUniform {
     count: u32,
     _pad: [u32; 3],
-    lights: [DirectionalLightUniform; MAX_LIGHTS],
+    lights: [LightUniform; MAX_LIGHTS],
 }
 
-const _: () = assert!(std::mem::size_of::<LightsUniform>() == 16 + 32 * MAX_LIGHTS);
+const _: () = assert!(std::mem::size_of::<LightsUniform>() == 16 + 80 * MAX_LIGHTS);
 
 /// wgpu 渲染器：持有 surface / device / queue，负责清屏渲染。
 pub struct Renderer {
@@ -123,13 +157,19 @@ pub struct Renderer {
     /// 灯光 uniform（方向光数组，场景级数据）。
     light_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
-    /// 纹理（材质基础色）绑定组相关。
+    /// 纹理（材质贴图）绑定组相关。
     texture_bind_group_layout: wgpu::BindGroupLayout,
     texture_sampler: wgpu::Sampler,
-    /// 按 [`TextureKey`](crate::texture::TextureKey) 稠密编号索引的绑定组。
-    texture_bind_groups: Vec<wgpu::BindGroup>,
-    /// 无贴图材质的默认 1×1 白纹理绑定组。
-    default_texture_bind_group: wgpu::BindGroup,
+    /// 按 [`TextureKey`](crate::texture::TextureKey) 稠密编号索引的纹理视图。
+    texture_views: Vec<wgpu::TextureView>,
+    /// 默认 1×1 白纹理视图（基础色/金属度粗糙度贴图兜底）。
+    default_white_view: wgpu::TextureView,
+    /// 默认 1×1 中性法线纹理视图。
+    default_normal_view: wgpu::TextureView,
+    /// 全默认材质的绑定组（非网格节点占位用）。
+    default_material_bind_group: wgpu::BindGroup,
+    /// 每个物体的材质绑定组（load_scene 时按 objects() 顺序构建）。
+    material_bind_groups: Vec<wgpu::BindGroup>,
     /// 已上传的纹理库版本。
     uploaded_texture_version: u64,
     /// 网格渲染管线。
@@ -257,6 +297,12 @@ impl Renderer {
         // 3.5 深度缓冲：管线与渲染通道都要用它来做正确的遮挡关系。
         let (depth_texture, depth_view) = create_depth_texture(&device, width, height);
 
+        // 绑定组与着色器阶段的约定（改布局/着色器时两边都要对账）：
+        //   group 0 相机    ：VERTEX 用 view_proj，FRAGMENT 用 position
+        //   group 1 物体    ：VERTEX 用 model/normal_matrix，FRAGMENT 用 base_color/metallic/roughness
+        //   group 2 灯光    ：仅 FRAGMENT
+        //   group 3 纹理    ：仅 FRAGMENT（基础色 / 采样器 / 金属度粗糙度 / 法线）
+
         // 4. 相机 uniform：缓冲区 + 绑定组。
         let camera_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("camera uniform buffer"),
@@ -270,7 +316,8 @@ impl Renderer {
                 label: Some("camera bind group layout"),
                 entries: &[BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: ShaderStages::VERTEX,
+                    // 顶点用 view_proj，片元用 position（PBR 视线方向）。
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -383,6 +430,26 @@ impl Renderer {
                         ty: BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -395,19 +462,28 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        // 默认 1×1 白纹理：无贴图材质直接采样它，着色器无需分支。
-        let default_texture_view = create_texture_view(&device, &queue, &Texture::white());
-        let default_texture_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("default texture bind group"),
+        // 默认 1×1 纹理（白 / 中性法线）：无贴图材质直接采样它们，着色器无需分支。
+        let default_white_view = create_texture_view(&device, &queue, &Texture::white());
+        let default_normal_view = create_texture_view(&device, &queue, &Texture::neutral_normal());
+        let default_material_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("default material bind group"),
             layout: &texture_bind_group_layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&default_texture_view),
+                    resource: wgpu::BindingResource::TextureView(&default_white_view),
                 },
                 BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&texture_sampler),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&default_white_view),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&default_normal_view),
                 },
             ],
         });
@@ -484,8 +560,11 @@ impl Renderer {
             light_bind_group,
             texture_bind_group_layout,
             texture_sampler,
-            texture_bind_groups: Vec::new(),
-            default_texture_bind_group,
+            texture_views: Vec::new(),
+            default_white_view,
+            default_normal_view,
+            default_material_bind_group,
+            material_bind_groups: Vec::new(),
             uploaded_texture_version: 0,
             pipeline,
             depth_texture,
@@ -545,23 +624,9 @@ impl Renderer {
         if library.version() == self.uploaded_texture_version {
             return;
         }
-        for texture in library.textures().iter().skip(self.texture_bind_groups.len()) {
+        for texture in library.textures().iter().skip(self.texture_views.len()) {
             let view = create_texture_view(&self.device, &self.queue, texture);
-            let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
-                label: Some("texture bind group"),
-                layout: &self.texture_bind_group_layout,
-                entries: &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.texture_sampler),
-                    },
-                ],
-            });
-            self.texture_bind_groups.push(bind_group);
+            self.texture_views.push(view);
         }
         self.uploaded_texture_version = library.version();
     }
@@ -601,6 +666,52 @@ impl Renderer {
         let light_uniform = collect_lights(scene);
         self.queue
             .write_buffer(&self.light_buffer, 0, bytemuck::bytes_of(&light_uniform));
+
+        // 每个物体的材质绑定组（与 objects() 迭代顺序一致，渲染时按同一下标取用）。
+        let mut material_bind_groups = Vec::with_capacity(scene.object_count());
+        for (_, object) in scene.objects() {
+            if object.mesh_key().is_none() {
+                material_bind_groups.push(self.default_material_bind_group.clone());
+                continue;
+            }
+            let mat = &object.material;
+            let base_view = mat
+                .base_color_texture
+                .map(|k| &self.texture_views[k.index()])
+                .unwrap_or(&self.default_white_view);
+            let mr_view = mat
+                .metallic_roughness_texture
+                .map(|k| &self.texture_views[k.index()])
+                .unwrap_or(&self.default_white_view);
+            let normal_view = mat
+                .normal_texture
+                .map(|k| &self.texture_views[k.index()])
+                .unwrap_or(&self.default_normal_view);
+            let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                label: Some("material bind group"),
+                layout: &self.texture_bind_group_layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(base_view),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.texture_sampler),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(mr_view),
+                    },
+                    BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(normal_view),
+                    },
+                ],
+            });
+            material_bind_groups.push(bind_group);
+        }
+        self.material_bind_groups = material_bind_groups;
     }
 
     /// 窗口尺寸变化时重建交换链。
@@ -644,6 +755,9 @@ impl Renderer {
                     model,
                     normal_matrix,
                     base_color: object.material.base_color,
+                    metallic: object.material.metallic_factor,
+                    roughness: object.material.roughness_factor,
+                    _pad: [0.0; 2],
                 };
                 bytes[i * stride..i * stride + entry_size]
                     .copy_from_slice(bytemuck::bytes_of(&data));
@@ -716,14 +830,8 @@ impl Renderer {
                     let Some(mesh_key) = object.mesh_key() else { continue; };
                     let range = mesh_buffer.mesh_ranges[mesh_key.index()];
                     let offset = (i * self.object_stride as usize) as u32;
-                    // 材质基础色贴图：无贴图时用默认白纹理。
-                    let texture_group = object
-                        .material
-                        .base_color_texture
-                        .map(|key| &self.texture_bind_groups[key.index()])
-                        .unwrap_or(&self.default_texture_bind_group);
                     pass.set_bind_group(1, &self.object_bind_group, &[offset]);
-                    pass.set_bind_group(3, texture_group, &[]);
+                    pass.set_bind_group(3, &self.material_bind_groups[i], &[]);
                     pass.draw_indexed(
                         range.index_offset..range.index_offset + range.index_count,
                         0,
@@ -785,5 +893,20 @@ impl From<wgpu::RequestAdapterError> for RendererError {
 impl From<wgpu::RequestDeviceError> for RendererError {
     fn from(error: wgpu::RequestDeviceError) -> Self {
         Self::Device(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// cargo build 不编译 WGSL，运行时错误会晚暴露；这里用 naga 提前校验。
+    #[test]
+    fn shader_compiles() {
+        let source = include_str!("mesh.wgsl");
+        let module = naga::front::wgsl::parse_str(source).expect("WGSL 应能解析");
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator.validate(&module).expect("WGSL 应通过校验");
     }
 }

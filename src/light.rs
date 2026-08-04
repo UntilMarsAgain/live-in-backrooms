@@ -1,22 +1,63 @@
 //! 灯光模块：CPU 侧的光源数据。
 //!
-//! 目前只实现方向光；点光、聚光灯后续以新类型加入。
-//! 灯光是场景对象的一种（`SceneObjectKind::Light`），方向由物体的旋转决定
-//! （局部 -Z 指向场景的方向就是光照方向），位置字段对方向光无意义。
+//! 三种光源类型：方向光 / 点光 / 面光（矩形面板）。
+//! 灯光是场景对象的一种（`SceneObjectKind::Light`）：
+//! - 方向光：方向由物体旋转决定（局部 -Z 指向场景），位置无意义；
+//! - 点光：位置由物体位置决定，平方反比衰减；
+//! - 面光：位置 + 朝向（局部 -Z 是发射方向）+ 面板尺寸，当前按朗伯发射面板
+//!   近似（真实矩形面光需要 LTC，见优化账本）。
 
 use glam::Vec3;
 
-/// 方向光：颜色 + 强度（方向由场景对象的旋转决定）。
+/// 光源类型。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LightKind {
+    /// 平行光：方向由旋转决定。
+    Directional,
+    /// 点光：位置 + 平方反比衰减。
+    Point,
+    /// 矩形面光：位置 + 朝向 + 尺寸（朗伯发射面板近似）。
+    Area { width: f32, height: f32 },
+}
+
+/// 光源：类型 + 颜色 + 强度。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Light {
+    pub kind: LightKind,
     pub color: Vec3,
     pub intensity: f32,
 }
 
 impl Light {
-    /// 白光、单位强度。
+    /// 白光、单位强度的方向光。
     pub const WHITE: Self = Self {
+        kind: LightKind::Directional,
         color: Vec3::ONE,
         intensity: 1.0,
     };
+
+    #[allow(dead_code)] // 预留：等价于 `WHITE` 的显式写法
+    pub fn directional(color: Vec3, intensity: f32) -> Self {
+        Self {
+            kind: LightKind::Directional,
+            color,
+            intensity,
+        }
+    }
+
+    pub fn point(color: Vec3, intensity: f32) -> Self {
+        Self {
+            kind: LightKind::Point,
+            color,
+            intensity,
+        }
+    }
+
+    pub fn area(width: f32, height: f32, color: Vec3, intensity: f32) -> Self {
+        Self {
+            kind: LightKind::Area { width, height },
+            color,
+            intensity,
+        }
+    }
 }

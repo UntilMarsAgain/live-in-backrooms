@@ -100,7 +100,7 @@ impl App {
                     // 避免和原点处的三角形重叠。
                     for key in scene.merge(&gltf_scene) {
                         if let Some(object) = scene.object_mut(key) {
-                            object.transform.scale *= 5.0;
+                            object.transform.scale *=3.0;
                             object.transform.position += glam::Vec3::new(1.8, 0.0, -1.2);
                         }
                     }

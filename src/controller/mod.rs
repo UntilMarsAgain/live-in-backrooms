@@ -23,14 +23,16 @@ use crate::camera::Camera;
 /// - Space / Ctrl：上升 / 下降
 /// - 点击窗口：捕获鼠标，之后移动鼠标直接旋转视角（自由视角）
 /// - Esc：释放鼠标（返回系统光标）
-/// - 滚轮：沿视线前后推进
+/// - 滚轮：调整移动速度（乘法步进，带上下限）
 pub struct FreeCameraController {
     /// 移动速度（单位 / 秒）。
     speed: f32,
+    /// 速度下限。
+    min_speed: f32,
+    /// 速度上限。
+    max_speed: f32,
     /// 鼠标灵敏度（弧度 / 像素）。
     sensitivity: f32,
-    /// 滚轮推进速度（单位 / 格）。
-    scroll_speed: f32,
     /// 当前按下的键。
     keys: HashSet<KeyCode>,
     /// 是否按住左键拖动。
@@ -48,8 +50,9 @@ impl FreeCameraController {
     pub fn new() -> Self {
         Self {
             speed: 5.0,
+            min_speed: 0.5,
+            max_speed: 50.0,
             sensitivity: 0.003,
-            scroll_speed: 1.5,
             keys: HashSet::new(),
             dragging: false,
             last_cursor: None,
@@ -133,9 +136,10 @@ impl FreeCameraController {
         );
         self.look_delta = (0.0, 0.0);
 
-        // 2. 滚轮沿视线推进。
+        // 2. 滚轮调整移动速度（每格 ×1.25，clamp 到 [min_speed, max_speed]）。
         if self.scroll_delta != 0.0 {
-            camera.move_forward(self.scroll_delta * self.scroll_speed);
+            self.speed =
+                (self.speed * 1.25_f32.powf(self.scroll_delta)).clamp(self.min_speed, self.max_speed);
             self.scroll_delta = 0.0;
         }
 

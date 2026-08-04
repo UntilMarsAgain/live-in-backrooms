@@ -8,6 +8,10 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 glam = { version = "0.33.2", features = ["bytemuck"] }
 gltf = "1.4.1"
 indextree = "4.8.1"
+mikktspace = { version = "0.3.0", default-features = false, features = ["glam"] }
 pollster = "1.0.1"
 wgpu = "30.0.0"
 winit = "0.30.13"
+
+[dev-dependencies]
+naga = "30.0.0"

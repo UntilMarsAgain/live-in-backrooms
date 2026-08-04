@@ -10,16 +10,17 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::{VertexAttribute, VertexBufferLayout, VertexFormat, VertexStepMode};
 
-/// 顶点：位置 + 法线 + UV + 顶点色。
+/// 顶点：位置 + 法线 + 切线 + UV + 顶点色。
 ///
-/// 对应 glTF 2.0 的 POSITION / NORMAL / TEXCOORD_0 / COLOR_0 四个属性；
+/// 对应 glTF 2.0 的 POSITION / NORMAL / TANGENT / TEXCOORD_0 / COLOR_0 属性；
 /// 加载器会把 glTF 的各种存储格式统一转换成这里的 f32 布局。
-/// 后续加入切线（TANGENT）和蒙皮（JOINTS_0/WEIGHTS_0）时再扩展。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
+    /// 切线（xyz）+ 手性 w（法线贴图 TBN 用）。
+    pub tangent: [f32; 4],
     pub tex_coord: [f32; 2],
     pub color: [f32; 3],
 }
@@ -29,7 +30,7 @@ impl Vertex {
     ///
     /// 与顶点数据绑定，放在这里而不放在 render 模块，方便其他渲染路径复用。
     pub fn layout() -> VertexBufferLayout<'static> {
-        const ATTRIBUTES: [VertexAttribute; 4] = [
+        const ATTRIBUTES: [VertexAttribute; 5] = [
             VertexAttribute {
                 format: VertexFormat::Float32x3,
                 offset: 0,
@@ -41,14 +42,19 @@ impl Vertex {
                 shader_location: 1,
             },
             VertexAttribute {
-                format: VertexFormat::Float32x2,
+                format: VertexFormat::Float32x4,
                 offset: 24,
                 shader_location: 2,
             },
             VertexAttribute {
-                format: VertexFormat::Float32x3,
-                offset: 32,
+                format: VertexFormat::Float32x2,
+                offset: 40,
                 shader_location: 3,
+            },
+            VertexAttribute {
+                format: VertexFormat::Float32x3,
+                offset: 48,
+                shader_location: 4,
             },
         ];
         VertexBufferLayout {
@@ -88,18 +94,21 @@ impl Mesh {
                 Vertex {
                     position: [-0.5, -0.5, 0.0],
                     normal: [0.0, 0.0, 1.0],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                     tex_coord: [0.0, 0.0],
                     color: [1.0, 0.0, 0.0],
                 },
                 Vertex {
                     position: [0.5, -0.5, 0.0],
                     normal: [0.0, 0.0, 1.0],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                     tex_coord: [1.0, 0.0],
                     color: [0.0, 1.0, 0.0],
                 },
                 Vertex {
                     position: [0.0, 0.5, 0.0],
                     normal: [0.0, 0.0, 1.0],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                     tex_coord: [0.5, 1.0],
                     color: [0.0, 0.0, 1.0],
                 },
@@ -117,24 +126,28 @@ impl Mesh {
                 Vertex {
                     position: [-0.5, -0.5, 0.0],
                     normal: [0.0, 0.0, 1.0],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                     tex_coord: [0.0, 0.0],
                     color: [0.9, 0.85, 0.6],
                 },
                 Vertex {
                     position: [0.5, -0.5, 0.0],
                     normal: [0.0, 0.0, 1.0],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                     tex_coord: [1.0, 0.0],
                     color: [0.9, 0.85, 0.6],
                 },
                 Vertex {
                     position: [-0.5, 0.5, 0.0],
                     normal: [0.0, 0.0, 1.0],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                     tex_coord: [0.0, 1.0],
                     color: [0.9, 0.85, 0.6],
                 },
                 Vertex {
                     position: [0.5, 0.5, 0.0],
                     normal: [0.0, 0.0, 1.0],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                     tex_coord: [1.0, 1.0],
                     color: [0.9, 0.85, 0.6],
                 },
@@ -151,13 +164,18 @@ impl Mesh {
         let s = 0.5;
         let mut vertices = Vec::with_capacity(24);
         let mut indices = Vec::with_capacity(36);
-        let mut push_face = |corners: [(f32, f32, f32); 4], normal: [f32; 3], color: [f32; 3]| {
+        // tangent：U 增大的世界方向（+ 手性 1）。
+        let mut push_face = |corners: [(f32, f32, f32); 4],
+                             normal: [f32; 3],
+                             tangent: [f32; 4],
+                             color: [f32; 3]| {
             let base = vertices.len() as u32;
             let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
             for (i, (x, y, z)) in corners.into_iter().enumerate() {
                 vertices.push(Vertex {
                     position: [x, y, z],
                     normal,
+                    tangent,
                     tex_coord: uvs[i],
                     color,
                 });
@@ -177,31 +195,37 @@ impl Mesh {
         push_face(
             [(-s, -s, s), (s, -s, s), (s, s, s), (-s, s, s)],
             [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
             [1.0, 0.0, 0.0],
         );
         push_face(
             [(-s, s, -s), (s, s, -s), (s, -s, -s), (-s, -s, -s)],
             [0.0, 0.0, -1.0],
+            [1.0, 0.0, 0.0, 1.0],
             [0.0, 1.0, 0.0],
         );
         push_face(
             [(s, -s, -s), (s, s, -s), (s, s, s), (s, -s, s)],
             [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 1.0],
             [0.0, 0.0, 1.0],
         );
         push_face(
             [(-s, -s, s), (-s, s, s), (-s, s, -s), (-s, -s, -s)],
             [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 1.0],
             [1.0, 1.0, 0.0],
         );
         push_face(
             [(-s, s, s), (s, s, s), (s, s, -s), (-s, s, -s)],
             [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0, 1.0],
             [0.0, 1.0, 1.0],
         );
         push_face(
             [(-s, -s, -s), (s, -s, -s), (s, -s, s), (-s, -s, s)],
             [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0, 1.0],
             [1.0, 0.0, 1.0],
         );
 

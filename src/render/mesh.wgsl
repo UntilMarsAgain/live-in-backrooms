@@ -4,40 +4,58 @@ struct CameraUniform {
     position: vec3<f32>,
 }
 
-// 物体数据：模型矩阵 + 法线矩阵 + 材质基础色因子。
+// 物体数据：模型矩阵 + 法线矩阵 + PBR 材质参数。
 struct ObjectData {
     model: mat4x4<f32>,
     normal_matrix: mat3x3<f32>,
     base_color: vec4<f32>,
+    metallic: f32,
+    roughness: f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
-// 方向光数组：材质着色器在片元阶段遍历灯光累加光照。
+// 光源数组：方向光 / 点光 / 面光。
 const MAX_LIGHTS: u32 = 8u;
-struct DirectionalLight {
-    direction: vec3<f32>, // 世界空间方向：从表面指向光源
-    intensity: f32,
+struct LightData {
+    kind: u32, // 0=方向光 1=点光 2=面光
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    direction: vec3<f32>, // 方向光/面光：光照方向（局部 -Z 经旋转）
+    _pad3: f32,
+    position: vec3<f32>, // 点光/面光：世界位置
+    _pad4: f32,
     color: vec3<f32>,
-    _pad: f32,
+    intensity: f32,
+    size: vec2<f32>, // 面光面板尺寸（当前近似未直接使用）
+    _pad5: f32,
+    _pad6: f32,
 }
 struct Lights {
     count: u32,
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
-    lights: array<DirectionalLight, MAX_LIGHTS>,
+    lights: array<LightData, MAX_LIGHTS>,
 }
+
+const PI: f32 = 3.141592653589793;
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(1) @binding(0) var<uniform> object_data: ObjectData;
 @group(2) @binding(0) var<uniform> lights: Lights;
 @group(3) @binding(0) var base_color_tex: texture_2d<f32>;
 @group(3) @binding(1) var base_color_sampler: sampler;
+@group(3) @binding(2) var metallic_roughness_tex: texture_2d<f32>;
+@group(3) @binding(3) var normal_tex: texture_2d<f32>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) tex_coord: vec2<f32>,
-    @location(3) color: vec3<f32>,
+    @location(2) tangent: vec4<f32>,
+    @location(3) tex_coord: vec2<f32>,
+    @location(4) color: vec3<f32>,
 }
 
 struct VertexOutput {
@@ -46,16 +64,43 @@ struct VertexOutput {
     @location(1) world_position: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) tex_coord: vec2<f32>,
+    @location(4) world_tangent: vec4<f32>,
+}
+
+// ---------- PBR BRDF ----------
+
+// GGX 法线分布函数。
+fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+// Schlick-GGX 几何遮挡（单方向）。
+fn geometry_schlick_ggx(n_dot_x: f32, roughness: f32) -> f32 {
+    let r = roughness + 1.0;
+    let k = (r * r) / 8.0;
+    return n_dot_x / (n_dot_x * (1.0 - k) + k);
+}
+
+fn geometry_smith(n_dot_l: f32, n_dot_v: f32, roughness: f32) -> f32 {
+    return geometry_schlick_ggx(n_dot_l, roughness) * geometry_schlick_ggx(n_dot_v, roughness);
+}
+
+// Schlick 菲涅尔。
+fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
+    return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - cos_theta, 5.0);
 }
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    // 物体坐标 → 世界坐标（模型矩阵）→ 裁剪坐标（相机视图投影）。
     let world_position = object_data.model * vec4<f32>(input.position, 1.0);
     out.clip_position = camera.view_proj * world_position;
     out.world_position = world_position.xyz;
     out.world_normal = object_data.normal_matrix * input.normal;
+    out.world_tangent = vec4<f32>(object_data.normal_matrix * input.tangent.xyz, input.tangent.w);
     out.color = input.color;
     out.tex_coord = input.tex_coord;
     return out;
@@ -63,17 +108,69 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let n = normalize(input.world_normal);
-    // 基础色 = 贴图采样 × 材质因子 × 顶点色（glTF 组合规则）。
+    // 基础色 = 贴图 × 材质因子 × 顶点色（glTF 组合规则）。
     let tex_color = textureSample(base_color_tex, base_color_sampler, input.tex_coord);
     let albedo = tex_color.rgb * object_data.base_color.rgb * input.color;
-    // 微弱环境光，避免背光面纯黑。
+
+    // 金属度 / 粗糙度（glTF metallic-roughness：B=金属度，G=粗糙度）。
+    let mr = textureSample(metallic_roughness_tex, base_color_sampler, input.tex_coord);
+    let metallic = mr.b * object_data.metallic;
+    let roughness = max(mr.g * object_data.roughness, 0.04);
+
+    // 法线贴图：切线空间 → 世界空间（Gram-Schmidt 正交化 T）。
+    let n_world = normalize(input.world_normal);
+    let tangent_color = textureSample(normal_tex, base_color_sampler, input.tex_coord).rgb;
+    let tangent_normal = normalize(tangent_color * 2.0 - 1.0);
+    let t = normalize(input.world_tangent.xyz - dot(input.world_tangent.xyz, n_world) * n_world);
+    let b = cross(n_world, t) * input.world_tangent.w;
+    let n = normalize(t * tangent_normal.x + b * tangent_normal.y + n_world * tangent_normal.z);
+
+    // PBR：GGX 镜面反射 + Schlick 菲涅尔；漫反射按金属度削减。
+    let v = normalize(camera.position - input.world_position);
+    let n_dot_v = max(dot(n, v), 0.0);
+    let f0 = mix(vec3<f32>(0.04), albedo, metallic);
+
+    // 环境光近似（非 IBL）：保持简单，金属材质在这里会偏暗，后续可换 IBL。
     var color = albedo * 0.08;
-    // 基础光照：逐方向光累加 Lambert 漫反射。
+
     for (var i = 0u; i < lights.count; i = i + 1u) {
-        let l = normalize(lights.lights[i].direction);
-        let ndotl = max(dot(n, l), 0.0);
-        color += albedo * lights.lights[i].color * lights.lights[i].intensity * ndotl;
+        let light = lights.lights[i];
+        // 光照方向与衰减按类型计算。
+        var l: vec3<f32>;
+        var attenuation: f32;
+        if (light.kind == 0u) {
+            l = normalize(light.direction);
+            attenuation = light.intensity;
+        } else if (light.kind == 1u) {
+            let delta = light.position - input.world_position;
+            l = normalize(delta);
+            let dist2 = dot(delta, delta);
+            attenuation = light.intensity / (dist2 + 0.0001);
+        } else {
+            let delta = light.position - input.world_position;
+            l = normalize(delta);
+            let dist2 = dot(delta, delta);
+            // 面光近似：朗伯发射面板（沿发射方向余弦分布）+ 平方反比。
+            let to_panel = normalize(input.world_position - light.position);
+            let panel = max(dot(to_panel, normalize(light.direction)), 0.0);
+            attenuation = light.intensity * panel / (dist2 + 0.0001);
+        }
+        let n_dot_l = max(dot(n, l), 0.0);
+        if (n_dot_l > 0.0 && attenuation > 0.0) {
+            let h = normalize(v + l);
+            let n_dot_h = max(dot(n, h), 0.0);
+            let v_dot_h = max(dot(v, h), 0.0);
+            let d = distribution_ggx(n_dot_h, roughness);
+            let g = geometry_smith(n_dot_l, n_dot_v, roughness);
+            let f = fresnel_schlick(v_dot_h, f0);
+            let specular = d * g * f / (4.0 * n_dot_l * n_dot_v + 0.0001);
+            let k_d = (vec3<f32>(1.0) - f) * (1.0 - metallic);
+            color +=
+                (k_d * albedo / PI + specular) *
+                light.color *
+                attenuation *
+                n_dot_l;
+        }
     }
     return vec4<f32>(color, 1.0);
 }

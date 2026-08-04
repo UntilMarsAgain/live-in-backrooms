@@ -21,6 +21,15 @@ impl Texture {
         }
     }
 
+    /// 1×1 中性法线贴图（RGB(128,128,255) → 切线空间法线 (0,0,1)）。
+    pub fn neutral_normal() -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            rgba8: vec![128, 128, 255, 255],
+        }
+    }
+
     /// 棋盘格纹理：用于验证贴图采样（后室风的暗黄两色）。
     pub fn checkerboard(size: u32, tile: u32) -> Self {
         let mut rgba8 = Vec::with_capacity((size * size * 4) as usize);

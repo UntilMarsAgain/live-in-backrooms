@@ -170,14 +170,27 @@ impl Loader<'_> {
         primitive: &gltf::Primitive<'_>,
     ) -> Result<Material, LoaderError> {
         // gltf::Material 总是存在（未指定时是默认材质，因子为 1）。
-        let pbr = primitive.material().pbr_metallic_roughness();
+        let gltf_material = primitive.material();
+        let pbr = gltf_material.pbr_metallic_roughness();
         let base_color_texture = match pbr.base_color_texture() {
+            Some(info) => Some(self.register_texture(info.texture().source().index())?),
+            None => None,
+        };
+        let metallic_roughness_texture = match pbr.metallic_roughness_texture() {
+            Some(info) => Some(self.register_texture(info.texture().source().index())?),
+            None => None,
+        };
+        let normal_texture = match gltf_material.normal_texture() {
             Some(info) => Some(self.register_texture(info.texture().source().index())?),
             None => None,
         };
         Ok(Material {
             base_color: pbr.base_color_factor(),
             base_color_texture,
+            metallic_factor: pbr.metallic_factor(),
+            roughness_factor: pbr.roughness_factor(),
+            metallic_roughness_texture,
+            normal_texture,
         })
     }
 
@@ -207,6 +220,10 @@ impl Loader<'_> {
             .read_normals()
             .map(|iter| iter.collect())
             .unwrap_or_default();
+        let tangents: Vec<[f32; 4]> = reader
+            .read_tangents()
+            .map(|iter| iter.collect())
+            .unwrap_or_default();
         let tex_coords: Vec<[f32; 2]> = reader
             .read_tex_coords(0)
             .map(|iter| iter.into_f32().collect())
@@ -220,16 +237,6 @@ impl Loader<'_> {
             None => (0..positions.len() as u32).collect(),
         };
 
-        let mut vertices = Vec::with_capacity(positions.len());
-        for i in 0..positions.len() {
-            vertices.push(Vertex {
-                position: positions[i],
-                normal: normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]),
-                tex_coord: tex_coords.get(i).copied().unwrap_or([0.0, 0.0]),
-                color: colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0]),
-            });
-        }
-
         // 只支持三角形拓扑；条带/扇形在这里转换成三角形列表。
         let indices = match primitive.mode() {
             Mode::Triangles => indices,
@@ -238,7 +245,115 @@ impl Loader<'_> {
             other => return Err(LoaderError::UnsupportedMode(other)),
         };
 
+        // 切线：文件自带 TANGENT 则直接用；否则按 MikkTSpace 计算（Blender 同款算法），
+        // 无需在 Blender 手动导出切线。
+        let tangents = if !tangents.is_empty() {
+            tangents
+        } else if !tex_coords.is_empty() {
+            compute_tangents(&positions, &normals, &tex_coords, &indices)
+        } else {
+            vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]
+        };
+
+        let mut vertices = Vec::with_capacity(positions.len());
+        for i in 0..positions.len() {
+            vertices.push(Vertex {
+                position: positions[i],
+                normal: normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]),
+                tangent: tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
+                tex_coord: tex_coords.get(i).copied().unwrap_or([0.0, 0.0]),
+                color: colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0]),
+            });
+        }
+
         Ok(Mesh::new(vertices, indices))
+    }
+}
+
+/// 用 MikkTSpace（Blender 同款算法）计算逐顶点切线。
+fn compute_tangents(
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    tex_coords: &[[f32; 2]],
+    indices: &[u32],
+) -> Vec<[f32; 4]> {
+    let mut geometry = TangentGeometry {
+        positions,
+        normals,
+        tex_coords,
+        indices,
+        tangents: vec![[0.0; 4]; indices.len()],
+    };
+    if !mikktspace::generate_tangents(&mut geometry) {
+        return vec![[1.0, 0.0, 0.0, 1.0]; positions.len()];
+    }
+
+    // 角点切线 → 逐顶点平均（xyz 累加归一化；w 按多数符号）。
+    let mut sum = vec![[0.0f32; 3]; positions.len()];
+    let mut w_sum = vec![0.0f32; positions.len()];
+    for (corner, &index) in indices.iter().enumerate() {
+        let tangent = geometry.tangents[corner];
+        let i = index as usize;
+        for k in 0..3 {
+            sum[i][k] += tangent[k];
+        }
+        w_sum[i] += tangent[3];
+    }
+
+    (0..positions.len())
+        .map(|i| {
+            let t = sum[i];
+            let len = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+            if len < 1e-8 {
+                [1.0, 0.0, 0.0, 1.0]
+            } else {
+                [
+                    t[0] / len,
+                    t[1] / len,
+                    t[2] / len,
+                    if w_sum[i] < 0.0 { -1.0 } else { 1.0 },
+                ]
+            }
+        })
+        .collect()
+}
+
+/// mikktspace 的几何适配器：把我们的顶点/索引喂给算法，切线输出到 `tangents`。
+struct TangentGeometry<'a> {
+    positions: &'a [[f32; 3]],
+    normals: &'a [[f32; 3]],
+    tex_coords: &'a [[f32; 2]],
+    indices: &'a [u32],
+    /// 每个角点（face*3+vert）的切线。
+    tangents: Vec<[f32; 4]>,
+}
+
+impl mikktspace::Geometry for TangentGeometry<'_> {
+    fn num_faces(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    fn num_vertices_of_face(&self, _face: usize) -> usize {
+        3
+    }
+
+    fn position(&self, face: usize, vert: usize) -> [f32; 3] {
+        self.positions[self.indices[face * 3 + vert] as usize]
+    }
+
+    fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
+        self.normals
+            .get(self.indices[face * 3 + vert] as usize)
+            .copied()
+            .unwrap_or([0.0, 0.0, 1.0])
+    }
+
+    fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
+        self.tex_coords[self.indices[face * 3 + vert] as usize]
+    }
+
+    fn set_tangent_encoded(&mut self, tangent: [f32; 4], face: usize, vert: usize) {
+        self.tangents[face * 3 + vert] = tangent;
     }
 }
 
@@ -526,5 +641,28 @@ mod tests {
         assert!(!library.is_empty());
         assert!(!textures.is_empty(), "PBR 样例应带基础色贴图");
         assert!(scene.object_count() > 0);
+        // PBR 材质数据应完整：至少一个网格物体带金属度/粗糙度贴图和法线贴图。
+        let pbr_material = scene.objects().find_map(|(_, object)| {
+            let mat = &object.material;
+            (object.mesh_key().is_some()
+                && mat.metallic_roughness_texture.is_some()
+                && mat.normal_texture.is_some())
+            .then_some(mat)
+        });
+        assert!(
+            pbr_material.is_some(),
+            "test.glb 应带 metallic-roughness 和 normal 贴图"
+        );
     }
+
+    /// MikkTSpace：XY 平面三角形，UV 的 u 沿 +X，切线应为 (1,0,0,1)。
+    #[test]
+    fn compute_tangents_basic() {
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let normals = [[0.0, 0.0, 1.0]; 3];
+        let uvs = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        let tangents = compute_tangents(&positions, &normals, &uvs, &[0, 1, 2]);
+        assert_eq!(tangents[0], [1.0, 0.0, 0.0, 1.0]);
+    }
+
 }

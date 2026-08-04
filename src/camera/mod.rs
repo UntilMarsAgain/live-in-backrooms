@@ -94,7 +94,8 @@ impl Camera {
         self.position += delta;
     }
 
-    /// 沿视线方向前后移动（滚轮缩放用）。
+    /// 沿视线方向前后移动。
+    #[allow(dead_code)] // 预留：滚轮改调速度后暂无调用方
     pub fn move_forward(&mut self, distance: f32) {
         self.position += self.forward() * distance;
     }

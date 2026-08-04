@@ -14,13 +14,15 @@
 - **触发时机**：物体数量上千、profile 显示世界矩阵计算成为热点时。先做 CPU 侧脏传播
   缓存，再考虑 GPU 侧跳过整次写入；更远期可把静态/动态物体拆两组 + instancing。
 
-## 灯光上限 MAX_LIGHTS = 8
+## 灯光：三种类型已落地，面光是近似
 
-- **现状**：uniform 数组定长 8（272 字节），CPU 收集时 clamp。
-- **来源**：惯例取值（4~16），无规范依据；WGSL uniform 数组必须编译期定长。
-- **已铺好的路**：`collect_lights` 已抽成独立函数，换 storage buffer 时只需改布局和
-  着色器绑定类型（`var<storage>` + 运行时长度数组），上限彻底消失。
-- **触发时机**：灯数超过几十；上千盏才需要 deferred / clustered forward。
+- **现状**：方向光 / 点光 / 面光（矩形面板）三种类型，统一 80 字节/灯；
+  点光平方反比衰减，面光按"朗伯发射面板 + 平方反比"近似；
+  uniform 数组定长 8（656 字节），CPU 收集时 clamp。
+- **待补**：真实矩形面光需要 **LTC**（BRDF LUT + 多边形积分）；聚光灯；
+  强度/颜色目前是直觉单位，没有 lux/W 物理语义。
+- **已铺好的路**：`collect_lights` 独立成函数、`size` 字段已为 LTC 预留；
+  灯数超过几十时换 storage buffer（`var<storage>` + 运行时长度数组）即可去掉上限。
 
 ## 网格资产：新增时整体重传
 
@@ -48,24 +50,29 @@
   （管线加实例输入即可，`draw_indexed(..., 0..instances)` 原生支持）。
 - **触发时机**：Level 0 迷宫/区块体系落地时一起做。
 
-## 着色器：Lambert → PBR / 高光 / 阴影
+## 着色器：PBR 已落地，阴影/IBL 待补
 
-- **现状**：环境光 + Lambert 漫反射；法线、世界位置已传入片元。
-- **已铺好的路**：PBR 只是替换 `fs_main` 里的 BRDF（GGX/菲涅尔），`ObjectData`、
-  `Lights` 结构不动；高光用 `camera.position` + `world_position` 即可（已就位）。
-- **阴影**：从灯光视角渲染深度（独立 pass，不是"灯光的着色器"），跟材质着色器并存。
-- **触发时机**：视觉效果需要时；PBR 不依赖其他结构改动。
+- **现状**：GGX 分布 + Smith 几何 + Schlick 菲涅尔（metallic workflow），
+  法线贴图（切线空间 → 世界，Gram-Schmidt）、金属度/粗糙度贴图已接入。
+- **待补**：阴影贴图（从灯光视角渲染深度，独立 pass）；环境光目前是硬编码
+  `albedo × 0.08`，金属材质在阴影里偏暗——将来换 IBL（环境贴图）才正确；
+  色调映射（HDR）也没做。
 
-## 纹理：基础色已接入，PBR 通道待补
+## 纹理：基础色 / 金属度粗糙度 / 法线已接入
 
 - **现状**：`TextureLibrary`（只追加、版本号驱动增量上传）+ `Material`
-  （base_color 因子 + 贴图）已落地；glTF 的 `baseColorTexture`/`baseColorFactor`
-  加载并采样，无贴图材质用 1×1 白纹理兜底；`write_texture` 整块上传
-  （无 256 行对齐要求，那是 `copy_buffer_to_texture` 的限制）。
-- **待补通道**：金属度/粗糙度（glTF metallic-roughness：B=粗糙度、G=金属度）、
-  法线（需要 TANGENT，glTF 自带或按 MikkTSpace 算）、自发光、AO——都是
-  "多一个采样器 + 多一个绑定"的同样模式，但要等 PBR BRDF（GGX/菲涅尔）
-  落地才能显示效果（见"着色器"一条）。
+  （base_color / metallic / roughness / normal 因子与贴图）已落地；glTF 的
+  `baseColorTexture` / `metallicRoughnessTexture`（B=金属度、G=粗糙度）/
+  `normalTexture` 加载并采样，缺贴图时用 1×1 兜底纹理（白 / 中性法线）；
+  顶点新增 TANGENT（法线贴图 TBN）。
+- **待补通道**：自发光（emissive）、AO（occlusion）、顶点色之外的材质混合——
+  同样的"多一个采样器 + 多一个绑定"模式。
+- **切线**：文件自带 TANGENT 直接用；缺失时按 MikkTSpace（`mikktspace` crate，
+  Blender 同款算法）自动计算，UV 接缝处正确。因此**不需要**在 Blender 手动
+  导出切线；资产也无需先三角化——glTF 数据本身就是三角形（Blender 导出时已
+  隐式三角化），我们的 MikkTSpace 跑在三角形上不会报错。Blender 的切线导出
+  报 "Could not calculate tangents" 是因为它在三角化之前对含 ngon 的原始网格
+  算切线；只有想让 .glb 文件自带 TANGENT（供其他工具用）时才需要先手动三角化。
 - **待办**：mipmap 生成（现在是 1 级，远处纹理会闪烁）、纹理驻留/卸载
   （多 Level 后）、UV 的 v 翻转约定验证（glTF 与 wgpu 采样原点实测为准）。
 
