@@ -190,7 +190,7 @@ impl EnvironmentResources {
         // 环境着色器：天空盒 + 计算转换入口。
         let env_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("environment shader"),
-            source: ShaderSource::Wgsl(include_str!("../environment.wgsl").into()),
+            source: ShaderSource::Wgsl(include_str!("environment.wgsl").into()),
         });
 
         // 计算转换的资源（GPU 路径执行；CPU 回退时同样创建，只是不运行）。

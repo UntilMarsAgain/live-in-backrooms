@@ -24,12 +24,12 @@ use super::environment::create_cube_texture;
 
     #[test]
     fn environment_shader_compiles() {
-        validate_wgsl(include_str!("environment.wgsl"));
+        validate_wgsl(include_str!("environment/environment.wgsl"));
     }
 
     #[test]
     fn debug_shader_compiles() {
-        validate_wgsl(include_str!("debug.wgsl"));
+        validate_wgsl(include_str!("debug/debug.wgsl"));
     }
 
     /// 无窗口设备：请求适配器并创建设备（含 max_bind_groups 8 与
