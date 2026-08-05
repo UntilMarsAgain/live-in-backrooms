@@ -65,6 +65,11 @@
   取自己那份；按材质分组，每组一条 multi-draw。实体等可动资产同样适用：不同网格
   由 `first_index`/`base_vertex` 指向大缓冲中的不同区间，蒙皮实体额外需要一块
   骨骼矩阵缓冲 + per-draw 关节区间偏移。
+- **上传模型（"批量上传"）**：几何顶点只在块加载/变更时进 GPU；每帧的动态数据是
+  **一次 `write_buffer` 写入的紧凑表**（间接参数 + storage 里的 per-draw 变换/材质），
+  一次覆盖成百上千个 draw，而不是逐块上传几何——这就是 26.3 Snapshot 6 terrain
+  重构后的形态（terrain shader 支持 multi-draw；`DynamicTransforms` 重排 uniform
+  内存、减少 std140 padding；另有 OIT 相关的 `RENDERPEARL_EXPLICIT_DEPTH_INVARIANCE`）。
 - **约束**：需要 `Features::MULTI_DRAW_INDIRECT`（用 `first_instance` 还需要
   `INDIRECT_FIRST_INSTANCE`），不是所有后端都支持 → 保留现有 CPU 循环做回退
   （能力探测后二选一）。
