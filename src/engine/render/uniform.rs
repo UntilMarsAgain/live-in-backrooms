@@ -90,7 +90,7 @@ struct LightUniform {
     /// 0=方向光 1=点光 2=面光。
     kind: u32,
     _pad: [u32; 3],
-    /// 方向光/面光：世界空间光照方向（局部 -Z 经旋转）。
+    /// 方向光/面光：世界空间行进方向（局部 -Z 经旋转）。
     direction: [f32; 3],
     _pad_direction: f32,
     /// 点光/面光：世界位置。
@@ -156,5 +156,39 @@ impl Default for EnvironmentParams {
             agx_max_ev: AGX_DEFAULT_MAX_EV,
             _pad: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::core::light::Light;
+    use crate::engine::core::transform::Transform;
+    use crate::engine::scene::{Scene, SceneObject, SceneObjectKind};
+    use glam::Quat;
+
+    /// 方向光的 uniform direction 应为行进方向（光源 → 场景），
+    /// 即物体局部 -Z 经旋转后的方向，与面光"发射方向"语义一致。
+    #[test]
+    fn directional_light_direction_is_travel_direction() {
+        let mut scene = Scene::new();
+        // 光从右上前方照向场景（来向 = arrival），行进方向 = -arrival。
+        let arrival = Vec3::new(0.5, 0.6, 0.6).normalize();
+        scene.add_object(SceneObject::new(
+            SceneObjectKind::Light(Light::directional(Vec3::ONE, 1.0)),
+            Transform::new(
+                Vec3::ZERO,
+                Quat::from_rotation_arc(Vec3::NEG_Z, -arrival),
+                Vec3::ONE,
+            ),
+        ));
+
+        let lights = collect_lights(&scene);
+        assert_eq!(lights.count, 1);
+        let dir = Vec3::from(lights.lights[0].direction);
+        assert!(
+            dir.normalize().dot(-arrival).abs() > 0.99,
+            "uniform direction 应为行进方向（-arrival），实际 {dir:?}"
+        );
     }
 }

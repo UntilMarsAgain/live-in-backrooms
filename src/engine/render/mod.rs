@@ -5,6 +5,7 @@
 //! - [`environment`]：环境贴图（天空盒 + IBL）的 GPU 资源与转换；
 //! - [`tests`]：WGSL 校验 + 无头冒烟测试（仅测试构建）。
 
+mod debug;
 mod environment;
 pub(crate) mod uniform;
 #[cfg(test)]
@@ -34,6 +35,7 @@ use super::core::texture::{Texture, TextureLibrary};
 use super::scene::Scene;
 
 use self::environment::{EnvConversionPath, EnvironmentGpu, EnvironmentResources};
+use self::debug::LightDebugGizmos;
 use self::uniform::{collect_lights, AGX_MIDDLE_GRAY_LOG2, LightsUniform, ObjectData};
 
 /// 窗口的显示句柄，用于创建 wgpu 实例。
@@ -97,6 +99,8 @@ pub struct Renderer {
     environment: EnvironmentGpu,
     /// 环境子系统资源（布局、计算管线、天空盒管线等）。
     environment_resources: EnvironmentResources,
+    /// 灯光调试可视化（灯泡 + 射线线框；顶点在 load_scene 时上传一次）。
+    debug_gizmos: LightDebugGizmos,
 }
 
 /// 资产库中单个网格在合并缓冲里的区间。
@@ -458,6 +462,9 @@ impl Renderer {
             conversion_path,
         );
 
+        // 5.8 灯光调试：线框管线复用相机绑定组（@group(0)）。
+        let debug_gizmos = LightDebugGizmos::new(&device, &camera_bind_group_layout, config.format);
+
         // 6. 渲染管线：网格 + 相机/物体/灯光/纹理/环境。
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("mesh shader"),
@@ -544,6 +551,7 @@ impl Renderer {
             mesh_uploaded_version: 0,
             environment: environment_resources.default_environment.clone(),
             environment_resources,
+            debug_gizmos,
         })
     }
 
@@ -669,6 +677,11 @@ impl Renderer {
         self.queue
             .write_buffer(&self.light_buffer, 0, bytemuck::bytes_of(&light_uniform));
 
+        // 灯光调试线框同样是静态数据：加载时生成并上传一次，
+        // 渲染时只按开关决定是否绘制，避免每帧重建/上传。
+        let gizmos = debug::build_light_gizmos(scene);
+        self.debug_gizmos.upload(&self.device, &self.queue, &gizmos);
+
         // 每个物体的材质绑定组（与 objects() 迭代顺序一致，渲染时按同一下标取用）。
         let mut material_bind_groups = Vec::with_capacity(scene.object_count());
         for (_, object) in scene.objects() {
@@ -730,7 +743,10 @@ impl Renderer {
     }
 
     /// 渲染一帧：写入相机与物体 uniform，清屏，绘制场景中所有物体并呈现。
-    pub fn render(&mut self, camera: &Camera, scene: &Scene) {
+    ///
+    /// `show_light_debug` 为 `true` 时，在网格之后叠加灯光调试线框
+    /// （灯泡 + 射线，顶点在 `load_scene` 时已上传，见 [`debug`] 模块）。
+    pub fn render(&mut self, camera: &Camera, scene: &Scene, show_light_debug: bool) {
         // 每帧把相机数据写入 uniform 缓冲区。
         let uniform = CameraUniform::from_camera(camera);
         self.queue
@@ -845,6 +861,12 @@ impl Renderer {
                             0..1,
                         );
                     }
+                }
+
+                // 灯光调试线框：顶点已上传，这里只按开关绘制
+                //（深度 Always + 不写深度，被遮挡也可见；关闭时跳过）。
+                if show_light_debug {
+                    self.debug_gizmos.draw(&mut pass, &self.camera_bind_group);
                 }
             }
 

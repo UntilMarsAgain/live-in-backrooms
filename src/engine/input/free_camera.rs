@@ -1,6 +1,8 @@
 //! 自由相机控制器：第一人称式输入 → 相机。
 
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use glam::Vec3;
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -18,6 +20,7 @@ use crate::engine::core::camera::Camera;
 /// - 点击窗口：捕获鼠标，之后移动鼠标直接旋转视角（自由视角）
 /// - Esc：释放鼠标（返回系统光标）
 /// - 滚轮：调整移动速度（乘法步进，带上下限）
+/// - L：切换灯光调试可视化（灯泡 + 射线的显示/隐藏）
 pub struct FreeCameraController {
     /// 移动速度（单位 / 秒）。
     speed: f32,
@@ -38,10 +41,17 @@ pub struct FreeCameraController {
     scroll_delta: f32,
     /// 鼠标是否已捕获（隐藏并锁定，用于自由视角）。
     mouse_captured: bool,
+    /// 灯光调试可视化开关（与 App/渲染器共享，L 键翻转）。
+    ///
+    /// 开关不属于相机状态，用共享原子标志传回 App，保持
+    /// "输入控制器只驱动目标"的抽象不被破坏。
+    show_light_debug: Arc<AtomicBool>,
 }
 
 impl FreeCameraController {
-    pub fn new() -> Self {
+    /// 新建控制器；`show_light_debug` 是与 App 共享的灯光调试开关，
+    /// 由 L 键翻转，App 侧每帧读取决定是否绘制调试线框。
+    pub fn new(show_light_debug: Arc<AtomicBool>) -> Self {
         Self {
             speed: 5.0,
             min_speed: 0.5,
@@ -53,6 +63,7 @@ impl FreeCameraController {
             look_delta: (0.0, 0.0),
             scroll_delta: 0.0,
             mouse_captured: false,
+            show_light_debug,
         }
     }
 
@@ -89,6 +100,11 @@ impl InputController<Camera> for FreeCameraController {
                 match key_event.state {
                     ElementState::Pressed => {
                         self.keys.insert(code);
+                        // L：切换灯光调试可视化（长按不重复触发）。
+                        if code == KeyCode::KeyL && !key_event.repeat {
+                            let on = self.show_light_debug.fetch_xor(true, Ordering::Relaxed);
+                            eprintln!("灯光调试可视化：{}", if on { "关" } else { "开" });
+                        }
                         // Esc 释放鼠标，回到系统光标。
                         if code == KeyCode::Escape && self.mouse_captured {
                             self.release_mouse(window);
@@ -187,6 +203,6 @@ impl InputController<Camera> for FreeCameraController {
 
 impl Default for FreeCameraController {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(AtomicBool::new(false)))
     }
 }

@@ -45,7 +45,7 @@ pub enum SceneObjectKind {
     Empty,
     /// 引用全局资产库里的网格。
     Mesh(MeshKey),
-    /// 方向光：方向由物体旋转决定（局部 -Z 指向场景）。
+    /// 方向光：方向由物体旋转决定（局部 -Z 指向光行进方向，与面光一致）。
     Light(Light),
 }
 
@@ -318,12 +318,14 @@ impl Scene {
     ) -> Self {
         let mut scene = Self::new();
         // 方向光：从右上前方照向场景。
-        let light_direction = Vec3::new(0.5, 0.6, 0.6).normalize();
+        // 约定：物体局部 -Z = 光行进方向（光源 → 场景，与面光一致）；
+        // 光从右上前方照来，所以行进方向 = 光的来向取反。
+        let light_arrival = Vec3::new(0.5, 0.6, 0.6).normalize();
         scene.add_object(SceneObject::new(
             SceneObjectKind::Light(Light::directional(Vec3::ONE, 0.7)),
             Transform::new(
                 Vec3::ZERO,
-                Quat::from_rotation_arc(Vec3::NEG_Z, light_direction),
+                Quat::from_rotation_arc(Vec3::NEG_Z, -light_arrival),
                 Vec3::ONE,
             ),
         ));

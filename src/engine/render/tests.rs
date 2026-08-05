@@ -27,6 +27,11 @@ use super::environment::create_cube_texture;
         validate_wgsl(include_str!("environment.wgsl"));
     }
 
+    #[test]
+    fn debug_shader_compiles() {
+        validate_wgsl(include_str!("debug.wgsl"));
+    }
+
     /// 无窗口设备：请求适配器并创建设备（含 max_bind_groups 8 与
     /// FLOAT32_FILTERABLE 特性）。失败时打印原因并返回 `None`（CI 无 GPU 可跳过）。
     fn headless_device() -> Option<(wgpu::Device, wgpu::Queue, bool, EnvConversionPath)> {
@@ -182,6 +187,127 @@ use super::environment::create_cube_texture;
             pass.set_bind_group(0, &camera_bind_group, &[]);
             pass.set_bind_group(1, &gpu_env.skybox_bind_group, &[]);
             pass.draw(0..3, 0..1);
+        }
+        queue.submit([encoder.finish()]);
+        // 等待 GPU 完成，确保编码/提交阶段没有触发校验错误。
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll 应成功");
+    }
+
+    /// 无窗口冒烟测试：灯光调试线框管线的创建与绘制不触发 wgpu 校验错误。
+    #[test]
+    fn light_debug_gizmos_headless_smoke() {
+        let Some((device, queue, _, _)) = headless_device() else {
+            return;
+        };
+
+        // 相机绑定组（调试管线复用 @group(0) 的相机 uniform 布局）。
+        let camera_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("debug smoke camera layout"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let camera_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("debug smoke camera buffer"),
+            size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &camera_buffer,
+            0,
+            bytemuck::bytes_of(&CameraUniform {
+                view_proj: glam::Mat4::IDENTITY,
+                position: glam::Vec3::ZERO,
+                _padding: 0,
+                inverse_view_proj: glam::Mat4::IDENTITY,
+            }),
+        );
+        let camera_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("debug smoke camera bind group"),
+            layout: &camera_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+        });
+
+        // 调试管线 + 两条线段（4 个顶点）绘制到离屏纹理。
+        let mut gizmos = super::debug::LightDebugGizmos::new(
+            &device,
+            &camera_layout,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let color_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("debug smoke color texture"),
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth = create_depth_texture(&device, 4, 4);
+        let color_view = color_texture.create_view(&TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("debug smoke encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("debug smoke pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(CLEAR_COLOR),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth.1,
+                    depth_ops: Some(wgpu::Operations {
+                        load: LoadOp::Clear(1.0),
+                        store: StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            let vertices = [
+                super::debug::DebugVertex {
+                    position: [0.0, 0.0, 0.0],
+                    color: [1.0, 0.0, 0.0],
+                },
+                super::debug::DebugVertex {
+                    position: [1.0, 0.0, 0.0],
+                    color: [1.0, 0.0, 0.0],
+                },
+                super::debug::DebugVertex {
+                    position: [0.0, 0.0, 0.0],
+                    color: [0.0, 1.0, 0.0],
+                },
+                super::debug::DebugVertex {
+                    position: [0.0, 1.0, 0.0],
+                    color: [0.0, 1.0, 0.0],
+                },
+            ];
+            gizmos.upload(&device, &queue, &vertices);
+            gizmos.draw(&mut pass, &camera_bind_group);
         }
         queue.submit([encoder.finish()]);
         // 等待 GPU 完成，确保编码/提交阶段没有触发校验错误。

@@ -23,7 +23,7 @@ struct LightData {
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
-    direction: vec3<f32>, // 方向光/面光：光照方向（局部 -Z 经旋转）
+    direction: vec3<f32>, // 方向光/面光：行进方向，即局部 -Z 经世界旋转
     _pad3: f32,
     position: vec3<f32>, // 点光/面光：世界位置
     _pad4: f32,
@@ -233,10 +233,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     for (var i = 0u; i < lights.count; i = i + 1u) {
         let light = lights.lights[i];
         // 光照方向与衰减按类型计算。
+        // light.direction 对方向光/面光统一是行进方向（光源 → 场景）；
+        // 着色时 l 需要"表面 → 光源"，方向光因此取反。
         var l: vec3<f32>;
         var attenuation: f32;
         if (light.kind == 0u) {
-            l = normalize(light.direction);
+            l = -normalize(light.direction);
             attenuation = light.intensity;
         } else if (light.kind == 1u) {
             let delta = light.position - input.world_position;

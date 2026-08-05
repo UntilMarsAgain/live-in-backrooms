@@ -5,6 +5,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use winit::event::{DeviceEvent, WindowEvent};
@@ -29,6 +30,8 @@ pub struct App {
     /// 全局纹理资产库（永久驻留，跨场景共享）。
     texture_library: TextureLibrary,
     scene: Scene,
+    /// 灯光调试可视化开关（控制器按 L 翻转，渲染时读取）。
+    show_light_debug: Arc<AtomicBool>,
 }
 
 impl App {
@@ -45,7 +48,10 @@ impl App {
             0.1,
             100.0,
         );
-        let controller: Box<dyn InputController<Camera>> = Box::new(FreeCameraController::new());
+        // 灯光调试开关由控制器独占翻转，App 只读；用 Arc 共享给两边。
+        let show_light_debug = Arc::new(AtomicBool::new(false));
+        let controller: Box<dyn InputController<Camera>> =
+            Box::new(FreeCameraController::new(show_light_debug.clone()));
         let renderer = Renderer::new(&window, display)?;
         let mut app = Self {
             window,
@@ -56,6 +62,7 @@ impl App {
             mesh_library: MeshLibrary::new(),
             texture_library: TextureLibrary::new(),
             scene: Scene::default(),
+            show_light_debug,
         };
         app.load_startup_scene();
         Ok(app)
@@ -199,7 +206,11 @@ impl App {
                     .set_aspect(size.width as f32 / size.height.max(1) as f32);
                 self.window.request_redraw();
             }
-            WindowEvent::RedrawRequested => self.renderer.render(&self.camera, &self.scene),
+            WindowEvent::RedrawRequested => self.renderer.render(
+                &self.camera,
+                &self.scene,
+                self.show_light_debug.load(Ordering::Relaxed),
+            ),
             // 其余（键盘、鼠标等）交给控制器处理。
             _ => self.controller.handle_event(&event, &self.window),
         }
