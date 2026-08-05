@@ -1,6 +1,5 @@
 /target
 
 # 游戏美术资产目录：内容不入库，仅保留说明文件。
-/assets/*
-!/assets/
-!/assets/ASSETS.md
+/game-data/vanilla/assets/*
+!/game-data/vanilla/assets/ASSETS.md

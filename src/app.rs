@@ -68,7 +68,7 @@ impl App {
             }
             eprintln!("回退到演示场景");
         } else {
-            let default = Path::new("assets/scene.glb");
+            let default = Path::new("game-data/vanilla/assets/scene.glb");
             if default.is_file() && self.try_load_gltf(default, environment.as_ref()) {
                 return;
             }
@@ -115,7 +115,7 @@ impl App {
     fn load_environment(&mut self) -> Option<Arc<Environment>> {
         let path = std::env::var_os("BACKROOMS_ENV")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("assets/environments/test.hdr"));
+            .unwrap_or_else(|| std::path::PathBuf::from("game-data/vanilla/assets/environments/test.hdr"));
         match Environment::from_file(&path) {
             Ok(env) => {
                 eprintln!(

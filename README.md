@@ -5,7 +5,7 @@
 ## Getting Art Assets
 
 This repository does not include art assets. See
-[assets/ASSETS.md](assets/ASSETS.md) for how to obtain them.
+[game-data/vanilla/assets/ASSETS.md](game-data/vanilla/assets/ASSETS.md) for how to obtain them.
 
 ## Documentation
 
@@ -18,7 +18,7 @@ Project notes live in [docs/](docs/):
 ## License
 
 - Code is licensed under GPL v3. See [LICENSE](LICENSE).
-- Art assets are licensed separately; see [assets/ASSETS.md](assets/ASSETS.md).
+- Art assets are licensed separately; see [game-data/vanilla/assets/ASSETS.md](game-data/vanilla/assets/ASSETS.md).
 
 ## AI Disclosure
 
