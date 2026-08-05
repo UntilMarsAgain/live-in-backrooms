@@ -4,7 +4,7 @@
 
 ## 获取美术资产
 
-本仓库不包含美术资产。具体获取方法见 [game-data/vanilla/assets/ASSETS.md](game-data/vanilla/assets/ASSETS.md)。
+本仓库不包含美术资产。具体获取方法见 [ASSETS.md](ASSETS.md)。
 
 ## 文档
 
@@ -17,7 +17,7 @@
 ## 许可证
 
 - 代码采用 GPL v3 许可，见 [LICENSE](LICENSE)。
-- 美术资产授权情况另行声明，见 [game-data/vanilla/assets/ASSETS.md](game-data/vanilla/assets/ASSETS.md)。
+- 美术资产授权情况另行声明，见 [ASSETS.md](ASSETS.md)。
 
 ## AI 声明
 

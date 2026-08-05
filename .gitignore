@@ -2,7 +2,6 @@
 
 # 游戏美术资产目录：内容不入库，仅保留说明文件。
 /game-data/vanilla/assets/*
-!/game-data/vanilla/assets/ASSETS.md
 
 # 测试数据目录：内容不入库，仅保留说明文件。
 /test/*
