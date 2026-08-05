@@ -98,7 +98,7 @@ impl App {
             .expect("注册了 1 张贴图");
         let mut scene = Scene::demo(*triangle, *quad, *cube, Some(checker));
         if let Some(env) = &environment {
-            scene = scene.with_environment(env.clone());
+            scene = scene.with_environment(env.clone()).with_environment_intensity(1.0);
         }
         let test_glb = Path::new("src/engine/asset/test.glb");
         if test_glb.is_file() {
@@ -112,7 +112,7 @@ impl App {
                     // 避免和原点处的三角形重叠。
                     for key in scene.merge(&gltf_scene) {
                         if let Some(object) = scene.object_mut(key) {
-                            object.transform.scale *=3.0;
+                            object.transform.scale *=5.0;
                             object.transform.position += glam::Vec3::new(1.8, 0.0, -1.2);
                         }
                     }
