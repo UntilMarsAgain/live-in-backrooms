@@ -174,6 +174,105 @@ impl Environment {
         }
         out
     }
+
+    /// 立方体贴图 → 镜面预过滤 mip 链（镜面 IBL，CPU）。
+    ///
+    /// 每层 `out_size>>mip`，roughness = mip / (mip_count-1)，GGX 重要性采样；
+    /// 与 environment.wgsl 的 `prefilter` 计算着色器使用同一套数学。
+    pub fn prefilter_map(
+        cube: &[[f32; 4]],
+        cube_face: u32,
+        out_size: u32,
+        mip_count: u32,
+        samples: u32,
+    ) -> Vec<Vec<[f32; 4]>> {
+        let mut mips = Vec::with_capacity(mip_count as usize);
+        for mip in 0..mip_count {
+            let size = out_size >> mip;
+            let roughness = mip as f32 / (mip_count.max(2) - 1) as f32;
+            let mut face_pixels = vec![[0.0f32; 4]; (size * size * 6) as usize];
+            for face in 0..6u32 {
+                for y in 0..size {
+                    for x in 0..size {
+                        let u = (x as f32 + 0.5) / size as f32;
+                        let v = (y as f32 + 0.5) / size as f32;
+                        let n = face_dir(face, u, v).normalize();
+                        let r = n; // 预过滤假设 view = normal（标准 split-sum 近似）。
+                        let basis = tangent_basis(n);
+                        let mut acc = [0.0f32; 3];
+                        let mut weight = 0.0f32;
+                        for i in 0..samples {
+                            let h = importance_sample_ggx(hammersley(i, samples), roughness);
+                            let h_world =
+                                (basis.0 * h.x + basis.1 * h.y + basis.2 * h.z).normalize();
+                            let l = (2.0 * r.dot(h_world) * h_world - r).normalize();
+                            let n_dot_l = n.dot(l).max(0.0);
+                            if n_dot_l > 0.0 {
+                                let c = sample_cube(cube, cube_face, l);
+                                acc[0] += c[0] * n_dot_l;
+                                acc[1] += c[1] * n_dot_l;
+                                acc[2] += c[2] * n_dot_l;
+                                weight += n_dot_l;
+                            }
+                        }
+                        let value = if weight > 1e-5 {
+                            [
+                                acc[0] / weight,
+                                acc[1] / weight,
+                                acc[2] / weight,
+                                1.0,
+                            ]
+                        } else {
+                            [0.0, 0.0, 0.0, 1.0]
+                        };
+                        let idx = ((face * size + y) * size + x) as usize;
+                        face_pixels[idx] = value;
+                    }
+                }
+            }
+            mips.push(face_pixels);
+        }
+        mips
+    }
+
+    /// 生成 BRDF 积分查找表（split-sum 第二项，CPU）。
+    ///
+    /// 尺寸 `size×size`：x = NdotV，y = roughness；输出 RGBA（a, b 存前两通道），
+    /// 与 environment.wgsl 的 `brdf_lut` 计算着色器使用同一套数学。
+    pub fn brdf_lut(size: u32, samples: u32) -> Vec<[f32; 4]> {
+        let mut out = vec![[0.0f32; 4]; (size * size) as usize];
+        let n = Vec3::Z;
+        for y in 0..size {
+            for x in 0..size {
+                let n_dot_v = (x as f32 + 0.5) / size as f32;
+                let roughness = (y as f32 + 0.5) / size as f32;
+                let v = Vec3::new((1.0 - n_dot_v * n_dot_v).max(0.0).sqrt(), 0.0, n_dot_v);
+                let mut a = 0.0f32;
+                let mut b = 0.0f32;
+                for i in 0..samples {
+                    let h = importance_sample_ggx(hammersley(i, samples), roughness);
+                    let l = (2.0 * v.dot(h) * h - v).normalize();
+                    let n_dot_l = l.z.max(0.0);
+                    let n_dot_h = h.z.max(0.0);
+                    let v_dot_h = v.dot(h).max(0.0);
+                    if n_dot_l > 0.0 {
+                        let g = geometry_smith(n, v, l, roughness);
+                        let g_vis = g * v_dot_h / (n_dot_h * n_dot_v + 0.0001);
+                        let fc = (1.0 - v_dot_h).powf(5.0);
+                        a += (1.0 - fc) * g_vis;
+                        b += fc * g_vis;
+                    }
+                }
+                out[(y * size + x) as usize] = [
+                    a / samples as f32,
+                    b / samples as f32,
+                    0.0,
+                    1.0,
+                ];
+            }
+        }
+        out
+    }
 }
 
 /// sRGB 编码值 → 线性亮度（精确曲线）。
@@ -307,6 +406,27 @@ fn cosine_sample_hemisphere((u, v): (f32, f32)) -> Vec3 {
     Vec3::new(phi.cos() * sin_theta, cos_theta, phi.sin() * sin_theta)
 }
 
+/// GGX 重要性采样：返回以法线为 +Z 的切线空间半向量（与 environment.wgsl 一致）。
+fn importance_sample_ggx((u, v): (f32, f32), roughness: f32) -> Vec3 {
+    let a = roughness * roughness;
+    let phi = 2.0 * PI * u;
+    let cos_theta = ((1.0 - v) / (1.0 + (a * a - 1.0) * v)).sqrt();
+    let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
+    Vec3::new(phi.cos() * sin_theta, phi.sin() * sin_theta, cos_theta)
+}
+
+/// GGX Schlick 几何项（BRDF LUT 积分用，k = a²/2）。
+fn geometry_schlick_ggx(n_dot_x: f32, roughness: f32) -> f32 {
+    let k = roughness * roughness / 2.0;
+    n_dot_x / (n_dot_x * (1.0 - k) + k)
+}
+
+/// GGX Smith 几何项（视角 × 光照两个方向）。
+fn geometry_smith(n: Vec3, v: Vec3, l: Vec3, roughness: f32) -> f32 {
+    geometry_schlick_ggx(n.dot(v).max(0.0), roughness)
+        * geometry_schlick_ggx(n.dot(l).max(0.0), roughness)
+}
+
 /// 以法线为 +Z 构造正交基。
 fn tangent_basis(n: Vec3) -> (Vec3, Vec3, Vec3) {
     let up = if n.z.abs() > 0.999 { Vec3::X } else { Vec3::Z };
@@ -386,6 +506,39 @@ mod tests {
         for p in &irr {
             assert!(p[0].is_finite() && p[1].is_finite() && p[2].is_finite());
             assert!(p[0] > 0.0 && p[1] > 0.0 && p[2] > 0.0);
+        }
+    }
+
+    /// CPU 转换：镜面预过滤 mip 链应有数据且数值有限（无 NaN/Inf）。
+    #[test]
+    fn prefilter_map_is_finite_and_positive() {
+        // 全白环境：预过滤结果应与环境同色（各向同性、为正）。
+        let env = Environment {
+            width: 2,
+            height: 1,
+            rgb: vec![[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]],
+        };
+        let cube = env.to_cubemap(8);
+        let mips = Environment::prefilter_map(&cube, 8, 4, 3, 128);
+        assert_eq!(mips.len(), 3);
+        for mip in &mips {
+            for p in mip {
+                assert!(p[0].is_finite() && p[1].is_finite() && p[2].is_finite());
+                assert!(p[0] > 0.0 && p[1] > 0.0 && p[2] > 0.0);
+            }
+        }
+    }
+
+    /// CPU 转换：BRDF LUT 数值有限且在 [0, 1] 附近（无越界/NaN）。
+    #[test]
+    fn brdf_lut_is_finite_and_bounded() {
+        let lut = Environment::brdf_lut(32, 128);
+        assert_eq!(lut.len(), 32 * 32);
+        for p in &lut {
+            assert!(p[0].is_finite() && p[1].is_finite());
+            // split-sum 的 a/b 项都在 [0, 1] 区间附近。
+            assert!((0.0..=1.5).contains(&p[0]));
+            assert!((0.0..=1.5).contains(&p[1]));
         }
     }
 

@@ -13,7 +13,7 @@ use wgpu::{
 };
 
 use crate::engine::core::environment::Environment;
-use super::uniform::{EnvParams, EnvironmentParams};
+use super::uniform::{EnvParams, EnvironmentParams, PrefilterParams};
 
 /// 环境立方体贴图每面尺寸。
 pub(super) const ENV_CUBEMAP_SIZE: u32 = 256;
@@ -21,16 +21,26 @@ pub(super) const ENV_CUBEMAP_SIZE: u32 = 256;
 pub(super) const IRRADIANCE_SIZE: u32 = 32;
 /// 辐照度图余弦加权采样数：启动时一次性计算，取大一些换取平滑。
 pub(super) const IRRADIANCE_SAMPLES: u32 = 1024;
+/// 镜面预过滤图（Specular IBL）每面尺寸。
+pub(super) const PREFILTERED_SIZE: u32 = 128;
+/// 预过滤图 mip 层数：128 → 1（8 层，roughness 均匀映射到各层）。
+pub(super) const PREFILTER_MIP_COUNT: u32 = 8;
+/// 预过滤每纹素 GGX 采样数。
+pub(super) const PREFILTER_SAMPLES: u32 = 1024;
+/// BRDF 积分查找表尺寸（x = NdotV，y = roughness）。
+pub(super) const BRDF_LUT_SIZE: u32 = 128;
+/// BRDF LUT 每纹素采样数。
+pub(super) const BRDF_LUT_SAMPLES: u32 = 1024;
 
-/// 环境贴图的 GPU 表示：环境立方体贴图 + 辐照度图 + 绑定组。
+/// 环境贴图的 GPU 表示：环境立方体贴图 + 辐照度图 + 镜面预过滤图 + BRDF LUT。
 ///
 /// 纹理由视图持有引用，`set_environment` 重建时旧资源自动随引用释放。
 #[derive(Clone)]
 pub(super) struct EnvironmentGpu {
-    /// 环境立方体贴图（天空盒采样；未来的镜面预过滤也以此为输入）。
+    /// 环境立方体贴图（天空盒采样；镜面预过滤的输入）。
     #[allow(dead_code)] // 资源所有权显式化；readback 诊断与镜面 IBL（Phase 2）会使用
     pub(super) environment_texture: wgpu::Texture,
-    /// 环境立方体贴图视图（天空盒与未来的镜面反射采样）。
+    /// 环境立方体贴图视图（天空盒采样）。
     #[allow(dead_code)]
     pub(super) environment_view: wgpu::TextureView,
     /// 辐照度图纹理（漫反射 IBL）。
@@ -39,6 +49,18 @@ pub(super) struct EnvironmentGpu {
     /// 辐照度图视图（漫反射 IBL）。
     #[allow(dead_code)]
     pub(super) irradiance_view: wgpu::TextureView,
+    /// 镜面预过滤图纹理（mip 链，按粗糙度采样）。
+    #[allow(dead_code)]
+    pub(super) prefiltered_texture: wgpu::Texture,
+    /// 镜面预过滤图视图（mesh 着色器反射采样）。
+    #[allow(dead_code)]
+    pub(super) prefiltered_view: wgpu::TextureView,
+    /// BRDF 积分查找表纹理。
+    #[allow(dead_code)]
+    pub(super) brdf_lut_texture: wgpu::Texture,
+    /// BRDF 查找表视图。
+    #[allow(dead_code)]
+    pub(super) brdf_lut_view: wgpu::TextureView,
     #[allow(dead_code)]
     pub(super) sampler: wgpu::Sampler,
     /// mesh 管线 @group(4) 绑定组。
@@ -85,6 +107,27 @@ fn create_default_environment(
         array_layer_count: Some(6),
         ..Default::default()
     });
+    // 默认 BRDF LUT：1×1 黑纹理（无镜面反射时贡献 0）。
+    let black_2d = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label: Some("default black 2d texture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::wgt::TextureDataOrder::LayerMajor,
+        &[0u8; 16],
+    );
+    let black_2d_view = black_2d.create_view(&TextureViewDescriptor::default());
     let mesh_bind_group = device.create_bind_group(&BindGroupDescriptor {
         label: Some("default environment mesh bind group"),
         layout: environment_layout,
@@ -104,6 +147,14 @@ fn create_default_environment(
             BindGroupEntry {
                 binding: 3,
                 resource: intensity_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(&black_2d_view),
             },
         ],
     });
@@ -128,8 +179,12 @@ fn create_default_environment(
     EnvironmentGpu {
         environment_texture: black.clone(),
         environment_view: view.clone(),
-        irradiance_texture: black,
-        irradiance_view: view,
+        irradiance_texture: black.clone(),
+        irradiance_view: view.clone(),
+        prefiltered_texture: black,
+        prefiltered_view: view,
+        brdf_lut_texture: black_2d,
+        brdf_lut_view: black_2d_view,
         sampler: sampler.clone(),
         mesh_bind_group,
         skybox_bind_group,
@@ -194,6 +249,111 @@ pub(super) fn create_cube_texture(
     texture
 }
 
+/// 创建带 mip 链的 6 层 RGBA32F 立方体贴图并逐层逐 mip 上传（CPU 路径用）。
+///
+/// `mips[mip]` 是第 mip 层 6 个面的数据（每面 `face_size>>mip` 见方）；
+/// 逐层写避开 GL 后端整块写数组纹理的 bug，与 [`create_cube_texture`] 同策略。
+pub(super) fn create_mip_cube_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    face_size: u32,
+    mip_count: u32,
+    mips: &[Vec<[f32; 4]>],
+    label: &str,
+) -> wgpu::Texture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: face_size,
+            height: face_size,
+            depth_or_array_layers: 6,
+        },
+        mip_level_count: mip_count,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for mip in 0..mip_count {
+        let mip_size = face_size >> mip;
+        let layer_pixels = (mip_size * mip_size) as usize;
+        for layer in 0..6u32 {
+            let layer_data =
+                &mips[mip as usize][(layer as usize * layer_pixels)..((layer as usize + 1) * layer_pixels)];
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: mip,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(layer_data),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(mip_size * 16),
+                    rows_per_image: Some(mip_size),
+                },
+                wgpu::Extent3d {
+                    width: mip_size,
+                    height: mip_size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+    texture
+}
+
+/// 创建单层 RGBA32F 2D 纹理并上传（CPU 路径的 BRDF LUT 用）。
+fn create_2d_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    rgba32f: &[[f32; 4]],
+    label: &str,
+) -> wgpu::Texture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(rgba32f),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 16),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture
+}
+
 
 /// 环境转换路径：Vulkan/Metal 用 GPU 计算，其余后端回退 CPU。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +395,20 @@ pub(super) struct EnvironmentResources {
     pub(super) env_convert_pipeline: wgpu::ComputePipeline,
     /// cubemap → 辐照度图计算管线。
     pub(super) irradiance_pipeline: wgpu::ComputePipeline,
+    /// 预过滤（镜面 IBL）计算管线的绑定组布局。
+    pub(super) prefilter_layout: wgpu::BindGroupLayout,
+    /// BRDF LUT 计算管线的绑定组布局。
+    pub(super) brdf_lut_layout: wgpu::BindGroupLayout,
+    /// 预过滤参数 uniform 缓冲（每个 mip 一个）。
+    ///
+    /// 复用单个缓冲会踩 docs/BUG.md 记录过的坑：`queue.write_buffer` 先于
+    /// `submit()` 里的 pass 执行，循环里多次写同一缓冲会让所有 pass 读到
+    /// 最后一次的参数（mip 0..6 全部提前 return，预过滤图基本全黑）。
+    pub(super) prefilter_params: Vec<wgpu::Buffer>,
+    /// 预过滤计算管线（GGX 重要性采样 mip 链）。
+    pub(super) prefilter_pipeline: wgpu::ComputePipeline,
+    /// BRDF LUT 计算管线（split-sum 第二项）。
+    pub(super) brdf_lut_pipeline: wgpu::ComputePipeline,
     /// 天空盒渲染管线。
     pub(super) skybox_pipeline: wgpu::RenderPipeline,
     /// 无环境时的默认绑定组（1×1 黑环境）。
@@ -300,6 +474,30 @@ impl EnvironmentResources {
                         },
                         count: None,
                     },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float {
+                                filterable: float32_filterable,
+                            },
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float {
+                                filterable: float32_filterable,
+                            },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -360,7 +558,12 @@ impl EnvironmentResources {
             } else {
                 wgpu::FilterMode::Nearest
             },
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            // 镜面预过滤图需要三线性（mip 间插值）；辐照度/天空盒只采 mip 0，不受影响。
+            mipmap_filter: if float32_filterable {
+                wgpu::MipmapFilterMode::Linear
+            } else {
+                wgpu::MipmapFilterMode::Nearest
+            },
             ..Default::default()
         });
 
@@ -527,6 +730,104 @@ impl EnvironmentResources {
             cache: None,
         });
 
+        // 镜面预过滤：GGX 重要性采样写 mip 链（每个 mip 一次 dispatch）。
+        let prefilter_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("prefilter bind group layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: float32_filterable,
+                        },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Sampler(if float32_filterable {
+                        wgpu::SamplerBindingType::Filtering
+                    } else {
+                        wgpu::SamplerBindingType::NonFiltering
+                    }),
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let brdf_lut_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("brdf lut bind group layout"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            }],
+        });
+        let prefilter_params = (0..PREFILTER_MIP_COUNT)
+            .map(|mip| {
+                device.create_buffer(&BufferDescriptor {
+                    label: Some(&format!("prefilter params buffer (mip {mip})")),
+                    size: std::mem::size_of::<PrefilterParams>() as u64,
+                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+        let prefilter_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("prefilter pipeline layout"),
+            bind_group_layouts: &[Some(&prefilter_layout)],
+            immediate_size: 0,
+        });
+        let brdf_lut_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("brdf lut pipeline layout"),
+            bind_group_layouts: &[Some(&brdf_lut_layout)],
+            immediate_size: 0,
+        });
+        let prefilter_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("prefilter pipeline"),
+            layout: Some(&prefilter_pipeline_layout),
+            module: &env_shader,
+            entry_point: Some("prefilter"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let brdf_lut_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("brdf lut pipeline"),
+            layout: Some(&brdf_lut_pipeline_layout),
+            module: &env_shader,
+            entry_point: Some("brdf_lut"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // 天空盒管线：全屏三角形，深度写关 + LessEqual（先画，网格随后正常遮挡）。
         let skybox_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("skybox pipeline layout"),
@@ -582,6 +883,11 @@ impl EnvironmentResources {
             irradiance_params,
             env_convert_pipeline,
             irradiance_pipeline,
+            prefilter_layout,
+            brdf_lut_layout,
+            prefilter_params,
+            prefilter_pipeline,
+            brdf_lut_pipeline,
             skybox_pipeline,
             default_environment,
         }
@@ -600,8 +906,9 @@ impl EnvironmentResources {
         let face_size = ENV_CUBEMAP_SIZE;
         let irradiance_size = IRRADIANCE_SIZE;
 
-        // 1. 按路径生成两张 6 层 RGBA32F 立方体贴图。
-        let (env_texture, irradiance_texture) = match self.conversion_path {
+        // 1. 按路径生成环境图、辐照度图、镜面预过滤图与 BRDF LUT。
+        let (env_texture, irradiance_texture, prefiltered_texture, brdf_lut_texture) =
+            match self.conversion_path {
             EnvConversionPath::Gpu => self.convert_gpu(device, queue, environment),
             EnvConversionPath::Cpu => {
                 // CPU 转换 + 逐层上传（write_texture 无 256 对齐要求）。
@@ -612,6 +919,14 @@ impl EnvironmentResources {
                     irradiance_size,
                     IRRADIANCE_SAMPLES,
                 );
+                let prefiltered_mips = Environment::prefilter_map(
+                    &cube_pixels,
+                    face_size,
+                    PREFILTERED_SIZE,
+                    PREFILTER_MIP_COUNT,
+                    PREFILTER_SAMPLES,
+                );
+                let brdf_pixels = Environment::brdf_lut(BRDF_LUT_SIZE, BRDF_LUT_SAMPLES);
                 (
                     create_cube_texture(
                         device,
@@ -626,6 +941,22 @@ impl EnvironmentResources {
                         irradiance_size,
                         &irradiance_pixels,
                         "irradiance cubemap",
+                    ),
+                    create_mip_cube_texture(
+                        device,
+                        queue,
+                        PREFILTERED_SIZE,
+                        PREFILTER_MIP_COUNT,
+                        &prefiltered_mips,
+                        "prefiltered cubemap",
+                    ),
+                    create_2d_texture(
+                        device,
+                        queue,
+                        BRDF_LUT_SIZE,
+                        BRDF_LUT_SIZE,
+                        &brdf_pixels,
+                        "brdf lut",
                     ),
                 )
             }
@@ -644,6 +975,17 @@ impl EnvironmentResources {
             dimension: Some(wgpu::TextureViewDimension::Cube),
             base_array_layer: 0,
             array_layer_count: Some(6),
+            ..Default::default()
+        });
+        let prefiltered_cube_view = prefiltered_texture.create_view(&TextureViewDescriptor {
+            label: Some("prefiltered cubemap cube view"),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            base_array_layer: 0,
+            array_layer_count: Some(6),
+            ..Default::default()
+        });
+        let brdf_lut_view = brdf_lut_texture.create_view(&TextureViewDescriptor {
+            label: Some("brdf lut view"),
             ..Default::default()
         });
 
@@ -667,6 +1009,14 @@ impl EnvironmentResources {
                 BindGroupEntry {
                     binding: 3,
                     resource: self.env_params_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&prefiltered_cube_view),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&brdf_lut_view),
                 },
             ],
         });
@@ -694,6 +1044,10 @@ impl EnvironmentResources {
             environment_view: env_cube_view,
             irradiance_texture,
             irradiance_view: irradiance_cube_view,
+            prefiltered_texture,
+            prefiltered_view: prefiltered_cube_view,
+            brdf_lut_texture,
+            brdf_lut_view,
             sampler: self.env_sampler.clone(),
             mesh_bind_group,
             skybox_bind_group,
@@ -717,7 +1071,8 @@ impl EnvironmentResources {
         );
     }
 
-    /// GPU 路径：上传等距矩形源，两个计算 pass 产出环境图与辐照度图。
+    /// GPU 路径：上传等距矩形源，计算 pass 产出环境图、辐照度图、
+    /// 镜面预过滤 mip 链与 BRDF LUT。
     ///
     /// 只在 storage 数组纹理可靠的后端（Vulkan/Metal）调用；GL 后端在这里
     /// 会写入全零（见 docs/BUG.md），因此由调用方按 `conversion_path` 分流。
@@ -726,7 +1081,7 @@ impl EnvironmentResources {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         environment: &Environment,
-    ) -> (wgpu::Texture, wgpu::Texture) {
+    ) -> (wgpu::Texture, wgpu::Texture, wgpu::Texture, wgpu::Texture) {
         let face_size = ENV_CUBEMAP_SIZE;
         let irradiance_size = IRRADIANCE_SIZE;
 
@@ -826,8 +1181,41 @@ impl EnvironmentResources {
             array_layer_count: Some(6),
             ..Default::default()
         });
+        // 预过滤图（128×128×6，8 层 mip）与 BRDF LUT（128×128）。
+        let prefiltered_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("prefiltered cubemap"),
+            size: wgpu::Extent3d {
+                width: PREFILTERED_SIZE,
+                height: PREFILTERED_SIZE,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: PREFILTER_MIP_COUNT,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let brdf_lut_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("brdf lut"),
+            size: wgpu::Extent3d {
+                width: BRDF_LUT_SIZE,
+                height: BRDF_LUT_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let brdf_lut_storage_view = brdf_lut_texture.create_view(&TextureViewDescriptor::default());
 
-        // 3. 两个计算 pass（拆开，保证"存储写入 → 采样读取"在 pass 边界同步）。
+        // 3. 四个计算 pass（拆开，保证"存储写入 → 采样读取"在 pass 边界同步）。
         {
             let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("environment conversion encoder"),
@@ -914,9 +1302,90 @@ impl EnvironmentResources {
                     6,
                 );
             }
+
+            // 3.3 cubemap → 镜面预过滤 mip 链（每个 mip 一次 dispatch）。
+            for mip in 0..PREFILTER_MIP_COUNT {
+                let mip_size = PREFILTERED_SIZE >> mip;
+                let prefiltered_storage_view = prefiltered_texture.create_view(
+                    &TextureViewDescriptor {
+                        label: Some("prefiltered storage view"),
+                        dimension: Some(wgpu::TextureViewDimension::D2Array),
+                        base_mip_level: mip,
+                        mip_level_count: Some(1),
+                        base_array_layer: 0,
+                        array_layer_count: Some(6),
+                        ..Default::default()
+                    },
+                );
+                queue.write_buffer(
+                    &self.prefilter_params[mip as usize],
+                    0,
+                    bytemuck::bytes_of(&PrefilterParams {
+                        size: mip_size,
+                        mip,
+                        mip_count: PREFILTER_MIP_COUNT,
+                        sample_count: PREFILTER_SAMPLES,
+                    }),
+                );
+                let mut pass =
+                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                let prefilter_bind_group = device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("prefilter bind group"),
+                    layout: &self.prefilter_layout,
+                    entries: &[
+                        BindGroupEntry {
+                            binding: 0,
+                            resource: self.prefilter_params[mip as usize].as_entire_binding(),
+                        },
+                        BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&env_cube_view),
+                        },
+                        BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.env_sampler),
+                        },
+                        BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(
+                                &prefiltered_storage_view,
+                            ),
+                        },
+                    ],
+                });
+                pass.set_pipeline(&self.prefilter_pipeline);
+                pass.set_bind_group(0, &prefilter_bind_group, &[]);
+                pass.dispatch_workgroups(mip_size.div_ceil(8), mip_size.div_ceil(8), 6);
+            }
+
+            // 3.4 BRDF 积分查找表。
+            {
+                let mut pass =
+                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                let brdf_bind_group = device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("brdf lut bind group"),
+                    layout: &self.brdf_lut_layout,
+                    entries: &[BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&brdf_lut_storage_view),
+                    }],
+                });
+                pass.set_pipeline(&self.brdf_lut_pipeline);
+                pass.set_bind_group(0, &brdf_bind_group, &[]);
+                pass.dispatch_workgroups(
+                    BRDF_LUT_SIZE.div_ceil(8),
+                    BRDF_LUT_SIZE.div_ceil(8),
+                    1,
+                );
+            }
             queue.submit([encoder.finish()]);
         }
 
-        (env_texture, irradiance_texture)
+        (
+            env_texture,
+            irradiance_texture,
+            prefiltered_texture,
+            brdf_lut_texture,
+        )
     }
 }

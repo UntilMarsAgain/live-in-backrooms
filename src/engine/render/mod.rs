@@ -36,7 +36,10 @@ use super::scene::Scene;
 
 use self::environment::{EnvConversionPath, EnvironmentGpu, EnvironmentResources};
 use self::debug::LightDebugGizmos;
-use self::uniform::{collect_lights, AGX_MIDDLE_GRAY_LOG2, LightsUniform, ObjectData};
+use self::uniform::{
+    collect_lights, AGX_MIDDLE_GRAY_LOG2, LIGHT_CAPACITY, LightCountUniform, LightUniform,
+    ObjectData,
+};
 
 /// 窗口的显示句柄，用于创建 wgpu 实例。
 pub type DisplayHandle = Box<dyn wgpu::wgt::WgpuHasDisplayHandle>;
@@ -68,8 +71,9 @@ pub struct Renderer {
     object_bind_group: wgpu::BindGroup,
     /// 物体数据步长：每个物体的矩阵在缓冲中的间隔（满足设备对齐要求）。
     object_stride: u32,
-    /// 灯光 uniform（方向光数组，场景级数据）。
-    light_buffer: wgpu::Buffer,
+    /// 灯光：数量 uniform + 只读 storage 数组（每帧写入收集结果）。
+    light_count_buffer: wgpu::Buffer,
+    light_storage_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
     /// 纹理（材质贴图）绑定组相关。
     texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -343,34 +347,58 @@ impl Renderer {
             }],
         });
 
-        // 5.5 灯光 uniform：方向光数组（场景级，每帧写入）。
+        // 5.5 灯光：数量 uniform + 只读 storage 数组（动态，每帧写入收集结果）。
         let light_bind_group_layout =
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some("light bind group layout"),
-                entries: &[BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
-        let light_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("light uniform buffer"),
-            size: std::mem::size_of::<LightsUniform>() as u64,
+        let light_count_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("light count uniform buffer"),
+            size: std::mem::size_of::<LightCountUniform>() as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let light_storage_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("light storage buffer"),
+            size: LIGHT_CAPACITY as u64 * std::mem::size_of::<LightUniform>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let light_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("light bind group"),
             layout: &light_bind_group_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: light_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: light_count_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: light_storage_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         // 5.6 纹理绑定组：基础色贴图 + 采样器（材质级，@group(3)）。
@@ -534,7 +562,8 @@ impl Renderer {
             object_data_buffer,
             object_bind_group,
             object_stride: object_stride as u32,
-            light_buffer,
+            light_count_buffer,
+            light_storage_buffer,
             light_bind_group,
             texture_bind_group_layout,
             texture_sampler,
@@ -672,10 +701,8 @@ impl Renderer {
         self.object_bind_group = object_bind_group;
         self.object_stride = stride as u32;
 
-        // 灯光是静态场景数据：加载时收集一次并上传，渲染时只绑定。
-        let light_uniform = collect_lights(scene);
-        self.queue
-            .write_buffer(&self.light_buffer, 0, bytemuck::bytes_of(&light_uniform));
+        // 灯光改为每帧收集（所有方向光 + 离相机最近的 X 盏局部光），见 render()；
+        // 这里只保留静态数据（调试线框）的加载。
 
         // 灯光调试线框同样是静态数据：加载时生成并上传一次，
         // 渲染时只按开关决定是否绘制，避免每帧重建/上传。
@@ -751,6 +778,21 @@ impl Renderer {
         let uniform = CameraUniform::from_camera(camera);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
+
+        // 每帧收集灯光：所有方向光 + 离相机最近的局部光（场景灯光缓存），
+        // 写入数量 uniform 与 storage 数组。手电筒等动态光以后并入同一列表。
+        let lights = collect_lights(scene, camera.position());
+        debug_assert!(lights.len() <= LIGHT_CAPACITY);
+        let light_count = LightCountUniform {
+            count: lights.len() as u32,
+            _pad: [0; 3],
+        };
+        self.queue
+            .write_buffer(&self.light_count_buffer, 0, bytemuck::bytes_of(&light_count));
+        if !lights.is_empty() {
+            self.queue
+                .write_buffer(&self.light_storage_buffer, 0, bytemuck::cast_slice(&lights));
+        }
 
         // 每帧把物体世界矩阵 + 法线矩阵写入动态 uniform 缓冲（步长 = object_stride）。
         if scene.object_count() > 0 {

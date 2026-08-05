@@ -245,6 +245,118 @@ fn irradiance(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ============================================================================
+// Compute: Cubemap → Prefiltered Map (Specular IBL)
+// ============================================================================
+
+// GGX 重要性采样：返回以法线为 +Z 的切线空间半向量。
+fn importance_sample_ggx(xi: vec2<f32>, roughness: f32) -> vec3<f32> {
+    let a = roughness * roughness;
+    let phi = 2.0 * PI * xi.x;
+    let cos_theta = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y));
+    let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+    return vec3<f32>(cos(phi) * sin_theta, sin(phi) * sin_theta, cos_theta);
+}
+
+// GGX Schlick 几何项（BRDF LUT 积分用，k = a²/2）。
+fn geometry_schlick_ggx(n_dot_x: f32, roughness: f32) -> f32 {
+    let k = (roughness * roughness) / 2.0;
+    return n_dot_x / (n_dot_x * (1.0 - k) + k);
+}
+
+fn geometry_smith(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, roughness: f32) -> f32 {
+    return geometry_schlick_ggx(max(dot(n, v), 0.0), roughness)
+        * geometry_schlick_ggx(max(dot(n, l), 0.0), roughness);
+}
+
+struct PrefilterParams {
+    size: u32,
+    mip: u32,
+    mip_count: u32,
+    sample_count: u32,
+}
+
+@group(0) @binding(0) var<uniform> prefilter_params: PrefilterParams;
+@group(0) @binding(1) var prefilter_env: texture_cube<f32>;
+@group(0) @binding(2) var prefilter_sampler: sampler;
+@group(0) @binding(3) var prefilter_output: texture_storage_2d_array<rgba32float, write>;
+
+@compute @workgroup_size(8, 8)
+fn prefilter(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= prefilter_params.size || gid.y >= prefilter_params.size || gid.z >= 6u) {
+        return;
+    }
+    let mip = prefilter_params.mip;
+    let mip_count = prefilter_params.mip_count;
+    let roughness = f32(mip) / f32(max(mip_count - 1u, 1u));
+    let u = (f32(gid.x) + 0.5) / f32(prefilter_params.size);
+    let v = (f32(gid.y) + 0.5) / f32(prefilter_params.size);
+    let n = normalize(face_dir(gid.z, u, v));
+    let r = n; // 预过滤假设 view = normal（标准 split-sum 近似）。
+    let basis = tangent_basis(n);
+
+    var acc = vec3<f32>(0.0);
+    var weight = 0.0;
+    for (var i = 0u; i < prefilter_params.sample_count; i = i + 1u) {
+        let h = normalize(basis * importance_sample_ggx(hammersley(i, prefilter_params.sample_count), roughness));
+        let l = normalize(2.0 * dot(r, h) * h - r);
+        let n_dot_l = max(dot(n, l), 0.0);
+        if (n_dot_l > 0.0) {
+            acc += textureSampleLevel(prefilter_env, prefilter_sampler, l, 0.0).rgb * n_dot_l;
+            weight += n_dot_l;
+        }
+    }
+    let value = select(vec3<f32>(0.0), acc / max(weight, 1e-5), weight > 0.0);
+    textureStore(
+        prefilter_output,
+        vec2<i32>(gid.xy),
+        i32(gid.z),
+        vec4<f32>(value, 1.0),
+    );
+}
+
+// ============================================================================
+// Compute: BRDF Integration LUT (Specular IBL, split-sum 第二项)
+// ============================================================================
+
+const BRDF_LUT_SIZE: u32 = 128u;
+const BRDF_LUT_SAMPLES: u32 = 1024u;
+
+@group(0) @binding(0) var brdf_lut_output: texture_storage_2d<rgba32float, write>;
+
+@compute @workgroup_size(8, 8)
+fn brdf_lut(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= BRDF_LUT_SIZE || gid.y >= BRDF_LUT_SIZE) {
+        return;
+    }
+    let n_dot_v = (f32(gid.x) + 0.5) / f32(BRDF_LUT_SIZE);
+    let roughness = (f32(gid.y) + 0.5) / f32(BRDF_LUT_SIZE);
+    let v = vec3<f32>(sqrt(1.0 - n_dot_v * n_dot_v), 0.0, n_dot_v);
+    let n = vec3<f32>(0.0, 0.0, 1.0);
+
+    var a = 0.0;
+    var b = 0.0;
+    for (var i = 0u; i < BRDF_LUT_SAMPLES; i = i + 1u) {
+        let h = normalize(importance_sample_ggx(hammersley(i, BRDF_LUT_SAMPLES), roughness));
+        let l = normalize(2.0 * dot(v, h) * h - v);
+        let n_dot_l = max(l.z, 0.0);
+        let n_dot_h = max(h.z, 0.0);
+        let v_dot_h = max(dot(v, h), 0.0);
+        if (n_dot_l > 0.0) {
+            let g = geometry_smith(n, v, l, roughness);
+            let g_vis = g * v_dot_h / (n_dot_h * n_dot_v + 0.0001);
+            let fc = pow(1.0 - v_dot_h, 5.0);
+            a += (1.0 - fc) * g_vis;
+            b += fc * g_vis;
+        }
+    }
+    textureStore(
+        brdf_lut_output,
+        vec2<i32>(gid.xy),
+        vec4<f32>(a / f32(BRDF_LUT_SAMPLES), b / f32(BRDF_LUT_SAMPLES), 0.0, 1.0),
+    );
+}
+
+// ============================================================================
 // Skybox Render Pipeline
 // ============================================================================
 

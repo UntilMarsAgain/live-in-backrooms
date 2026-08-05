@@ -16,8 +16,6 @@ struct ObjectData {
     _pad1: f32,
 }
 
-// 光源数组：方向光 / 点光 / 面光。
-const MAX_LIGHTS: u32 = 8u;
 struct LightData {
     kind: u32, // 0=方向光 1=点光 2=面光
     _pad0: u32,
@@ -33,12 +31,13 @@ struct LightData {
     _pad5: f32,
     _pad6: f32,
 }
-struct Lights {
+
+// 每帧实际参与着色的灯光数（CPU 写入）；数组本体是运行时长度的 storage。
+struct LightCount {
     count: u32,
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
-    lights: array<LightData, MAX_LIGHTS>,
 }
 
 // 环境参数：`intensity` = IBL 环境光强度（0 = 纯手动布光，1 = 满环境光）。
@@ -53,7 +52,8 @@ const PI: f32 = 3.141592653589793;
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(1) @binding(0) var<uniform> object_data: ObjectData;
-@group(2) @binding(0) var<uniform> lights: Lights;
+@group(2) @binding(0) var<uniform> light_count: LightCount;
+@group(2) @binding(1) var<storage, read> lights: array<LightData>;
 @group(3) @binding(0) var base_color_tex: texture_2d<f32>;
 @group(3) @binding(1) var base_color_sampler: sampler;
 @group(3) @binding(2) var metallic_roughness_tex: texture_2d<f32>;
@@ -62,6 +62,8 @@ const PI: f32 = 3.141592653589793;
 @group(4) @binding(1) var environment_tex: texture_cube<f32>;
 @group(4) @binding(2) var environment_sampler: sampler;
 @group(4) @binding(3) var<uniform> environment_params: EnvironmentParams;
+@group(4) @binding(4) var prefiltered_tex: texture_cube<f32>;
+@group(4) @binding(5) var brdf_lut_tex: texture_2d<f32>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -230,8 +232,27 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let ambient_diffuse = k_d_ambient * albedo / PI * irradiance * environment_params.intensity;
     var color = ambient_diffuse;
 
-    for (var i = 0u; i < lights.count; i = i + 1u) {
-        let light = lights.lights[i];
+    // 镜面 IBL：预过滤环境图（按粗糙度选 mip）+ BRDF LUT（split-sum 第二项）。
+    // 金属的 f0 = albedo（反射环境本色），非金属 f0 = 0.04。
+    let max_reflection_lod = f32(textureNumLevels(prefiltered_tex)) - 1.0;
+    let r = reflect(-v, n);
+    let prefiltered = textureSampleLevel(
+        prefiltered_tex,
+        environment_sampler,
+        r,
+        roughness * max_reflection_lod,
+    ).rgb;
+    let brdf = textureSampleLevel(
+        brdf_lut_tex,
+        environment_sampler,
+        vec2<f32>(n_dot_v, roughness),
+        0.0,
+    ).rg;
+    let specular_ibl = prefiltered * (f0 * brdf.x + brdf.y);
+    color += specular_ibl * environment_params.intensity;
+
+    for (var i = 0u; i < light_count.count; i = i + 1u) {
+        let light = lights[i];
         // 光照方向与衰减按类型计算。
         // light.direction 对方向光/面光统一是行进方向（光源 → 场景）；
         // 着色时 l 需要"表面 → 光源"，方向光因此取反。

@@ -91,6 +91,8 @@ impl SceneObject {
 #[derive(Debug, Clone)]
 pub struct Scene {
     tree: Arena<SceneObject>,
+    /// 灯光节点缓存（增删时维护，渲染每帧按距离收集）。
+    light_nodes: Vec<ObjectKey>,
     /// 关卡环境（天空盒 + IBL）。`None` = 纯手动布光 / 保持默认黑环境。
     environment: Option<Arc<Environment>>,
     /// 环境强度（IBL 系数）：0 = 纯手动布光，1 = 满环境光。
@@ -104,6 +106,7 @@ impl Default for Scene {
     fn default() -> Self {
         Self {
             tree: Arena::default(),
+            light_nodes: Vec::new(),
             environment: None,
             // 默认满环境光：不显式设置强度时保持"环境图参与光照"的既有行为。
             environment_intensity: 1.0,
@@ -193,11 +196,19 @@ impl Scene {
     }
 
     /// 添加一个根节点（O(1)）。要作为子节点挂载请用 [`Scene::attach`]。
+    ///
+    /// 灯光节点会登记进灯光缓存（[`Scene::lights`]），供渲染每帧按距离收集。
     pub fn add_object(&mut self, object: SceneObject) -> ObjectKey {
-        self.tree.new_node(object)
+        let key = self.tree.new_node(object);
+        if matches!(self.tree[key].get().kind, SceneObjectKind::Light(_)) {
+            self.light_nodes.push(key);
+        }
+        key
     }
 
     /// 把新节点挂到 `parent` 下并返回句柄；父节点已失效时返回 `None`（O(1)）。
+    ///
+    /// 灯光节点同样登记进灯光缓存。
     pub fn attach(&mut self, parent: ObjectKey, object: SceneObject) -> Option<ObjectKey> {
         if parent.is_removed(&self.tree) {
             return None;
@@ -205,6 +216,9 @@ impl Scene {
         let child = self.tree.new_node(object);
         // 新节点无任何关系，append 不可能失败（不会自挂/挂祖先/已删除）。
         parent.append(child, &mut self.tree);
+        if matches!(self.tree[child].get().kind, SceneObjectKind::Light(_)) {
+            self.light_nodes.push(child);
+        }
         Some(child)
     }
 
@@ -245,6 +259,9 @@ impl Scene {
             return None;
         }
         let removed = self.tree[key].get().clone();
+        // 缓存维护：整棵子树里的灯光节点一并移出（灯光可能挂在被删节点的子树上）。
+        let subtree: Vec<ObjectKey> = key.descendants(&self.tree).collect();
+        self.light_nodes.retain(|k| !subtree.contains(k));
         key.remove_subtree(&mut self.tree);
         Some(removed)
     }
@@ -304,6 +321,18 @@ impl Scene {
             return None;
         }
         self.tree.get_mut(key).map(|node| node.get_mut())
+    }
+
+    /// 场景中所有灯光节点（灯光缓存，增删时维护）。
+    ///
+    /// 读取时再做一次存活/类型过滤兜底，防止 `object_mut` 把节点改成其他类型后
+    /// 留下脏缓存；缓存规模很小（灯光数），过滤代价可忽略。
+    pub fn lights(&self) -> impl Iterator<Item = ObjectKey> + '_ {
+        self.light_nodes.iter().copied().filter(|key| {
+            self.tree
+                .get(*key)
+                .is_some_and(|node| !node.is_removed() && matches!(node.get().kind, SceneObjectKind::Light(_)))
+        })
     }
 
     /// 演示场景：三角形、四边形、立方体三种资产，物体以不同位置/旋转/缩放摆放。
@@ -473,5 +502,39 @@ mod tests {
         assert_eq!(merged.len(), 1);
         let obj = b.object(merged[0]).expect("合并后的节点应存活");
         assert_eq!(obj.material.base_color, [0.2, 0.3, 0.4, 1.0]);
+    }
+
+    /// 灯光缓存：add/attach 登记，删除整棵子树时一并移出。
+    #[test]
+    fn light_cache_tracks_add_and_remove() {
+        let mut scene = Scene::new();
+        let point = scene.add_object(SceneObject::new(
+            SceneObjectKind::Light(Light::point(Vec3::ONE, 1.0)),
+            Transform::IDENTITY,
+        ));
+        let parent = scene.add_object(SceneObject::new(
+            SceneObjectKind::Empty,
+            Transform::IDENTITY,
+        ));
+        let child_light = scene
+            .attach(
+                parent,
+                SceneObject::new(
+                    SceneObjectKind::Light(Light::directional(Vec3::ONE, 1.0)),
+                    Transform::IDENTITY,
+                ),
+            )
+            .expect("父节点存活");
+
+        let keys: Vec<_> = scene.lights().collect();
+        assert_eq!(keys, vec![point, child_light]);
+
+        // 删除父节点：子灯光随子树一起移出缓存。
+        scene.remove_object(parent);
+        let keys: Vec<_> = scene.lights().collect();
+        assert_eq!(keys, vec![point]);
+
+        scene.remove_object(point);
+        assert_eq!(scene.lights().count(), 0);
     }
 }

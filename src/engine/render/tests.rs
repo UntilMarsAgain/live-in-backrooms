@@ -438,6 +438,79 @@ use super::environment::create_cube_texture;
         );
     }
 
+    /// GPU 路径：镜面预过滤 mip 链与 BRDF LUT 必须非黑。
+    ///
+    /// 防回归：预过滤参数缓冲若在循环里复用同一块（`queue.write_buffer` 先于
+    /// `submit()` 执行），除顶层外的 mip 全部提前 return，预过滤图基本全黑。
+    #[test]
+    fn specular_ibl_gpu_outputs_nonblack() {
+        let Some((device, queue, float32_filterable, conversion_path)) = headless_device() else {
+            return;
+        };
+        if conversion_path != EnvConversionPath::Gpu {
+            eprintln!("跳过：CPU 回退路径不读回纹理（无 COPY_SRC）");
+            return;
+        }
+
+        let camera_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("specular smoke camera layout"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let camera_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("specular smoke camera buffer"),
+            size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &camera_buffer,
+            0,
+            bytemuck::bytes_of(&CameraUniform {
+                view_proj: glam::Mat4::IDENTITY,
+                position: glam::Vec3::ZERO,
+                _padding: 0,
+                inverse_view_proj: glam::Mat4::IDENTITY,
+            }),
+        );
+        let resources = EnvironmentResources::new(
+            &device,
+            &queue,
+            &camera_layout,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            float32_filterable,
+            conversion_path,
+        );
+
+        // 红绿 2×1 环境图：预过滤 mip 0 与 BRDF LUT 都应有非零分量。
+        let env = Environment {
+            width: 2,
+            height: 1,
+            rgb: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        };
+        let gpu_env = resources.convert(&device, &queue, &env);
+
+        let pre = read_texture_rgba32f(&device, &queue, &gpu_env.prefiltered_texture, 0, 0, 8, 8);
+        let max_pre = pre
+            .iter()
+            .fold(0.0f32, |m, p| m.max(p[0]).max(p[1]).max(p[2]));
+        eprintln!("预过滤 mip0 读回最大分量：{max_pre}");
+        assert!(max_pre > 0.0, "预过滤图 mip 0 全黑（参数缓冲复用 bug？）");
+
+        let brdf = read_texture_rgba32f(&device, &queue, &gpu_env.brdf_lut_texture, 0, 0, 8, 8);
+        let max_brdf = brdf.iter().fold(0.0f32, |m, p| m.max(p[0]).max(p[1]));
+        eprintln!("BRDF LUT 读回最大分量：{max_brdf}");
+        assert!(max_brdf > 0.0, "BRDF LUT 全黑");
+    }
+
     /// 把天空盒渲染到 4×4 离屏 Rgba8UnormSrgb 并读回像素字节。
     fn render_skybox_rgb(
         device: &wgpu::Device,
@@ -537,4 +610,76 @@ use super::environment::create_cube_texture;
         rx.recv().expect("map 回调应触发").expect("map 应成功");
         let data = slice.get_mapped_range().expect("取范围应成功");
         data[..(4 * 4 * 4) as usize].to_vec()
+    }
+
+    /// 从 RGBA32F 纹理读回一小片区域（单层单 mip，逐行按 256 对齐）。
+    fn read_texture_rgba32f(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        mip_level: u32,
+        layer: u32,
+        width: u32,
+        height: u32,
+    ) -> Vec<[f32; 4]> {
+        let aligned_row = 256u32;
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("texture readback"),
+            size: (aligned_row * height) as u64,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("texture readback encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(aligned_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll 应成功");
+        rx.recv().expect("map 回调应触发").expect("map 应成功");
+        let data = slice.get_mapped_range().expect("取范围应成功");
+        let mut out = Vec::with_capacity((width * height) as usize);
+        for row in 0..height as usize {
+            let base = row * aligned_row as usize;
+            for col in 0..width as usize {
+                let off = base + col * 16;
+                out.push([
+                    f32::from_le_bytes(data[off..off + 4].try_into().unwrap()),
+                    f32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap()),
+                    f32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap()),
+                    f32::from_le_bytes(data[off + 12..off + 16].try_into().unwrap()),
+                ]);
+            }
+        }
+        out
     }
