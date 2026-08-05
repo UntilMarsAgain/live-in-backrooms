@@ -7,6 +7,9 @@
   <https://polyhaven.com/a/combination_wrench>
 - `test.hdr`：测试环境贴图（HDRI），用于环境管线（天空盒 + IBL）测试
 
+> 注：`test.glb` 曾因体积过大（约 14MB）被移出 git 历史，现仅保留本说明；
+> 需要时请按上方来源重新获取并放入本目录。
+
 文件缺失时相关测试会自动跳过（`is_file` 检查）；需要跑完整测试时请手动放入
 上述两个文件。
 
