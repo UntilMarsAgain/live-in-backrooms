@@ -118,14 +118,15 @@ fn load_triangle_glb() {
 
 #[test]
 fn load_repo_test_glb() {
+    let path = Path::new("test/test.glb");
+    if !path.is_file() {
+        eprintln!("跳过：test/test.glb 未准备（测试数据不入库）");
+        return;
+    }
     let mut library = MeshLibrary::new();
     let mut textures = TextureLibrary::new();
-    let scene = load_scene(
-        Path::new("src/engine/asset/test.glb"),
-        &mut library,
-        &mut textures,
-    )
-    .expect("仓库内的测试资产应能加载");
+    let scene = load_scene(path, &mut library, &mut textures)
+        .expect("test/test.glb 应能加载");
     assert!(!library.is_empty());
     assert!(!textures.is_empty(), "PBR 样例应带基础色贴图");
     assert!(scene.object_count() > 0);

@@ -5,7 +5,7 @@ use super::*;
 /// 仓库内如有测试 HDR（assets 目录不入库），验证解码结果合理。
 #[test]
 fn decodes_repo_hdr_if_present() {
-    let path = Path::new("game-data/vanilla/assets/environments/test.hdr");
+    let path = Path::new("test/test.hdr");
     if !path.is_file() {
         return;
     }
@@ -132,7 +132,7 @@ fn from_bytes_auto_detects_format() {
     let _ = std::fs::remove_file(&tmp);
 
     // HDR：仓库内如有测试 HDR，验证 from_file 按 .hdr 后缀走 HDR 路径。
-    let path = Path::new("game-data/vanilla/assets/environments/test.hdr");
+    let path = Path::new("test/test.hdr");
     if path.is_file() {
         let env = Environment::from_file(path).expect("HDR 自动识别应成功");
         let max = env

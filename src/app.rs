@@ -73,7 +73,7 @@ impl App {
                 return;
             }
         }
-        // 回退：内置演示场景；仓库内的 src/asset/test2.glb（全套 PBR 样例）一并并入。
+        // 回退：内置演示场景；test/ 目录内的 test.glb（全套 PBR 样例）一并并入。
         let keys = self.register_meshes(vec![Mesh::triangle(), Mesh::quad(), Mesh::cube()]);
         let [triangle, quad, cube] = keys.as_slice() else {
             unreachable!("demo 注册了 3 个网格")
@@ -89,7 +89,7 @@ impl App {
                 .with_environment(env.clone())
                 .with_environment_intensity(1.0);
         }
-        let test_glb = Path::new("src/engine/asset/test.glb");
+        let test_glb = Path::new("test/test.glb");
         if test_glb.is_file() {
             match asset::load_scene(test_glb, &mut self.mesh_library, &mut self.texture_library) {
                 Ok(gltf_scene) => {
@@ -110,12 +110,12 @@ impl App {
         self.load_scene(scene);
     }
 
-    /// 加载环境贴图：`BACKROOMS_ENV` 环境变量优先，否则尝试 `assets/environments/test.hdr`。
+    /// 加载环境贴图：`BACKROOMS_ENV` 环境变量优先，否则尝试 `test/test.hdr`。
     /// 按文件内容自动识别 HDR / LDR（PNG/JPEG 等）。
     fn load_environment(&mut self) -> Option<Arc<Environment>> {
         let path = std::env::var_os("BACKROOMS_ENV")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("game-data/vanilla/assets/environments/test.hdr"));
+            .unwrap_or_else(|| std::path::PathBuf::from("test/test.hdr"));
         match Environment::from_file(&path) {
             Ok(env) => {
                 eprintln!(

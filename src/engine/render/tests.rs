@@ -426,7 +426,7 @@ fn skybox_sampling_verifies_texture_content() {
     );
 
     // 2) 真实 HDR → convert（CPU 转换 + 逐层上传）→ 天空盒渲染 → 非黑。
-    let env = Environment::from_hdr_file(std::path::Path::new("game-data/vanilla/assets/environments/test.hdr"))
+    let env = Environment::from_hdr_file(std::path::Path::new("test/test.hdr"))
         .unwrap_or_else(|_| Environment {
             width: 2,
             height: 1,
