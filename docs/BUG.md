@@ -25,3 +25,14 @@
   （size=32），256² 环境图只有左上角 32×32 有数据。
 - 方案：两个计算 pass 各用独立参数缓冲（`env_convert_params` /
   `irradiance_params`）。
+
+## 已修复
+
+### 切换到无环境场景后残留上一关卡的天空盒
+
+- 现象：先加载带环境（天空盒 + IBL）的场景，再切换到 `environment = None` 的
+  场景，画面仍显示上一关卡的天空盒，不会回到默认黑环境。
+- 根因：`App::load_scene` 只在场景**带**环境时调用 `Renderer::set_environment`，
+  无环境时不重置；渲染器侧环境图始终存在（未设置时为 1×1 黑环境）。
+- 方案：新增 `Renderer::reset_environment`，加载不带环境的场景时切回默认黑环境，
+  并恢复默认环境强度与 AgX 窗口。

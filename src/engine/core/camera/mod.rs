@@ -18,8 +18,10 @@ use glam::{Mat4, Vec3};
 
 /// 自由相机：位置 + 欧拉角朝向 + 透视投影参数。
 ///
-/// 本阶段世界坐标与物体坐标等同，相机只负责"看"，不做物体变换。
-#[derive(Debug, Clone)]
+/// 本阶段世界坐标与物体坐标等同，相机只负责"看"，不做物体变换；
+/// 作为场景节点时（[`SceneObjectKind::Camera`]），位置/朝向由本结构自身决定，
+/// 节点的局部 Transform 暂不参与合成。
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
     position: Vec3,
     /// 绕 Y 轴的偏航角（弧度）。

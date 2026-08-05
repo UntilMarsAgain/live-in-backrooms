@@ -14,7 +14,7 @@
 //!   [`Scene::reparent`] 也会预检查后代关系，因此遍历不需要环保护。
 //!
 //! 网格资产由 `MeshLibrary` 永久持有，不属于某个场景；场景对象用
-//! [`SceneObjectKind`] 区分类型（网格 / 空分组节点，灯光、相机等后续加入）。
+//! [`SceneObjectKind`] 区分类型（网格 / 空分组节点 / 灯光 / 相机）。
 //! 关卡环境（天空盒 + IBL）跟随场景：加载场景时由 App 层一并上传，
 //! 模组作者按"一个关卡 = 场景 + 环境"来组织资产。
 //! 切换场景由 App 层 API 触发。
@@ -25,6 +25,7 @@ use std::sync::Arc;
 use glam::{Mat4, Quat, Vec3};
 use indextree::{Arena, NodeId};
 
+use super::core::camera::Camera;
 use super::core::environment::Environment;
 use super::core::light::Light;
 use super::core::material::Material;
@@ -37,16 +38,19 @@ pub type ObjectKey = NodeId;
 
 /// 场景对象的类型。
 ///
-/// 灯光、相机等系统落地后，作为新的变体挂到这里；枚举让所有处理分支
-/// （渲染、剔除、灯光收集等）都能被编译器强制检查。
+/// 枚举让所有处理分支（渲染、剔除、灯光收集等）都能被编译器强制检查；
+/// 新类型作为变体挂到这里。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SceneObjectKind {
     /// 纯分组节点：只承载子节点，本身不可见。
     Empty,
     /// 引用全局资产库里的网格。
     Mesh(MeshKey),
-    /// 方向光：方向由物体旋转决定（局部 -Z 指向光行进方向，与面光一致）。
+    /// 灯光：位置/朝向由节点变换决定（见 [`Light`] 的约定）。
     Light(Light),
+    /// 相机：位置与朝向由 `Camera` 内部状态决定，节点 Transform 暂不参与合成
+    /// （保留给将来"相机挂在角色/载具下"的层级用法）。
+    Camera(Camera),
 }
 
 /// 场景节点数据：局部变换 + 类型。
@@ -82,7 +86,7 @@ impl SceneObject {
     pub fn mesh_key(&self) -> Option<MeshKey> {
         match self.kind {
             SceneObjectKind::Mesh(key) => Some(key),
-            SceneObjectKind::Empty | SceneObjectKind::Light(_) => None,
+            SceneObjectKind::Empty | SceneObjectKind::Light(_) | SceneObjectKind::Camera(_) => None,
         }
     }
 }
@@ -93,6 +97,8 @@ pub struct Scene {
     tree: Arena<SceneObject>,
     /// 灯光节点缓存（增删时维护，渲染每帧按距离收集）。
     light_nodes: Vec<ObjectKey>,
+    /// 主相机节点（场景的"出生点视角"）。`None` = 未指定，App 层加载时会补默认相机。
+    main_camera: Option<ObjectKey>,
     /// 关卡环境（天空盒 + IBL）。`None` = 纯手动布光 / 保持默认黑环境。
     environment: Option<Arc<Environment>>,
     /// 环境强度（IBL 系数）：0 = 纯手动布光，1 = 满环境光。
@@ -107,6 +113,7 @@ impl Default for Scene {
         Self {
             tree: Arena::default(),
             light_nodes: Vec::new(),
+            main_camera: None,
             environment: None,
             // 默认满环境光：不显式设置强度时保持"环境图参与光照"的既有行为。
             environment_intensity: 1.0,
@@ -222,6 +229,65 @@ impl Scene {
         Some(child)
     }
 
+    /// 添加一个相机节点（**不会**自动设为主相机），返回节点句柄。
+    ///
+    /// 要把它设为主相机请再调用 [`Scene::set_main_camera`]；"添加"与"设为主相机"
+    /// 是两个独立操作，避免添加相机时意外抢走主相机身份。
+    pub fn add_camera(&mut self, camera: Camera) -> ObjectKey {
+        self.add_object(SceneObject::new(
+            SceneObjectKind::Camera(camera),
+            Transform::IDENTITY,
+        ))
+    }
+
+    /// 把指定节点设为主相机；必须是存活的 `Camera` 节点，否则返回 `false` 且不改变现状。
+    #[allow(dead_code)] // 公共配置 API：场景构建/游戏逻辑切换主相机时使用
+    pub fn set_main_camera(&mut self, key: ObjectKey) -> bool {
+        if !self
+            .object(key)
+            .is_some_and(|obj| matches!(obj.kind, SceneObjectKind::Camera(_)))
+        {
+            return false;
+        }
+        self.main_camera = Some(key);
+        true
+    }
+
+    /// 主相机节点句柄；未指定时返回 `None`。
+    ///
+    /// 主相机引用是**不变量**：一旦是 `Some`，必须指向一个存活的相机节点。
+    /// 指向已删除的节点或非相机节点属于运行违例，这里直接 panic，
+    /// 而不是静默返回 `None` 让上层无感知地跳过渲染。
+    pub fn main_camera(&self) -> Option<ObjectKey> {
+        let key = self.main_camera?;
+        let obj = self.object(key).unwrap_or_else(|| {
+            panic!("场景主相机运行违例：main_camera 指向的节点已删除（key = {key:?}）")
+        });
+        assert!(
+            matches!(obj.kind, SceneObjectKind::Camera(_)),
+            "场景主相机运行违例：main_camera 指向的节点不是相机（key = {key:?}）"
+        );
+        Some(key)
+    }
+
+    /// 主相机的只读引用。
+    pub fn main_camera_ref(&self) -> Option<&Camera> {
+        let key = self.main_camera()?;
+        match &self.object(key)?.kind {
+            SceneObjectKind::Camera(camera) => Some(camera),
+            _ => None,
+        }
+    }
+
+    /// 主相机的可变引用（输入控制、窗口尺寸变化等）。
+    pub fn main_camera_mut(&mut self) -> Option<&mut Camera> {
+        let key = self.main_camera()?;
+        match &mut self.object_mut(key)?.kind {
+            SceneObjectKind::Camera(camera) => Some(camera),
+            _ => None,
+        }
+    }
+
     /// 把已有节点移到 `new_parent` 下（`None` 表示变为根节点）。
     ///
     /// 新父节点是自身或自身后代（会成环）时拒绝操作并返回 `false`，
@@ -262,6 +328,12 @@ impl Scene {
         // 缓存维护：整棵子树里的灯光节点一并移出（灯光可能挂在被删节点的子树上）。
         let subtree: Vec<ObjectKey> = key.descendants(&self.tree).collect();
         self.light_nodes.retain(|k| !subtree.contains(k));
+        // 主相机随子树一起失效：被删子树里含主相机节点时清空引用。
+        if let Some(main) = self.main_camera {
+            if subtree.contains(&main) {
+                self.main_camera = None;
+            }
+        }
         key.remove_subtree(&mut self.tree);
         Some(removed)
     }
@@ -283,6 +355,12 @@ impl Scene {
                 let new_child = remap[&old_key];
                 let new_parent = remap[&old_parent];
                 let _ = self.reparent(new_child, Some(new_parent));
+            }
+        }
+        // 主相机随场景一起并入（外部场景自带主相机时保留，句柄重映射到本场景）。
+        if let Some(old_main) = other.main_camera() {
+            if let Some(new_key) = remap.get(&old_main) {
+                self.main_camera = Some(*new_key);
             }
         }
         other.roots().map(|(key, _)| remap[&key]).collect()
@@ -423,6 +501,20 @@ impl Scene {
                 Transform::new(Vec3::new(0.0, 1.2, 0.0), Quat::IDENTITY, Vec3::splat(0.4)),
             ),
         );
+        // 主相机（出生点视角）：与 App 缺省相机一致的位置/朝向，宽高比按默认窗口 16:9。
+        let camera = scene.add_camera(Camera::new(
+            Vec3::new(0.0, 1.0, 3.0),
+            -std::f32::consts::FRAC_PI_2,
+            -0.15,
+            std::f32::consts::FRAC_PI_4,
+            16.0 / 9.0,
+            0.1,
+            100.0,
+        ));
+        assert!(
+            scene.set_main_camera(camera),
+            "新添加的相机节点必然能设为主相机"
+        );
         scene
     }
 }
@@ -536,5 +628,66 @@ mod tests {
 
         scene.remove_object(point);
         assert_eq!(scene.lights().count(), 0);
+    }
+
+    /// 主相机：add_camera 只添加不设为主相机，set_main_camera 显式切换并校验类型。
+    #[test]
+    fn main_camera_lifecycle() {
+        let mut scene = Scene::new();
+        assert!(scene.main_camera().is_none());
+
+        let cam = scene.add_camera(Camera::new(Vec3::ZERO, 0.0, 0.0, 1.0, 1.0, 0.1, 100.0));
+        // 添加相机 ≠ 设为主相机。
+        assert!(scene.main_camera().is_none());
+        assert!(scene.set_main_camera(cam));
+        assert_eq!(scene.main_camera(), Some(cam));
+        assert!(scene.main_camera_ref().is_some());
+
+        // 非相机节点不能设为主相机。
+        let empty = scene.add_object(SceneObject::new(SceneObjectKind::Empty, Transform::IDENTITY));
+        assert!(!scene.set_main_camera(empty));
+        assert_eq!(scene.main_camera(), Some(cam));
+
+        // 删除相机节点后引用清空。
+        scene.remove_object(cam);
+        assert!(scene.main_camera().is_none());
+    }
+
+    /// merge 保留外部场景的主相机（句柄重映射到本场景）。
+    #[test]
+    fn merge_preserves_main_camera() {
+        let mut a = Scene::new();
+        let cam = a.add_camera(Camera::new(
+            Vec3::new(1.0, 2.0, 3.0),
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            0.1,
+            100.0,
+        ));
+        assert!(a.set_main_camera(cam));
+        assert_eq!(a.main_camera(), Some(cam));
+
+        let mut b = Scene::new();
+        let merged = b.merge(&a);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(b.main_camera(), Some(merged[0]));
+        assert_eq!(
+            b.main_camera_ref().unwrap().position(),
+            Vec3::new(1.0, 2.0, 3.0)
+        );
+    }
+
+    /// 主相机指向非相机节点是运行违例：访问时直接 panic，而不是静默返回 `None`。
+    #[test]
+    #[should_panic(expected = "不是相机")]
+    fn main_camera_invalid_kind_panics() {
+        let mut scene = Scene::new();
+        let cam = scene.add_camera(Camera::new(Vec3::ZERO, 0.0, 0.0, 1.0, 1.0, 0.1, 100.0));
+        assert!(scene.set_main_camera(cam));
+        // 绕过 set_main_camera 的校验把相机节点改成其他类型（模拟脏状态）。
+        scene.object_mut(cam).unwrap().kind = SceneObjectKind::Empty;
+        let _ = scene.main_camera();
     }
 }

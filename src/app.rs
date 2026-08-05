@@ -22,7 +22,6 @@ use crate::engine::{
 pub struct App {
     window: Arc<Window>,
     renderer: Renderer,
-    camera: Camera,
     controller: Box<dyn InputController<Camera>>,
     last_frame: Instant,
     /// 全局网格资产库（永久驻留，跨场景共享）。
@@ -37,17 +36,6 @@ pub struct App {
 impl App {
     /// 装配各子系统。窗口已由 main.rs 创建好，这里初始化渲染器。
     pub fn new(window: Arc<Window>, display: DisplayHandle) -> Result<Self, RendererError> {
-        let size = window.inner_size();
-        let aspect = size.width as f32 / size.height.max(1) as f32;
-        let camera = Camera::new(
-            glam::Vec3::new(0.0, 1.0, 3.0),
-            -std::f32::consts::FRAC_PI_2, // 初始朝向 -Z，正好看向原点附近的三角形
-            -0.15,                        // 稍微俯视
-            std::f32::consts::FRAC_PI_4,  // 45° 垂直视野
-            aspect,
-            0.1,
-            100.0,
-        );
         // 灯光调试开关由控制器独占翻转，App 只读；用 Arc 共享给两边。
         let show_light_debug = Arc::new(AtomicBool::new(false));
         let controller: Box<dyn InputController<Camera>> =
@@ -56,7 +44,6 @@ impl App {
         let mut app = Self {
             window,
             renderer,
-            camera,
             controller,
             last_frame: Instant::now(),
             mesh_library: MeshLibrary::new(),
@@ -183,17 +170,48 @@ impl App {
     }
 
     /// App 级别的场景切换 API：渲染器（GPU 数据）与后续游戏逻辑统一从这里换场景。
-    pub fn load_scene(&mut self, scene: Scene) {
-        // 环境跟随场景：场景自带环境（天空盒 + IBL）时一并上传。
-        if let Some(env) = scene.environment() {
-            self.renderer.set_environment(env);
-            self.renderer
-                .set_environment_intensity(scene.environment_intensity());
-            self.renderer
-                .set_environment_agx_ev(scene.agx_min_ev(), scene.agx_max_ev());
+    pub fn load_scene(&mut self, mut scene: Scene) {
+        // 每个场景必须有一个主相机（出生点视角）；外部内容（glTF）通常不带相机，
+        // 缺省时补一个默认相机。模组作者也可以在场景里显式摆放相机并切换。
+        self.ensure_main_camera(&mut scene);
+        // 环境跟随场景：场景自带环境（天空盒 + IBL）时一并上传；
+        // 不带环境时切回默认黑环境，避免残留上一关卡的天空盒。
+        match scene.environment() {
+            Some(env) => {
+                self.renderer.set_environment(env);
+                self.renderer
+                    .set_environment_intensity(scene.environment_intensity());
+                self.renderer
+                    .set_environment_agx_ev(scene.agx_min_ev(), scene.agx_max_ev());
+            }
+            None => self.renderer.reset_environment(),
         }
         self.renderer.load_scene(&scene);
         self.scene = scene;
+    }
+
+    /// 场景没有主相机时补一个默认相机（与早期硬编码相机相同的位置/朝向）。
+    ///
+    /// 只有"未指定"（`None`）才会兜底；若场景声明了主相机但指向已删除的节点或
+    /// 非相机节点，属于运行违例，[`Scene::main_camera`] 会直接 panic，加载被拒绝。
+    fn ensure_main_camera(&self, scene: &mut Scene) {
+        if scene.main_camera().is_none() {
+            let size = self.window.inner_size();
+            let aspect = size.width as f32 / size.height.max(1) as f32;
+            let camera = scene.add_camera(Camera::new(
+                glam::Vec3::new(0.0, 1.0, 3.0),
+                -std::f32::consts::FRAC_PI_2, // 初始朝向 -Z，看向原点附近
+                -0.15,                        // 稍微俯视
+                std::f32::consts::FRAC_PI_4,  // 45° 垂直视野
+                aspect,
+                0.1,
+                100.0,
+            ));
+            assert!(
+                scene.set_main_camera(camera),
+                "新添加的相机节点必然能设为主相机"
+            );
+        }
     }
 
     /// main.rs 转发的窗口事件统一在这里处理。
@@ -202,15 +220,21 @@ impl App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 self.renderer.resize(size.width, size.height);
-                self.camera
-                    .set_aspect(size.width as f32 / size.height.max(1) as f32);
+                if let Some(camera) = self.scene.main_camera_mut() {
+                    camera.set_aspect(size.width as f32 / size.height.max(1) as f32);
+                }
                 self.window.request_redraw();
             }
-            WindowEvent::RedrawRequested => self.renderer.render(
-                &self.camera,
-                &self.scene,
-                self.show_light_debug.load(Ordering::Relaxed),
-            ),
+            WindowEvent::RedrawRequested => {
+                // 主相机来自场景树：场景自带出生点视角，切换场景即切换相机。
+                if let Some(camera) = self.scene.main_camera_ref() {
+                    self.renderer.render(
+                        camera,
+                        &self.scene,
+                        self.show_light_debug.load(Ordering::Relaxed),
+                    );
+                }
+            }
             // 其余（键盘、鼠标等）交给控制器处理。
             _ => self.controller.handle_event(&event, &self.window),
         }
@@ -228,7 +252,9 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32().min(0.25);
         self.last_frame = now;
 
-        self.controller.update(&mut self.camera, dt);
+        if let Some(camera) = self.scene.main_camera_mut() {
+            self.controller.update(camera, dt);
+        }
         // 请求下一帧，驱动持续渲染。
         self.window.request_redraw();
     }

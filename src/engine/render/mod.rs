@@ -37,8 +37,8 @@ use super::scene::Scene;
 use self::environment::{EnvConversionPath, EnvironmentGpu, EnvironmentResources};
 use self::debug::LightDebugGizmos;
 use self::uniform::{
-    collect_lights, AGX_MIDDLE_GRAY_LOG2, LIGHT_CAPACITY, LightCountUniform, LightUniform,
-    ObjectData,
+    collect_lights, AGX_DEFAULT_EV_MAX, AGX_DEFAULT_EV_MIN, AGX_MIDDLE_GRAY_LOG2, LIGHT_CAPACITY,
+    LightCountUniform, LightUniform, ObjectData,
 };
 
 /// 窗口的显示句柄，用于创建 wgpu 实例。
@@ -668,6 +668,14 @@ impl Renderer {
             ev_min + AGX_MIDDLE_GRAY_LOG2,
             ev_max + AGX_MIDDLE_GRAY_LOG2,
         );
+    }
+
+    /// 清除环境：切回默认的 1×1 黑环境（无天空盒、无 IBL），并把环境强度与
+    /// AgX 窗口恢复默认。用于加载不带环境的场景时，避免残留上一关卡的天空盒。
+    pub fn reset_environment(&mut self) {
+        self.environment = self.environment_resources.default_environment.clone();
+        self.set_environment_intensity(1.0);
+        self.set_environment_agx_ev(AGX_DEFAULT_EV_MIN, AGX_DEFAULT_EV_MAX);
     }
 
     /// 加载场景：按物体数量重建动态 uniform 缓冲（网格资产已在 `upload_meshes` 中常驻）。
