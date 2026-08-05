@@ -3,8 +3,18 @@
 //! GPU 相关测试在 llvmpipe 软件渲染上并行跑会段错误，统一用
 //! `cargo test -- --test-threads=1`；无 GPU 环境自动跳过并打印原因。
 
-use super::environment::create_cube_texture;
+use super::environment::{EnvConversionPath, create_cube_texture};
+use super::init::create_depth_texture;
 use super::*;
+use crate::engine::core::camera::CameraUniform;
+use crate::engine::core::environment::Environment;
+use wgpu::{
+    BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
+    BindingType, BufferBindingType, BufferDescriptor, BufferUsages, CommandEncoderDescriptor,
+    DeviceDescriptor, LoadOp, Operations, RenderPassColorAttachment, RenderPassDescriptor,
+    RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp,
+    TextureViewDescriptor,
+};
 
 /// cargo build 不编译 WGSL，运行时错误会晚暴露；这里用 naga 提前校验。
 fn validate_wgsl(source: &str) {
@@ -132,7 +142,7 @@ fn environment_headless_smoke() {
     );
 
     // 转换一个 2×1 的微型 HDR（左红右绿），验证计算管线与绑定组创建。
-    let env = super::Environment {
+    let env = Environment {
         width: 2,
         height: 1,
         rgb: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
