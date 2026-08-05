@@ -40,11 +40,7 @@ impl Environment {
         let rgb32f = image.to_rgb32f();
         let (width, height) = rgb32f.dimensions();
         let rgb = rgb32f.pixels().map(|p| p.0).collect();
-        Ok(Self {
-            width,
-            height,
-            rgb,
-        })
+        Ok(Self { width, height, rgb })
     }
 
     /// 从磁盘读取并解码 Radiance HDR 文件。
@@ -95,7 +91,10 @@ impl Environment {
     ///
     /// LDR 图片本身是 sRGB 语义，直接当线性用会让画面偏暗偏灰；
     /// 线性化后再乘曝光，才能和 HDR 路径共用同一套天空盒/IBL 流程。
-    pub fn from_ldr_image(image: &image::DynamicImage, exposure: f32) -> Result<Self, EnvironmentError> {
+    pub fn from_ldr_image(
+        image: &image::DynamicImage,
+        exposure: f32,
+    ) -> Result<Self, EnvironmentError> {
         let rgb8 = image.to_rgb8();
         let (width, height) = rgb8.dimensions();
         let rgb = rgb8
@@ -108,11 +107,7 @@ impl Environment {
                 ]
             })
             .collect();
-        Ok(Self {
-            width,
-            height,
-            rgb,
-        })
+        Ok(Self { width, height, rgb })
     }
 
     /// 等距矩形图 → 立方体贴图（CPU，6 层 RGBA32F）。
@@ -216,12 +211,7 @@ impl Environment {
                             }
                         }
                         let value = if weight > 1e-5 {
-                            [
-                                acc[0] / weight,
-                                acc[1] / weight,
-                                acc[2] / weight,
-                                1.0,
-                            ]
+                            [acc[0] / weight, acc[1] / weight, acc[2] / weight, 1.0]
                         } else {
                             [0.0, 0.0, 0.0, 1.0]
                         };
@@ -263,12 +253,7 @@ impl Environment {
                         b += fc * g_vis;
                     }
                 }
-                out[(y * size + x) as usize] = [
-                    a / samples as f32,
-                    b / samples as f32,
-                    0.0,
-                    1.0,
-                ];
+                out[(y * size + x) as usize] = [a / samples as f32, b / samples as f32, 0.0, 1.0];
             }
         }
         out
@@ -365,9 +350,8 @@ fn sample_cube(cube: &[[f32; 4]], face_size: u32, dir: Vec3) -> [f32; 3] {
     let fx = (x - x0 as f32).clamp(0.0, 1.0);
     let fy = (y - y0 as f32).clamp(0.0, 1.0);
     let at = |xx: usize, yy: usize| -> [f32; 3] {
-        let idx = ((face as usize) * (face_size * face_size) as usize)
-            + yy * face_size as usize
-            + xx;
+        let idx =
+            ((face as usize) * (face_size * face_size) as usize) + yy * face_size as usize + xx;
         [cube[idx][0], cube[idx][1], cube[idx][2]]
     };
     let (c00, c10) = (at(x0, y0), at(x1, y0));
@@ -383,10 +367,7 @@ fn sample_cube(cube: &[[f32; 4]], face_size: u32, dir: Vec3) -> [f32; 3] {
 
 /// Hammersley 低差异序列。
 fn hammersley(i: u32, count: u32) -> (f32, f32) {
-    (
-        i as f32 / count as f32,
-        radical_inverse_vdc(i),
-    )
+    (i as f32 / count as f32, radical_inverse_vdc(i))
 }
 
 fn radical_inverse_vdc(mut bits: u32) -> f32 {
@@ -475,7 +456,11 @@ mod tests {
         assert!(env.width > 0 && env.height > 0);
         assert_eq!(env.rgb.len(), (env.width * env.height) as usize);
         // HDRI 不该全黑：至少有一个非零像素。
-        assert!(env.rgb.iter().any(|p| p[0] > 0.0 || p[1] > 0.0 || p[2] > 0.0));
+        assert!(
+            env.rgb
+                .iter()
+                .any(|p| p[0] > 0.0 || p[1] > 0.0 || p[2] > 0.0)
+        );
     }
 
     /// CPU 转换：2×1 红绿图 → 立方体贴图，所有面都应有非零数据。
@@ -488,7 +473,9 @@ mod tests {
         };
         let cube = env.to_cubemap(4);
         assert_eq!(cube.len(), 4 * 4 * 6);
-        let max = cube.iter().fold(0.0f32, |m, p| m.max(p[0]).max(p[1]).max(p[2]));
+        let max = cube
+            .iter()
+            .fold(0.0f32, |m, p| m.max(p[0]).max(p[1]).max(p[2]));
         assert!(max > 0.0, "立方体贴图转换输出全为零");
     }
 
@@ -557,7 +544,10 @@ mod tests {
         assert!((linear - 0.216).abs() < 0.01, "线性化偏差过大：{linear}");
 
         let env2 = Environment::from_ldr_image(&img, 2.0).expect("LDR 应能构造");
-        assert!((env2.rgb[0][0] - 2.0 * linear).abs() < 1e-5, "曝光应线性放大");
+        assert!(
+            (env2.rgb[0][0] - 2.0 * linear).abs() < 1e-5,
+            "曝光应线性放大"
+        );
     }
 
     /// 自动识别：`from_bytes` 按内容识别（PNG → LDR、HDR → HDR）；
@@ -571,8 +561,11 @@ mod tests {
             image::Rgb([255, 0, 0]),
         ));
         let mut png_bytes = Vec::new();
-        png.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-            .expect("PNG 编码应成功");
+        png.write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("PNG 编码应成功");
         let env = Environment::from_bytes(&png_bytes).expect("PNG 自动识别应成功");
         // LDR 路径：红色 255 → 线性 1.0。
         assert!((env.rgb[0][0] - 1.0).abs() < 1e-4, "PNG 红色应线性化为 1.0");

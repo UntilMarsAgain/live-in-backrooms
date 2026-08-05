@@ -200,7 +200,16 @@ fn main() {
     println!("== 测试 B：compute textureStore 写数组存储纹理 ==");
     let (b_pipeline, b_layout, b_params) = compute_pipeline(&device, ARRAY_STORE_SHADER, true);
     let b_tex = create_storage_array_texture(&device, 4);
-    run_storage_write(&device, &queue, &b_pipeline, &b_layout, &b_params, &b_tex, 4, true);
+    run_storage_write(
+        &device,
+        &queue,
+        &b_pipeline,
+        &b_layout,
+        &b_params,
+        &b_tex,
+        4,
+        true,
+    );
     let b_max = readback_max(&device, &queue, &b_tex, 4, 6, true);
     report("B", b_max);
 
@@ -208,7 +217,16 @@ fn main() {
     println!("== 测试 C：compute textureStore 写单层存储纹理 ==");
     let (c_pipeline, c_layout, c_params) = compute_pipeline(&device, SINGLE_STORE_SHADER, false);
     let c_tex = create_storage_single_texture(&device, 4);
-    run_storage_write(&device, &queue, &c_pipeline, &c_layout, &c_params, &c_tex, 4, false);
+    run_storage_write(
+        &device,
+        &queue,
+        &c_pipeline,
+        &c_layout,
+        &c_params,
+        &c_tex,
+        4,
+        false,
+    );
     let c_max = readback_max(&device, &queue, &c_tex, 4, 1, true);
     report("C", c_max);
 
@@ -238,7 +256,16 @@ fn main() {
     // 若 F 全零，说明写入（或写入后的采样）确实不可靠。
     println!("== 测试 F：计算写数组存储 → 采样 → 单层输出 ==");
     let f_tex = create_storage_array_texture(&device, 4);
-    run_storage_write(&device, &queue, &b_pipeline, &b_layout, &b_params, &f_tex, 4, true);
+    run_storage_write(
+        &device,
+        &queue,
+        &b_pipeline,
+        &b_layout,
+        &b_params,
+        &f_tex,
+        4,
+        true,
+    );
     let f_out = create_storage_single_texture(&device, 4);
     run_array_to_single(&device, &queue, &f_tex, &f_out);
     let f_max = readback_max(&device, &queue, &f_out, 4, 1, true);
@@ -831,6 +858,10 @@ fn readback_max(
 }
 
 fn report(label: &str, max_value: f32) {
-    let verdict = if max_value > 0.0 { "OK（数据非零）" } else { "FAIL（全零）" };
+    let verdict = if max_value > 0.0 {
+        "OK（数据非零）"
+    } else {
+        "FAIL（全零）"
+    };
     println!("  测试 {label}：最大像素值 {max_value:.3} → {verdict}");
 }

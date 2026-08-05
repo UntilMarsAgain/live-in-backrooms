@@ -181,14 +181,7 @@ impl Mesh {
                 });
             }
             // 四角按逆时针排列，两个三角形共用对角线（base, base+2）。
-            indices.extend_from_slice(&[
-                base,
-                base + 1,
-                base + 2,
-                base,
-                base + 2,
-                base + 3,
-            ]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         };
 
         // 六面（从外侧看逆时针）：+Z 红、-Z 绿、+X 蓝、-X 黄、+Y 青、-Y 品红。

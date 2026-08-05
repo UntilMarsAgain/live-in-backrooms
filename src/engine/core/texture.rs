@@ -75,7 +75,10 @@ impl TextureLibrary {
     }
 
     /// 批量注册：一次调用追加多张贴图并返回各自的句柄。
-    pub fn register_many(&mut self, textures: impl IntoIterator<Item = Texture>) -> Vec<TextureKey> {
+    pub fn register_many(
+        &mut self,
+        textures: impl IntoIterator<Item = Texture>,
+    ) -> Vec<TextureKey> {
         let start = self.textures.len();
         self.textures.extend(textures);
         let keys: Vec<_> = (start..self.textures.len()).map(TextureKey).collect();

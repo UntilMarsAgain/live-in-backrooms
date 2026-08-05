@@ -3,21 +3,18 @@
 //! HDRI → 环境立方体贴图 + 辐照度图 + 镜面预过滤 mip 链 + BRDF LUT；
 //! 按后端分流：Vulkan/Metal 走 GPU 计算，GL 等回退 CPU 转换 + 逐层上传。
 
-use wgpu::{
-    BindGroupDescriptor, BindGroupEntry, CommandEncoderDescriptor, TextureViewDescriptor,
-};
+use wgpu::{BindGroupDescriptor, BindGroupEntry, CommandEncoderDescriptor, TextureViewDescriptor};
 
+use super::{
+    BRDF_LUT_SAMPLES, BRDF_LUT_SIZE, ENV_CUBEMAP_SIZE, EnvConversionPath, EnvironmentGpu,
+    EnvironmentResources, IRRADIANCE_SAMPLES, IRRADIANCE_SIZE, PREFILTER_MIP_COUNT,
+    PREFILTER_SAMPLES, PREFILTERED_SIZE, create_2d_texture, create_cube_texture,
+    create_mip_cube_texture,
+};
 use crate::engine::core::environment::Environment;
 use crate::engine::render::uniform::{EnvParams, PrefilterParams};
-use super::{
-    create_2d_texture, create_cube_texture, create_mip_cube_texture, EnvConversionPath,
-    EnvironmentGpu, EnvironmentResources, BRDF_LUT_SAMPLES, BRDF_LUT_SIZE, ENV_CUBEMAP_SIZE,
-    IRRADIANCE_SAMPLES, IRRADIANCE_SIZE, PREFILTER_MIP_COUNT, PREFILTER_SAMPLES,
-    PREFILTERED_SIZE,
-};
 
 impl EnvironmentResources {
-
     /// 上传环境贴图（HDRI 等距矩形图）并转换成环境立方体贴图 + 辐照度图。
     ///
     /// 按启动时决定的路径转换：Vulkan/Metal 用 GPU 计算着色器，其余后端
@@ -34,58 +31,58 @@ impl EnvironmentResources {
         // 1. 按路径生成环境图、辐照度图、镜面预过滤图与 BRDF LUT。
         let (env_texture, irradiance_texture, prefiltered_texture, brdf_lut_texture) =
             match self.conversion_path {
-            EnvConversionPath::Gpu => self.convert_gpu(device, queue, environment),
-            EnvConversionPath::Cpu => {
-                // CPU 转换 + 逐层上传（write_texture 无 256 对齐要求）。
-                let cube_pixels = environment.to_cubemap(face_size);
-                let irradiance_pixels = Environment::irradiance_map(
-                    &cube_pixels,
-                    face_size,
-                    irradiance_size,
-                    IRRADIANCE_SAMPLES,
-                );
-                let prefiltered_mips = Environment::prefilter_map(
-                    &cube_pixels,
-                    face_size,
-                    PREFILTERED_SIZE,
-                    PREFILTER_MIP_COUNT,
-                    PREFILTER_SAMPLES,
-                );
-                let brdf_pixels = Environment::brdf_lut(BRDF_LUT_SIZE, BRDF_LUT_SAMPLES);
-                (
-                    create_cube_texture(
-                        device,
-                        queue,
-                        face_size,
+                EnvConversionPath::Gpu => self.convert_gpu(device, queue, environment),
+                EnvConversionPath::Cpu => {
+                    // CPU 转换 + 逐层上传（write_texture 无 256 对齐要求）。
+                    let cube_pixels = environment.to_cubemap(face_size);
+                    let irradiance_pixels = Environment::irradiance_map(
                         &cube_pixels,
-                        "environment cubemap",
-                    ),
-                    create_cube_texture(
-                        device,
-                        queue,
+                        face_size,
                         irradiance_size,
-                        &irradiance_pixels,
-                        "irradiance cubemap",
-                    ),
-                    create_mip_cube_texture(
-                        device,
-                        queue,
+                        IRRADIANCE_SAMPLES,
+                    );
+                    let prefiltered_mips = Environment::prefilter_map(
+                        &cube_pixels,
+                        face_size,
                         PREFILTERED_SIZE,
                         PREFILTER_MIP_COUNT,
-                        &prefiltered_mips,
-                        "prefiltered cubemap",
-                    ),
-                    create_2d_texture(
-                        device,
-                        queue,
-                        BRDF_LUT_SIZE,
-                        BRDF_LUT_SIZE,
-                        &brdf_pixels,
-                        "brdf lut",
-                    ),
-                )
-            }
-        };
+                        PREFILTER_SAMPLES,
+                    );
+                    let brdf_pixels = Environment::brdf_lut(BRDF_LUT_SIZE, BRDF_LUT_SAMPLES);
+                    (
+                        create_cube_texture(
+                            device,
+                            queue,
+                            face_size,
+                            &cube_pixels,
+                            "environment cubemap",
+                        ),
+                        create_cube_texture(
+                            device,
+                            queue,
+                            irradiance_size,
+                            &irradiance_pixels,
+                            "irradiance cubemap",
+                        ),
+                        create_mip_cube_texture(
+                            device,
+                            queue,
+                            PREFILTERED_SIZE,
+                            PREFILTER_MIP_COUNT,
+                            &prefiltered_mips,
+                            "prefiltered cubemap",
+                        ),
+                        create_2d_texture(
+                            device,
+                            queue,
+                            BRDF_LUT_SIZE,
+                            BRDF_LUT_SIZE,
+                            &brdf_pixels,
+                            "brdf lut",
+                        ),
+                    )
+                }
+            };
 
         // 2. 立方体视图（采样用）。
         let env_cube_view = env_texture.create_view(&TextureViewDescriptor {
@@ -433,8 +430,8 @@ impl EnvironmentResources {
             // 3.3 cubemap → 镜面预过滤 mip 链（每个 mip 一次 dispatch）。
             for mip in 0..PREFILTER_MIP_COUNT {
                 let mip_size = PREFILTERED_SIZE >> mip;
-                let prefiltered_storage_view = prefiltered_texture.create_view(
-                    &TextureViewDescriptor {
+                let prefiltered_storage_view =
+                    prefiltered_texture.create_view(&TextureViewDescriptor {
                         label: Some("prefiltered storage view"),
                         dimension: Some(wgpu::TextureViewDimension::D2Array),
                         base_mip_level: mip,
@@ -442,8 +439,7 @@ impl EnvironmentResources {
                         base_array_layer: 0,
                         array_layer_count: Some(6),
                         ..Default::default()
-                    },
-                );
+                    });
                 queue.write_buffer(
                     &self.prefilter_params[mip as usize],
                     0,
@@ -454,8 +450,7 @@ impl EnvironmentResources {
                         sample_count: PREFILTER_SAMPLES,
                     }),
                 );
-                let mut pass =
-                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
                 let prefilter_bind_group = device.create_bind_group(&BindGroupDescriptor {
                     label: Some("prefilter bind group"),
                     layout: &self.prefilter_layout,
@@ -474,9 +469,7 @@ impl EnvironmentResources {
                         },
                         BindGroupEntry {
                             binding: 3,
-                            resource: wgpu::BindingResource::TextureView(
-                                &prefiltered_storage_view,
-                            ),
+                            resource: wgpu::BindingResource::TextureView(&prefiltered_storage_view),
                         },
                     ],
                 });
@@ -487,8 +480,7 @@ impl EnvironmentResources {
 
             // 3.4 BRDF 积分查找表。
             {
-                let mut pass =
-                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
                 let brdf_bind_group = device.create_bind_group(&BindGroupDescriptor {
                     label: Some("brdf lut bind group"),
                     layout: &self.brdf_lut_layout,
@@ -499,11 +491,7 @@ impl EnvironmentResources {
                 });
                 pass.set_pipeline(&self.brdf_lut_pipeline);
                 pass.set_bind_group(0, &brdf_bind_group, &[]);
-                pass.dispatch_workgroups(
-                    BRDF_LUT_SIZE.div_ceil(8),
-                    BRDF_LUT_SIZE.div_ceil(8),
-                    1,
-                );
+                pass.dispatch_workgroups(BRDF_LUT_SIZE.div_ceil(8), BRDF_LUT_SIZE.div_ceil(8), 1);
             }
             queue.submit([encoder.finish()]);
         }

@@ -13,9 +13,8 @@
 use glam::Vec3;
 use wgpu::{
     BindGroupLayout, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
-    CompareFunction, DepthStencilState, FragmentState, PipelineLayoutDescriptor,
-    PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor, ShaderModuleDescriptor,
-    ShaderSource, VertexState,
+    CompareFunction, DepthStencilState, FragmentState, PipelineLayoutDescriptor, PrimitiveState,
+    PrimitiveTopology, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, VertexState,
 };
 
 use crate::engine::core::light::LightKind;
@@ -139,7 +138,14 @@ fn push_point(out: &mut Vec<DebugVertex>, world: &glam::Mat4, color: Vec3) {
 
     // 六个方向的放射线：从灯泡表面伸出去一小段，表示点光向四周辐射。
     let center = world.transform_point3(Vec3::ZERO);
-    for axis in [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z] {
+    for axis in [
+        Vec3::X,
+        Vec3::NEG_X,
+        Vec3::Y,
+        Vec3::NEG_Y,
+        Vec3::Z,
+        Vec3::NEG_Z,
+    ] {
         let tip = world.transform_point3(axis * (BULB_RADIUS + 0.35));
         push_segment(out, center, tip, color);
     }
@@ -163,10 +169,7 @@ fn push_area(
         glam::Vec3::new(half_w, half_h, 0.0),
         glam::Vec3::new(-half_w, half_h, 0.0),
     ];
-    let corners: Vec<Vec3> = corners
-        .iter()
-        .map(|c| world.transform_point3(*c))
-        .collect();
+    let corners: Vec<Vec3> = corners.iter().map(|c| world.transform_point3(*c)).collect();
     for i in 0..4 {
         push_segment(out, corners[i], corners[(i + 1) % 4], color);
     }
@@ -293,7 +296,12 @@ impl LightDebugGizmos {
 
     /// 上传顶点数据（容量不足时先重建缓冲）。灯光是静态数据，
     /// 在 `load_scene` 时调用一次即可，渲染循环不再上传。
-    pub(super) fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, vertices: &[DebugVertex]) {
+    pub(super) fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vertices: &[DebugVertex],
+    ) {
         self.ensure_capacity(device, vertices.len() as u32);
         if !vertices.is_empty() {
             queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
@@ -302,7 +310,11 @@ impl LightDebugGizmos {
     }
 
     /// 绑定管线 + 相机 + 顶点缓冲，绘制已上传的线段。
-    pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, camera_bind_group: &wgpu::BindGroup) {
+    pub(super) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        camera_bind_group: &wgpu::BindGroup,
+    ) {
         if self.vertex_count == 0 {
             return;
         }

@@ -23,9 +23,9 @@ use gltf::scene::Transform as GltfTransform;
 
 use super::core::material::Material;
 use super::core::mesh::{Mesh, MeshKey, MeshLibrary, Vertex};
-use super::scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};
 use super::core::texture::{Texture, TextureKey, TextureLibrary};
 use super::core::transform::Transform;
+use super::scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};
 
 /// 从 glTF 文件加载场景：网格资产注册进 `mesh_library`，返回带层级的 `Scene`。
 pub fn load_scene(
@@ -154,9 +154,16 @@ impl Loader<'_> {
     }
 
     /// 重新读取一个网格所有 primitive 的材质（去重缓存只存了 MeshKey）。
-    fn materials_for(&mut self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(MeshKey, Material)>, LoaderError> {
+    fn materials_for(
+        &mut self,
+        mesh: &gltf::Mesh<'_>,
+    ) -> Result<Vec<(MeshKey, Material)>, LoaderError> {
         // 走与 register_mesh 相同的路径需要 &mut self（贴图注册），这里直接重新构造。
-        let keys = self.mesh_keys.get(&mesh.index()).cloned().unwrap_or_default();
+        let keys = self
+            .mesh_keys
+            .get(&mesh.index())
+            .cloned()
+            .unwrap_or_default();
         let mut out = Vec::with_capacity(keys.len());
         for (key, primitive) in keys.iter().zip(mesh.primitives()) {
             out.push((*key, self.material_from_primitive(&primitive)?));
@@ -636,8 +643,12 @@ mod tests {
     fn load_repo_test_glb() {
         let mut library = MeshLibrary::new();
         let mut textures = TextureLibrary::new();
-        let scene = load_scene(Path::new("src/engine/asset/test.glb"), &mut library, &mut textures)
-            .expect("仓库内的测试资产应能加载");
+        let scene = load_scene(
+            Path::new("src/engine/asset/test.glb"),
+            &mut library,
+            &mut textures,
+        )
+        .expect("仓库内的测试资产应能加载");
         assert!(!library.is_empty());
         assert!(!textures.is_empty(), "PBR 样例应带基础色贴图");
         assert!(scene.object_count() > 0);
@@ -664,5 +675,4 @@ mod tests {
         let tangents = compute_tangents(&positions, &normals, &uvs, &[0, 1, 2]);
         assert_eq!(tangents[0], [1.0, 0.0, 0.0, 1.0]);
     }
-
 }

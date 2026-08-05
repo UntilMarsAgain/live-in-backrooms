@@ -9,8 +9,10 @@ use wgpu::{
     RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, VertexState,
 };
 
+use super::{
+    EnvConversionPath, EnvironmentResources, PREFILTER_MIP_COUNT, create_default_environment,
+};
 use crate::engine::render::uniform::{EnvParams, EnvironmentParams, PrefilterParams};
-use super::{create_default_environment, EnvConversionPath, EnvironmentResources, PREFILTER_MIP_COUNT};
 
 impl EnvironmentResources {
     /// 创建环境子系统的全部 GPU 资源。
@@ -137,7 +139,6 @@ impl EnvironmentResources {
                     },
                 ],
             });
-
 
         // 环境采样器：ClampToEdge；支持 float32 过滤时用双线性，否则点采样。
         let env_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -300,11 +301,12 @@ impl EnvironmentResources {
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let env_convert_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("equirect convert pipeline layout"),
-            bind_group_layouts: &[Some(&env_convert_layout)],
-            immediate_size: 0,
-        });
+        let env_convert_pipeline_layout =
+            device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("equirect convert pipeline layout"),
+                bind_group_layouts: &[Some(&env_convert_layout)],
+                immediate_size: 0,
+            });
         let irradiance_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("irradiance pipeline layout"),
             bind_group_layouts: &[Some(&irradiance_layout)],
@@ -428,7 +430,10 @@ impl EnvironmentResources {
         // 天空盒管线：全屏三角形，深度写关 + LessEqual（先画，网格随后正常遮挡）。
         let skybox_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("skybox pipeline layout"),
-            bind_group_layouts: &[Some(camera_bind_group_layout), Some(&skybox_bind_group_layout)],
+            bind_group_layouts: &[
+                Some(camera_bind_group_layout),
+                Some(&skybox_bind_group_layout),
+            ],
             immediate_size: 0,
         });
         let skybox_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {

@@ -30,9 +30,7 @@ pub(super) fn collect_lights(scene: &Scene, camera_position: Vec3) -> Vec<LightU
     let mut nearby: Vec<(f32, LightUniform)> = Vec::new();
 
     for key in scene.lights() {
-        let object = scene
-            .object(key)
-            .expect("lights() 只产出存活灯光节点");
+        let object = scene.object(key).expect("lights() 只产出存活灯光节点");
         let SceneObjectKind::Light(light) = object.kind else {
             continue;
         };
@@ -95,7 +93,6 @@ pub(super) fn collect_lights(scene: &Scene, camera_position: Vec3) -> Vec<LightU
     directional.truncate(LIGHT_CAPACITY);
     directional
 }
-
 
 /// 每物体 uniform：模型矩阵 + 法线矩阵（逆转置，正确处理非等比缩放）。
 #[repr(C)]
@@ -240,10 +237,7 @@ mod tests {
             SceneObjectKind::Light(Light::directional(Vec3::ONE, 1.0)),
             Transform::new(
                 Vec3::ZERO,
-                Quat::from_rotation_arc(
-                    Vec3::NEG_Z,
-                    -Vec3::new(0.5, 0.6, 0.6).normalize(),
-                ),
+                Quat::from_rotation_arc(Vec3::NEG_Z, -Vec3::new(0.5, 0.6, 0.6).normalize()),
                 Vec3::ONE,
             ),
         ));

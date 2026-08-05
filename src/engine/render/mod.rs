@@ -7,9 +7,9 @@
 
 mod debug;
 mod environment;
-pub(crate) mod uniform;
 #[cfg(test)]
 mod tests;
+pub(crate) mod uniform;
 
 use std::error::Error;
 use std::fmt;
@@ -34,16 +34,15 @@ use super::core::mesh::{MeshLibrary, Vertex};
 use super::core::texture::{Texture, TextureLibrary};
 use super::scene::Scene;
 
-use self::environment::{EnvConversionPath, EnvironmentGpu, EnvironmentResources};
 use self::debug::LightDebugGizmos;
+use self::environment::{EnvConversionPath, EnvironmentGpu, EnvironmentResources};
 use self::uniform::{
-    collect_lights, AGX_DEFAULT_EV_MAX, AGX_DEFAULT_EV_MIN, AGX_MIDDLE_GRAY_LOG2, LIGHT_CAPACITY,
-    LightCountUniform, LightUniform, ObjectData,
+    AGX_DEFAULT_EV_MAX, AGX_DEFAULT_EV_MIN, AGX_MIDDLE_GRAY_LOG2, LIGHT_CAPACITY,
+    LightCountUniform, LightUniform, ObjectData, collect_lights,
 };
 
 /// 窗口的显示句柄，用于创建 wgpu 实例。
 pub type DisplayHandle = Box<dyn wgpu::wgt::WgpuHasDisplayHandle>;
-
 
 /// 初始背景色：暗黄绿的"后室"氛围色，后续可改为可配置。
 pub const CLEAR_COLOR: Color = Color {
@@ -52,8 +51,6 @@ pub const CLEAR_COLOR: Color = Color {
     b: 0.05,
     a: 1.0,
 };
-
-
 
 /// wgpu 渲染器：持有 surface / device / queue，负责清屏渲染。
 pub struct Renderer {
@@ -122,7 +119,6 @@ struct MeshGpu {
     mesh_ranges: Vec<MeshRange>,
 }
 
-
 /// 创建与窗口尺寸一致的深度纹理。
 fn create_depth_texture(
     device: &wgpu::Device,
@@ -151,7 +147,11 @@ fn create_depth_texture(
 ///
 /// `write_texture` 没有行字节 256 对齐的要求（那是 `copy_buffer_to_texture` 的限制），
 /// 因此可以直接整块上传。
-fn create_texture_view(device: &wgpu::Device, queue: &wgpu::Queue, texture: &Texture) -> wgpu::TextureView {
+fn create_texture_view(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &Texture,
+) -> wgpu::TextureView {
     let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("texture"),
         size: wgpu::Extent3d {
@@ -189,8 +189,6 @@ fn create_texture_view(device: &wgpu::Device, queue: &wgpu::Queue, texture: &Tex
 
     gpu_texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
-
-
 
 impl Renderer {
     /// 创建 wgpu 实例、占住窗口的 surface，请求适配器与设备，并配置交换链。
@@ -315,7 +313,9 @@ impl Renderer {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<ObjectData>() as u64),
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<ObjectData>() as u64
+                        ),
                     },
                     count: None,
                 }],
@@ -348,32 +348,31 @@ impl Renderer {
         });
 
         // 5.5 灯光：数量 uniform + 只读 storage 数组（动态，每帧写入收集结果）。
-        let light_bind_group_layout =
-            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some("light bind group layout"),
-                entries: &[
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+        let light_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("light bind group layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
         let light_count_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("light count uniform buffer"),
             size: std::mem::size_of::<LightCountUniform>() as u64,
@@ -646,9 +645,9 @@ impl Renderer {
     /// 转换由两个计算着色器在启动时一次性完成，之后每帧只采样；
     /// 关卡切换换环境时重建纹理与绑定组，旧资源随替换自动释放。
     pub fn set_environment(&mut self, environment: &Environment) {
-        self.environment = self
-            .environment_resources
-            .convert(&self.device, &self.queue, environment);
+        self.environment =
+            self.environment_resources
+                .convert(&self.device, &self.queue, environment);
     }
 
     /// 设置环境强度（IBL 系数）：0 = 纯手动布光，1 = 满环境光。
@@ -795,8 +794,11 @@ impl Renderer {
             count: lights.len() as u32,
             _pad: [0; 3],
         };
-        self.queue
-            .write_buffer(&self.light_count_buffer, 0, bytemuck::bytes_of(&light_count));
+        self.queue.write_buffer(
+            &self.light_count_buffer,
+            0,
+            bytemuck::bytes_of(&light_count),
+        );
         if !lights.is_empty() {
             self.queue
                 .write_buffer(&self.light_storage_buffer, 0, bytemuck::cast_slice(&lights));
@@ -900,7 +902,9 @@ impl Renderer {
                     // 每个物体：绑定它的世界矩阵（动态偏移），按句柄直取网格区间；
                     // 非网格节点（分组、未来的灯光/相机等）跳过。
                     for (i, (_, object)) in scene.objects().enumerate() {
-                        let Some(mesh_key) = object.mesh_key() else { continue; };
+                        let Some(mesh_key) = object.mesh_key() else {
+                            continue;
+                        };
                         let range = mesh_buffer.mesh_ranges[mesh_key.index()];
                         let offset = (i * self.object_stride as usize) as u32;
                         pass.set_bind_group(1, &self.object_bind_group, &[offset]);

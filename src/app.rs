@@ -85,21 +85,19 @@ impl App {
             .expect("注册了 1 张贴图");
         let mut scene = Scene::demo(*triangle, *quad, *cube, Some(checker));
         if let Some(env) = &environment {
-            scene = scene.with_environment(env.clone()).with_environment_intensity(1.0);
+            scene = scene
+                .with_environment(env.clone())
+                .with_environment_intensity(1.0);
         }
         let test_glb = Path::new("src/engine/asset/test.glb");
         if test_glb.is_file() {
-            match asset::load_scene(
-                test_glb,
-                &mut self.mesh_library,
-                &mut self.texture_library,
-            ) {
+            match asset::load_scene(test_glb, &mut self.mesh_library, &mut self.texture_library) {
                 Ok(gltf_scene) => {
                     // 把测试模型放大 5 倍（等比），并挪到演示物体右前方，
                     // 避免和原点处的三角形重叠。
                     for key in scene.merge(&gltf_scene) {
                         if let Some(object) = scene.object_mut(key) {
-                            object.transform.scale *=5.0;
+                            object.transform.scale *= 5.0;
                             object.transform.position += glam::Vec3::new(1.8, 0.0, -1.2);
                         }
                     }

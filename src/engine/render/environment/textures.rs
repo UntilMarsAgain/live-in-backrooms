@@ -217,8 +217,8 @@ pub(crate) fn create_mip_cube_texture(
         let mip_size = face_size >> mip;
         let layer_pixels = (mip_size * mip_size) as usize;
         for layer in 0..6u32 {
-            let layer_data =
-                &mips[mip as usize][(layer as usize * layer_pixels)..((layer as usize + 1) * layer_pixels)];
+            let layer_data = &mips[mip as usize]
+                [(layer as usize * layer_pixels)..((layer as usize + 1) * layer_pixels)];
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &texture,

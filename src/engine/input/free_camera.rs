@@ -93,7 +93,9 @@ impl FreeCameraController {
 impl InputController<Camera> for FreeCameraController {
     fn handle_event(&mut self, event: &WindowEvent, window: &Window) {
         match event {
-            WindowEvent::KeyboardInput { event: key_event, .. } => {
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
                 let PhysicalKey::Code(code) = key_event.physical_key else {
                     return;
                 };
@@ -115,9 +117,7 @@ impl InputController<Camera> for FreeCameraController {
                     }
                 }
             }
-            WindowEvent::MouseInput {
-                state, button, ..
-            } => {
+            WindowEvent::MouseInput { state, button, .. } => {
                 if *button == MouseButton::Left {
                     self.dragging = *state == ElementState::Pressed;
                     if !self.dragging {
@@ -169,8 +169,8 @@ impl InputController<Camera> for FreeCameraController {
 
         // 2. 滚轮调整移动速度（每格 ×1.25，clamp 到 [min_speed, max_speed]）。
         if self.scroll_delta != 0.0 {
-            self.speed =
-                (self.speed * 1.25_f32.powf(self.scroll_delta)).clamp(self.min_speed, self.max_speed);
+            self.speed = (self.speed * 1.25_f32.powf(self.scroll_delta))
+                .clamp(self.min_speed, self.max_speed);
             self.scroll_delta = 0.0;
         }
 

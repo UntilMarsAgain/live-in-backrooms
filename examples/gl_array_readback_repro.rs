@@ -33,14 +33,13 @@ fn main() {
         info.name, info.backend, info.device_type
     );
 
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("repro device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            ..Default::default()
-        }))
-        .expect("device");
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("repro device"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::default(),
+        ..Default::default()
+    }))
+    .expect("device");
 
     // 1) Control: single-layer texture, upload + readback.
     let single = create_texture(&device, 1);
@@ -67,7 +66,11 @@ fn main() {
     );
     println!(
         "array per-layer readback: max = {per_layer_max:.3} -> {}",
-        if per_layer_max > 0.0 { "OK" } else { "ALL ZEROS" }
+        if per_layer_max > 0.0 {
+            "OK"
+        } else {
+            "ALL ZEROS"
+        }
     );
 }
 

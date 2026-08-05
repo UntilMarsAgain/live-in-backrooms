@@ -192,7 +192,8 @@ impl Scene {
 
     /// 所有根节点（无父节点的节点）。
     pub fn roots(&self) -> impl Iterator<Item = (ObjectKey, &SceneObject)> + '_ {
-        self.objects().filter(|(id, _)| id.parent(&self.tree).is_none())
+        self.objects()
+            .filter(|(id, _)| id.parent(&self.tree).is_none())
     }
 
     /// 直接子节点（O(n) 扫描，场景规模小所以足够）。
@@ -377,12 +378,9 @@ impl Scene {
             .ancestors(&self.tree)
             .map(|id| self.tree[id].get().transform)
             .collect();
-        Some(
-            chain
-                .iter()
-                .rev()
-                .fold(Mat4::IDENTITY, |world, transform| world * transform.to_mat4()),
-        )
+        Some(chain.iter().rev().fold(Mat4::IDENTITY, |world, transform| {
+            world * transform.to_mat4()
+        }))
     }
 
     /// 按句柄访问（O(1)）；句柄失效时返回 `None`。
@@ -407,9 +405,9 @@ impl Scene {
     /// 留下脏缓存；缓存规模很小（灯光数），过滤代价可忽略。
     pub fn lights(&self) -> impl Iterator<Item = ObjectKey> + '_ {
         self.light_nodes.iter().copied().filter(|key| {
-            self.tree
-                .get(*key)
-                .is_some_and(|node| !node.is_removed() && matches!(node.get().kind, SceneObjectKind::Light(_)))
+            self.tree.get(*key).is_some_and(|node| {
+                !node.is_removed() && matches!(node.get().kind, SceneObjectKind::Light(_))
+            })
         })
     }
 
@@ -480,19 +478,21 @@ impl Scene {
             ),
         ));
         // 立方体：放在视野正上方偏后，绕 Y 和 X 各转一点，让多个面可见。
-        let cube = scene.add_object(SceneObject::new(
-            SceneObjectKind::Mesh(cube),
-            Transform::new(
-                Vec3::new(0.0, 1.5, -1.6),
-                Quat::from_rotation_x(0.35) * Quat::from_rotation_y(0.6),
-                Vec3::splat(1.3),
-            ),
-        )
-        .with_material(Material {
-            base_color: [1.0; 4],
-            base_color_texture: cube_texture,
-            ..Material::default()
-        }));
+        let cube = scene.add_object(
+            SceneObject::new(
+                SceneObjectKind::Mesh(cube),
+                Transform::new(
+                    Vec3::new(0.0, 1.5, -1.6),
+                    Quat::from_rotation_x(0.35) * Quat::from_rotation_y(0.6),
+                    Vec3::splat(1.3),
+                ),
+            )
+            .with_material(Material {
+                base_color: [1.0; 4],
+                base_color_texture: cube_texture,
+                ..Material::default()
+            }),
+        );
         // 小三角形挂在立方体正上方，跟随立方体一起旋转（验证层级）。
         let _ = scene.attach(
             cube,
@@ -558,7 +558,11 @@ mod tests {
         let mut scene = Scene::new();
         let root = scene.add_object(SceneObject::new(
             SceneObjectKind::Empty,
-            Transform::new(Vec3::ZERO, Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::ONE),
+            Transform::new(
+                Vec3::ZERO,
+                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+                Vec3::ONE,
+            ),
         ));
         let child = scene
             .attach(
@@ -644,7 +648,10 @@ mod tests {
         assert!(scene.main_camera_ref().is_some());
 
         // 非相机节点不能设为主相机。
-        let empty = scene.add_object(SceneObject::new(SceneObjectKind::Empty, Transform::IDENTITY));
+        let empty = scene.add_object(SceneObject::new(
+            SceneObjectKind::Empty,
+            Transform::IDENTITY,
+        ));
         assert!(!scene.set_main_camera(empty));
         assert_eq!(scene.main_camera(), Some(cam));
 
