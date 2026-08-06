@@ -28,7 +28,7 @@ pub use core::camera::CameraAction;
 #[allow(unused_imports)]
 pub use core::aabb::Aabb;
 #[allow(unused_imports)]
-pub use core::environment::{Environment, EnvironmentError};
+pub use core::environment::Environment;
 #[allow(unused_imports)]
 pub use core::light::Light;
 #[allow(unused_imports)]
@@ -42,6 +42,6 @@ pub use core::transform::Transform;
 #[allow(unused_imports)]
 pub use input::{FreeCameraController, InputController};
 #[allow(unused_imports)]
-pub use render::{DisplayHandle, Renderer, RendererError};
+pub use render::{DisplayHandle, Renderer};
 #[allow(unused_imports)]
 pub use scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};

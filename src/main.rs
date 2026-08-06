@@ -2,7 +2,6 @@ mod app;
 mod engine;
 mod game;
 
-use std::error::Error;
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
@@ -76,13 +75,13 @@ impl ApplicationHandler for WindowedApp {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     // 使用 Wait：事件循环无事可做时真正休眠，渲染节奏由 update() 里的
     // request_redraw() 驱动；需要按帧动画时用 WaitUntil 即可。
     event_loop.set_control_flow(ControlFlow::Wait);
     // 始终接收设备事件（自由视角需要鼠标相对位移）。
-    event_loop.listen_device_events(DeviceEvents::Always);
+    event_loop.listen_device_events(DeviceEvents::WhenFocused);
 
     let mut windowed_app = WindowedApp::new();
     event_loop.run_app(&mut windowed_app)?;

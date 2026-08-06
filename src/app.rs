@@ -15,7 +15,7 @@ use winit::window::Window;
 use crate::engine::asset;
 use crate::engine::{
     Camera, CameraAction, DisplayHandle, Environment, FreeCameraController, InputController, Mesh,
-    MeshKey, MeshLibrary, Renderer, RendererError, Scene, Texture, TextureKey, TextureLibrary,
+    MeshKey, MeshLibrary, Renderer, Scene, Texture, TextureKey, TextureLibrary,
 };
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
@@ -37,7 +37,7 @@ pub struct App {
 
 impl App {
     /// 装配各子系统。窗口已由 main.rs 创建好，这里初始化渲染器。
-    pub fn new(window: Arc<Window>, display: DisplayHandle) -> Result<Self, RendererError> {
+    pub fn new(window: Arc<Window>, display: DisplayHandle) -> anyhow::Result<Self> {
         // 灯光调试开关由控制器独占翻转，App 只读；用 Arc 共享给两边。
         let show_light_debug = Arc::new(AtomicBool::new(false));
         let show_collision_debug = Arc::new(AtomicBool::new(false));
@@ -67,20 +67,8 @@ impl App {
     fn load_startup_scene(&mut self) {
         // 环境（天空盒 + IBL）是关卡数据的一部分：解码后绑定到场景上，
         // 由 `load_scene` 统一上传，而不是单独加载。
-        let environment = self.load_environment();
+        let environment = self.load_example_environment();
 
-        if let Some(path) = std::env::var_os("BACKROOMS_GLTF") {
-            if self.try_load_gltf(Path::new(&path), environment.as_ref()) {
-                return;
-            }
-            eprintln!("回退到演示场景");
-        } else {
-            let default = Path::new("game-data/vanilla/assets/scene.glb");
-            if default.is_file() && self.try_load_gltf(default, environment.as_ref()) {
-                return;
-            }
-        }
-        // 回退：内置演示场景；test/ 目录内的 test.glb（全套 PBR 样例）一并并入。
         let keys = self.register_meshes(vec![Mesh::triangle(), Mesh::quad(), Mesh::cube()]);
         let [triangle, quad, cube] = keys.as_slice() else {
             unreachable!("demo 注册了 3 个网格")
@@ -119,7 +107,7 @@ impl App {
 
     /// 加载环境贴图：`BACKROOMS_ENV` 环境变量优先，否则尝试 `test/test.hdr`。
     /// 按文件内容自动识别 HDR / LDR（PNG/JPEG 等）。
-    fn load_environment(&mut self) -> Option<Arc<Environment>> {
+    fn load_example_environment(&mut self) -> Option<Arc<Environment>> {
         let path = std::env::var_os("BACKROOMS_ENV")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("test/test.hdr"));
@@ -141,6 +129,7 @@ impl App {
     }
 
     /// 尝试从 glTF 文件加载场景；成功返回 `true`，失败打印原因并返回 `false`。
+    #[allow(dead_code)] // 预留：BACKROOMS_GLTF / game-data 场景加载路径，demo 阶段未启用
     fn try_load_gltf(&mut self, path: &Path, environment: Option<&Arc<Environment>>) -> bool {
         match asset::load_scene(path, &mut self.mesh_library, &mut self.texture_library) {
             Ok(scene) => {

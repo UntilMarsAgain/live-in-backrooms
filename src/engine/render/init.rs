@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use anyhow::Context;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingType, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
@@ -17,7 +18,7 @@ use crate::engine::core::texture::Texture;
 use crate::engine::render::debug::LineGizmos;
 use crate::engine::render::environment::{EnvConversionPath, EnvironmentResources};
 use crate::engine::render::uniform::{LIGHT_CAPACITY, LightCountUniform, LightUniform, ObjectData};
-use crate::engine::render::{DisplayHandle, Renderer, RendererError};
+use crate::engine::render::{DisplayHandle, Renderer};
 
 /// 创建与窗口尺寸一致的深度纹理。
 pub(super) fn create_depth_texture(
@@ -92,7 +93,7 @@ pub(super) fn create_texture_view(
 
 impl Renderer {
     /// 创建 wgpu 实例、占住窗口的 surface，请求适配器与设备，并配置交换链。
-    pub fn new(window: &Arc<Window>, display: DisplayHandle) -> Result<Self, RendererError> {
+    pub fn new(window: &Arc<Window>, display: DisplayHandle) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let (width, height) = (size.width.max(1), size.height.max(1));
 
@@ -157,7 +158,7 @@ impl Renderer {
         // 3. 用 surface 的首选格式配置交换链。
         let config = surface
             .get_default_config(&adapter, width, height)
-            .ok_or(RendererError::UnsupportedSurface)?;
+            .context("surface 不被适配器支持")?;
         surface.configure(&device, &config);
 
         // 3.5 深度缓冲：管线与渲染通道都要用它来做正确的遮挡关系。

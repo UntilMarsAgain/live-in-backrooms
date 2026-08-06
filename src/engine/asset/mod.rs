@@ -13,10 +13,9 @@
 //! 相机、动画、蒙皮暂不读取。
 
 use std::collections::HashMap;
-use std::error::Error;
-use std::fmt;
 use std::path::Path;
 
+use anyhow::{bail, Context, Result};
 use glam::{Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use gltf::scene::Transform as GltfTransform;
@@ -32,11 +31,11 @@ pub fn load_scene(
     path: &Path,
     mesh_library: &mut MeshLibrary,
     texture_library: &mut TextureLibrary,
-) -> Result<Scene, LoaderError> {
+) -> Result<Scene> {
     let (document, buffers, images) = gltf::import(path)?;
     let scene = document
         .default_scene()
-        .ok_or(LoaderError::NoDefaultScene)?;
+        .context("glTF 文件没有默认场景")?;
 
     let buffer_slices: Vec<&[u8]> = buffers.iter().map(|b| b.0.as_slice()).collect();
     let mut loader = Loader {
@@ -74,7 +73,7 @@ impl Loader<'_> {
         scene: &mut Scene,
         node: gltf::scene::Node<'_>,
         parent: Option<ObjectKey>,
-    ) -> Result<(), LoaderError> {
+    ) -> Result<()> {
         let (translation, rotation, scale) = match node.transform() {
             GltfTransform::Decomposed {
                 translation,
@@ -137,7 +136,7 @@ impl Loader<'_> {
     fn register_mesh(
         &mut self,
         mesh: &gltf::Mesh<'_>,
-    ) -> Result<Vec<(MeshKey, Material)>, LoaderError> {
+    ) -> Result<Vec<(MeshKey, Material)>> {
         if self.mesh_keys.contains_key(&mesh.index()) {
             // 材质属于 primitive，不随网格去重缓存，需要重新读取。
             return self.materials_for(mesh);
@@ -157,7 +156,7 @@ impl Loader<'_> {
     fn materials_for(
         &mut self,
         mesh: &gltf::Mesh<'_>,
-    ) -> Result<Vec<(MeshKey, Material)>, LoaderError> {
+    ) -> Result<Vec<(MeshKey, Material)>> {
         // 走与 register_mesh 相同的路径需要 &mut self（贴图注册），这里直接重新构造。
         let keys = self
             .mesh_keys
@@ -175,7 +174,7 @@ impl Loader<'_> {
     fn material_from_primitive(
         &mut self,
         primitive: &gltf::Primitive<'_>,
-    ) -> Result<Material, LoaderError> {
+    ) -> Result<Material> {
         // gltf::Material 总是存在（未指定时是默认材质，因子为 1）。
         let gltf_material = primitive.material();
         let pbr = gltf_material.pbr_metallic_roughness();
@@ -202,14 +201,14 @@ impl Loader<'_> {
     }
 
     /// 注册 glTF 图片（按图片索引去重）。
-    fn register_texture(&mut self, image_index: usize) -> Result<TextureKey, LoaderError> {
+    fn register_texture(&mut self, image_index: usize) -> Result<TextureKey> {
         if let Some(key) = self.texture_keys.get(&image_index) {
             return Ok(*key);
         }
         let image = self
             .images
             .get(image_index)
-            .ok_or(LoaderError::MissingImage(image_index))?;
+            .with_context(|| format!("图片索引 {image_index} 不存在"))?;
         let texture = gltf_image_to_texture(image)?;
         let key = self.texture_library.register_many([texture])[0];
         self.texture_keys.insert(image_index, key);
@@ -217,10 +216,10 @@ impl Loader<'_> {
     }
 
     /// 把一个 primitive 转换成运行时 `Mesh`（顶点属性统一转 f32，索引转 u32）。
-    fn mesh_from_primitive(&self, primitive: &gltf::Primitive<'_>) -> Result<Mesh, LoaderError> {
+    fn mesh_from_primitive(&self, primitive: &gltf::Primitive<'_>) -> Result<Mesh> {
         let reader = primitive.reader(|buffer| self.buffers.get(buffer.index()).copied());
         let Some(positions) = reader.read_positions() else {
-            return Err(LoaderError::MissingPositions);
+            bail!("primitive 缺少 POSITION 属性");
         };
         let positions: Vec<[f32; 3]> = positions.collect();
         let normals: Vec<[f32; 3]> = reader
@@ -249,7 +248,7 @@ impl Loader<'_> {
             Mode::Triangles => indices,
             Mode::TriangleStrip => strip_to_triangles(&indices),
             Mode::TriangleFan => fan_to_triangles(&indices),
-            other => return Err(LoaderError::UnsupportedMode(other)),
+            other => bail!("不支持的 primitive 模式：{other:?}"),
         };
 
         // 切线：文件自带 TANGENT 则直接用；否则按 MikkTSpace 计算（Blender 同款算法），
@@ -365,7 +364,7 @@ impl mikktspace::Geometry for TangentGeometry<'_> {
 }
 
 /// 把 glTF 解码出的图片数据转成运行时 RGBA8 纹理。
-fn gltf_image_to_texture(image: &gltf::image::Data) -> Result<Texture, LoaderError> {
+fn gltf_image_to_texture(image: &gltf::image::Data) -> Result<Texture> {
     use gltf::image::Format;
 
     let pixel_count = image.width as usize * image.height as usize;
@@ -451,7 +450,7 @@ fn gltf_image_to_texture(image: &gltf::image::Data) -> Result<Texture, LoaderErr
         }
     }
     if rgba8.len() != pixel_count * 4 {
-        return Err(LoaderError::ImageDataLengthMismatch);
+        bail!("图片像素数据长度与尺寸不匹配");
     }
 
     Ok(Texture {
@@ -481,45 +480,6 @@ fn fan_to_triangles(indices: &[u32]) -> Vec<u32> {
         out.extend_from_slice(&[indices[0], indices[i], indices[i + 1]]);
     }
     out
-}
-
-/// 加载过程中的错误。
-#[derive(Debug)]
-pub enum LoaderError {
-    Gltf(gltf::Error),
-    NoDefaultScene,
-    MissingPositions,
-    MissingImage(usize),
-    ImageDataLengthMismatch,
-    UnsupportedMode(Mode),
-}
-
-impl fmt::Display for LoaderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Gltf(e) => write!(f, "glTF 解析失败：{e}"),
-            Self::NoDefaultScene => write!(f, "glTF 文件没有默认场景"),
-            Self::MissingPositions => write!(f, "primitive 缺少 POSITION 属性"),
-            Self::MissingImage(index) => write!(f, "图片索引 {index} 不存在"),
-            Self::ImageDataLengthMismatch => write!(f, "图片像素数据长度与尺寸不匹配"),
-            Self::UnsupportedMode(mode) => write!(f, "不支持的 primitive 模式：{mode:?}"),
-        }
-    }
-}
-
-impl Error for LoaderError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Gltf(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<gltf::Error> for LoaderError {
-    fn from(error: gltf::Error) -> Self {
-        Self::Gltf(error)
-    }
 }
 
 #[cfg(test)]

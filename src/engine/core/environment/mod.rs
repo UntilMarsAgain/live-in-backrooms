@@ -9,10 +9,9 @@
 //!   给无法制作 HDR 的模组作者当简易天空盒/环境光用；
 //! - [`Environment::from_file`] 按文件内容自动识别两种格式。
 
-use std::error::Error;
-use std::fmt;
 use std::path::Path;
 
+use anyhow::{Context, Result};
 use glam::Vec3;
 
 const PI: f32 = std::f32::consts::PI;
@@ -34,9 +33,9 @@ impl Environment {
     pub const DEFAULT_LDR_EXPOSURE: f32 = 1.0;
 
     /// 从 Radiance HDR（.hdr）字节解码。
-    pub fn from_hdr_bytes(bytes: &[u8]) -> Result<Self, EnvironmentError> {
+    pub fn from_hdr_bytes(bytes: &[u8]) -> Result<Self> {
         let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Hdr)
-            .map_err(EnvironmentError::Decode)?;
+            .context("环境贴图解码失败")?;
         let rgb32f = image.to_rgb32f();
         let (width, height) = rgb32f.dimensions();
         let rgb = rgb32f.pixels().map(|p| p.0).collect();
@@ -45,15 +44,15 @@ impl Environment {
 
     /// 从磁盘读取并解码 Radiance HDR 文件。
     #[allow(dead_code)] // 显式入口：调用方明确指定 HDR 时用；App 默认走自动识别
-    pub fn from_hdr_file(path: &Path) -> Result<Self, EnvironmentError> {
-        let bytes = std::fs::read(path).map_err(EnvironmentError::Io)?;
+    pub fn from_hdr_file(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path).context("无法读取环境贴图文件")?;
         Self::from_hdr_bytes(&bytes)
     }
 
     /// 从文件按后缀加载：`.hdr`（不区分大小写）走 Radiance 解码，
     /// 其余（PNG/JPEG 等）按 LDR 处理（默认曝光）。
-    pub fn from_file(path: &Path) -> Result<Self, EnvironmentError> {
-        let bytes = std::fs::read(path).map_err(EnvironmentError::Io)?;
+    pub fn from_file(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path).context("无法读取环境贴图文件")?;
         let is_hdr = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -67,7 +66,7 @@ impl Environment {
 
     /// 从字节按内容（magic bytes）识别格式：HDR 走 Radiance，其余按 LDR（默认曝光）。
     #[allow(dead_code)] // 显式入口：无文件名的字节流用；App 默认走 from_file 后缀识别
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, EnvironmentError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         match image::guess_format(bytes) {
             Ok(image::ImageFormat::Hdr) => Self::from_hdr_bytes(bytes),
             _ => Self::from_ldr_bytes(bytes, Self::DEFAULT_LDR_EXPOSURE),
@@ -75,15 +74,15 @@ impl Environment {
     }
 
     /// 从 LDR 图片字节（PNG/JPEG 等）构造环境：sRGB → 线性 × 曝光。
-    pub fn from_ldr_bytes(bytes: &[u8], exposure: f32) -> Result<Self, EnvironmentError> {
-        let image = image::load_from_memory(bytes).map_err(EnvironmentError::Decode)?;
+    pub fn from_ldr_bytes(bytes: &[u8], exposure: f32) -> Result<Self> {
+        let image = image::load_from_memory(bytes).context("环境贴图解码失败")?;
         Self::from_ldr_image(&image, exposure)
     }
 
     /// 从磁盘读取 LDR 图片并构造环境。
     #[allow(dead_code)] // 显式入口：需要自定义曝光时用；App 默认走自动识别
-    pub fn from_ldr_file(path: &Path, exposure: f32) -> Result<Self, EnvironmentError> {
-        let bytes = std::fs::read(path).map_err(EnvironmentError::Io)?;
+    pub fn from_ldr_file(path: &Path, exposure: f32) -> Result<Self> {
+        let bytes = std::fs::read(path).context("无法读取环境贴图文件")?;
         Self::from_ldr_bytes(&bytes, exposure)
     }
 
@@ -94,7 +93,7 @@ impl Environment {
     pub fn from_ldr_image(
         image: &image::DynamicImage,
         exposure: f32,
-    ) -> Result<Self, EnvironmentError> {
+    ) -> Result<Self> {
         let rgb8 = image.to_rgb8();
         let (width, height) = rgb8.dimensions();
         let rgb = rgb8
@@ -414,31 +413,6 @@ fn tangent_basis(n: Vec3) -> (Vec3, Vec3, Vec3) {
     let t = up.cross(n).normalize();
     let b = n.cross(t);
     (t, b, n)
-}
-
-/// 环境贴图加载错误。
-#[derive(Debug)]
-pub enum EnvironmentError {
-    Io(std::io::Error),
-    Decode(image::ImageError),
-}
-
-impl fmt::Display for EnvironmentError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "无法读取环境贴图文件：{e}"),
-            Self::Decode(e) => write!(f, "环境贴图解码失败：{e}"),
-        }
-    }
-}
-
-impl Error for EnvironmentError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            Self::Decode(e) => Some(e),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -4,7 +4,6 @@
 //! - [`init`]：渲染器初始化（设备/交换链/绑定组/管线装配）；
 //! - [`scene`]：场景数据上传（网格/纹理/环境/灯光调试）；
 //! - [`frame`]：每帧渲染与窗口尺寸变化；
-//! - [`error`]：渲染器错误类型；
 //! - [`uniform`]：GPU uniform 布局与灯光收集；
 //! - [`environment`]：环境贴图（天空盒 + IBL）的 GPU 资源与转换；
 //! - [`debug`]：灯光调试可视化；
@@ -12,7 +11,6 @@
 
 mod debug;
 mod environment;
-mod error;
 mod frame;
 mod init;
 mod scene;
@@ -104,5 +102,3 @@ struct MeshGpu {
     index_buffer: wgpu::Buffer,
     mesh_ranges: Vec<MeshRange>,
 }
-
-pub use self::error::RendererError;
