@@ -96,6 +96,7 @@ impl Loader<'_> {
             None => None,
         };
         // 既没有网格也没有子节点的空节点：跳过。
+        // TODO: 拼图接口需要此类节点，届时需关闭剪枝
         if mesh_materials.is_none() && children.is_empty() {
             return Ok(());
         }

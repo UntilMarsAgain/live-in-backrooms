@@ -65,7 +65,7 @@ impl Renderer {
         // 每帧把物体世界矩阵 + 法线矩阵写入动态 uniform 缓冲（步长 = object_stride）。
         if scene.object_count() > 0 {
             let stride = self.object_stride as usize;
-            let entry_size = std::mem::size_of::<ObjectDataUniform>();
+            let entry_size = size_of::<ObjectDataUniform>();
             let mut bytes = vec![0u8; scene.object_count() * stride];
             for (i, (key, object)) in scene.objects().enumerate() {
                 let model = scene

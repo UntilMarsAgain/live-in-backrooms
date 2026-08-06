@@ -108,7 +108,7 @@ impl Renderer {
 
         // 2. 请求与 surface 兼容的适配器，并创建逻辑设备与队列。
         let adapter = pollster::block_on(instance.request_adapter(&RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
+            power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
             apply_limit_buckets: false,
@@ -164,7 +164,7 @@ impl Renderer {
         // 4. 相机 uniform：缓冲区 + 绑定组。
         let camera_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("camera uniform buffer"),
-            size: std::mem::size_of::<CameraUniform>() as u64,
+            size: size_of::<CameraUniform>() as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -217,7 +217,7 @@ impl Renderer {
         let object_stride = device
             .limits()
             .min_uniform_buffer_offset_alignment
-            .max(std::mem::size_of::<ObjectDataUniform>() as u32);
+            .max(size_of::<ObjectDataUniform>() as u32);
         let object_data_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("object data buffer"),
             size: object_stride as u64,
@@ -234,7 +234,7 @@ impl Renderer {
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &object_data_buffer,
                     offset: 0,
-                    size: wgpu::BufferSize::new(std::mem::size_of::<ObjectDataUniform>() as u64),
+                    size: wgpu::BufferSize::new(size_of::<ObjectDataUniform>() as u64),
                 }),
             }],
         });
