@@ -30,9 +30,15 @@ impl Renderer {
 
     /// 渲染一帧：写入相机与物体 uniform，清屏，绘制场景中所有物体并呈现。
     ///
-    /// `show_light_debug` 为 `true` 时，在网格之后叠加灯光调试线框
-    /// （灯泡 + 射线，顶点在 `load_scene` 时已上传，见 [`debug`] 模块）。
-    pub fn render(&mut self, camera: &Camera, scene: &Scene, show_light_debug: bool) {
+    /// `show_light_debug` / `show_collision_debug` 为 `true` 时，在网格之后
+    /// 叠加对应的调试线框（顶点在 `load_scene` 时已上传，见 [`debug`] 模块）。
+    pub fn render(
+        &mut self,
+        camera: &Camera,
+        scene: &Scene,
+        show_light_debug: bool,
+        show_collision_debug: bool,
+    ) {
         // 每帧把相机数据写入 uniform 缓冲区。
         let uniform = CameraUniform::from_camera(camera);
         self.queue
@@ -169,10 +175,14 @@ impl Renderer {
                     }
                 }
 
-                // 灯光调试线框：顶点已上传，这里只按开关绘制
+                // 调试线框：顶点已上传，这里只按开关绘制
                 //（深度 Always + 不写深度，被遮挡也可见；关闭时跳过）。
                 if show_light_debug {
-                    self.debug_gizmos.draw(&mut pass, &self.camera_bind_group);
+                    self.light_gizmos.draw(&mut pass, &self.camera_bind_group);
+                }
+                if show_collision_debug {
+                    self.collision_gizmos
+                        .draw(&mut pass, &self.camera_bind_group);
                 }
             }
 

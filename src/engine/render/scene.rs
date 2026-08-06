@@ -110,7 +110,7 @@ impl Renderer {
     }
 
     /// 加载场景：按物体数量重建动态 uniform 缓冲（网格资产已在 `upload_meshes` 中常驻）。
-    pub fn load_scene(&mut self, scene: &Scene) {
+    pub fn load_scene(&mut self, scene: &Scene, meshes: &MeshLibrary) {
         // 按物体数量重建动态 uniform 缓冲与绑定组。
         let stride = self
             .device
@@ -143,10 +143,13 @@ impl Renderer {
         // 灯光改为每帧收集（所有方向光 + 离相机最近的 X 盏局部光），见 render()；
         // 这里只保留静态数据（调试线框）的加载。
 
-        // 灯光调试线框同样是静态数据：加载时生成并上传一次，
+        // 调试线框同样是静态数据：加载时生成并上传一次，
         // 渲染时只按开关决定是否绘制，避免每帧重建/上传。
-        let gizmos = debug::build_light_gizmos(scene);
-        self.debug_gizmos.upload(&self.device, &self.queue, &gizmos);
+        let light_gizmos = debug::build_light_gizmos(scene);
+        self.light_gizmos.upload(&self.device, &self.queue, &light_gizmos);
+        let collision_gizmos = debug::build_collision_gizmos(scene, meshes);
+        self.collision_gizmos
+            .upload(&self.device, &self.queue, &collision_gizmos);
 
         // 每个物体的材质绑定组（与 objects() 迭代顺序一致，渲染时按同一下标取用）。
         let mut material_bind_groups = Vec::with_capacity(scene.object_count());

@@ -22,14 +22,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use indextree::{Arena, NodeId};
 
-use super::core::camera::Camera;
+use super::core::camera::{Camera, CameraAction};
 use super::core::environment::Environment;
 use super::core::light::Light;
 use super::core::material::Material;
-use super::core::mesh::MeshKey;
+use super::core::mesh::{MeshKey, MeshLibrary};
+use super::core::aabb::Aabb;
 use super::core::transform::Transform;
 
 /// 场景节点句柄：indextree 的节点 ID（带代际，删除后不失效复用）。
@@ -288,6 +289,19 @@ impl Scene {
         }
     }
 
+    /// 应用主相机操作（先旋转再平移），返回是否成功（主相机存在）。
+    ///
+    /// 输入控制器每帧输出 [`CameraAction`]，由这里统一应用——相机始终由
+    /// 场景持有与控制，控制器不直接修改相机。
+    pub fn apply_main_camera_action(&mut self, action: CameraAction) -> bool {
+        let Some(camera) = self.main_camera_mut() else {
+            return false;
+        };
+        camera.rotate(action.yaw_delta, action.pitch_delta);
+        camera.translate(action.translate);
+        true
+    }
+
     /// 把已有节点移到 `new_parent` 下（`None` 表示变为根节点）。
     ///
     /// 新父节点是自身或自身后代（会成环）时拒绝操作并返回 `false`，
@@ -408,6 +422,66 @@ impl Scene {
                 !node.is_removed() && matches!(node.get().kind, SceneObjectKind::Light(_))
             })
         })
+    }
+
+    // ---- AABB 碰撞查询 ----
+    //
+    // 网格数据在全局 `MeshLibrary` 中、场景不持有，因此查询需要调用方传入资产库
+    // （依赖方向 scene → core，不引入 asset 层）。世界 AABB = 网格局部 bounds
+    // 经该节点世界矩阵变换后的包围盒（旋转会使其变大，属 AABB 的正常行为）。
+    //
+    // 现阶段查询为 O(物体数)：场景规模小足够；Level 0 区块落地时再上空间分区。
+
+    /// 节点在世界空间中的 AABB；句柄失效、非网格节点或空包围盒时返回 `None`。
+    pub fn object_aabb_world(&self, meshes: &MeshLibrary, key: ObjectKey) -> Option<Aabb> {
+        let mesh_key = self.object(key)?.mesh_key()?;
+        let local = meshes.mesh(mesh_key)?.bounds();
+        if local.is_empty() {
+            return None;
+        }
+        let world = self.world_transform(key)?;
+        Some(local.transformed_by(&world))
+    }
+
+    /// 世界点是否落在 `key` 所指物体的世界 AABB 内（含边界）。
+    pub fn point_inside(&self, meshes: &MeshLibrary, key: ObjectKey, point: Vec3) -> bool {
+        self.object_aabb_world(meshes, key)
+            .is_some_and(|aabb| aabb.contains(point))
+    }
+
+    /// 两个已存在物体是否碰撞（世界 AABB 相交）。
+    pub fn objects_collide(&self, meshes: &MeshLibrary, a: ObjectKey, b: ObjectKey) -> bool {
+        let (Some(aa), Some(bb)) = (
+            self.object_aabb_world(meshes, a),
+            self.object_aabb_world(meshes, b),
+        ) else {
+            return false;
+        };
+        aa.intersects(&bb)
+    }
+
+    /// 外部物体（尚未加入场景，如玩家）与场景的碰撞测试：给定物体在**局部
+    /// 空间**的 AABB（相对自身原点，全尺寸 min/max）与摆放 [`Transform`]，
+    /// 返回第一个碰撞到的场景物体句柄。
+    ///
+    /// `exclude` 用于跳过不需要参与测试的节点（如玩家脚下的地板、自身的
+    /// 手持物）；传入空切片表示测试全部网格节点。
+    pub fn collides_with(
+        &self,
+        meshes: &MeshLibrary,
+        transform: &Transform,
+        local: Aabb,
+        exclude: &[ObjectKey],
+    ) -> Option<ObjectKey> {
+        let probe = local.transformed(transform);
+        self.objects()
+            .filter(|(key, _)| !exclude.contains(key))
+            .filter_map(|(key, _)| {
+                self.object_aabb_world(meshes, key)
+                    .map(|aabb| (key, aabb))
+            })
+            .find(|(_, aabb)| aabb.intersects(&probe))
+            .map(|(key, _)| key)
     }
 }
 

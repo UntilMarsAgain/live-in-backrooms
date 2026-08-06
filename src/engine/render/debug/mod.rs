@@ -1,13 +1,12 @@
-//! 灯光调试可视化：把场景里的光源画成线框 Gizmo。
+//! 调试可视化：把场景里的光源与碰撞箱画成线框 Gizmo。
 //!
-//! 每种光源一个"灯泡"标记，外加指向性的调试射线：
-//! - 方向光：垂直于光方向的圆盘（太阳图标）+ 沿光线**行进方向**
-//!   （光源 → 场景）的长射线（带箭头）；
-//! - 点光：八面体线框（灯泡）+ 沿三个轴向的短放射线；
-//! - 面光：按面板尺寸/朝向画矩形线框 + 从面板中心的发射射线（带箭头）。
+//! - 灯光：每种光源一个"灯泡"标记，外加指向性的调试射线
+//!   （方向光圆盘、点光八面体、面光矩形面板，见 [`build_light_gizmos`]）；
+//! - 碰撞箱：每个网格物体的世界 AABB 画成 12 条边的线框盒子
+//!   （见 [`build_collision_gizmos`]）。
 //!
-//! 线段在 `load_scene` 时生成并上传一次（光源目前是静态场景数据，
-//! 与 [`super::uniform::collect_lights`] 的约定一致），走专用线框管线绘制：
+//! 线段在 `load_scene` 时生成并上传一次（光源与静态物体目前都是静态场景数据，
+//! 物体支持动画后再改成每帧重建），走专用线框管线绘制：
 //! 深度比较 Always + 不写深度，保证灯泡被物体挡住时依然可见，方便调试。
 
 use glam::Vec3;
@@ -18,6 +17,8 @@ use wgpu::{
 };
 
 use crate::engine::core::light::LightKind;
+use crate::engine::core::aabb::Aabb;
+use crate::engine::core::mesh::MeshLibrary;
 use crate::engine::scene::{Scene, SceneObjectKind};
 
 /// 调试线条顶点：位置 + 颜色（与 debug.wgsl 顶点输入一一对应）。
@@ -91,6 +92,53 @@ pub(super) fn build_light_gizmos(scene: &Scene) -> Vec<DebugVertex> {
         }
     }
     vertices
+}
+
+/// 从场景收集所有网格物体的世界 AABB，生成线框盒子的顶点列表
+/// （12 条边 = 24 个顶点）。
+///
+/// 固定橙色线框；空包围盒（无网格数据）的节点自动跳过。
+pub(super) fn build_collision_gizmos(scene: &Scene, meshes: &MeshLibrary) -> Vec<DebugVertex> {
+    let color = Vec3::new(1.0, 0.55, 0.1);
+    let mut vertices = Vec::new();
+    for (key, _) in scene.objects() {
+        if let Some(aabb) = scene.object_aabb_world(meshes, key) {
+            push_aabb(&mut vertices, &aabb, color);
+        }
+    }
+    vertices
+}
+
+/// 追加一个 AABB 的 12 条边（4 底 + 4 顶 + 4 竖柱）。
+fn push_aabb(out: &mut Vec<DebugVertex>, aabb: &Aabb, color: Vec3) {
+    let min = aabb.min;
+    let max = aabb.max;
+    let corners = [
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(max.x, max.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+    ];
+    for &(i, j) in &[
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ] {
+        push_segment(out, corners[i], corners[j], color);
+    }
 }
 
 /// 方向光：垂直于光行进方向的圆盘 + 沿行进方向的长射线（带箭头）。
@@ -202,8 +250,10 @@ fn push_segment(out: &mut Vec<DebugVertex>, a: Vec3, b: Vec3, color: Vec3) {
     out.push(DebugVertex::new(b, color));
 }
 
-/// 灯光调试的 GPU 资源：线框管线 + 可增长的顶点缓冲。
-pub(super) struct LightDebugGizmos {
+/// 线框调试的 GPU 资源：线框管线 + 可增长的顶点缓冲。
+///
+/// 灯光与碰撞箱各持一个实例（管线相同但缓冲独立，可同时显示）。
+pub(super) struct LineGizmos {
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     capacity_vertices: u32,
@@ -211,7 +261,7 @@ pub(super) struct LightDebugGizmos {
     vertex_count: u32,
 }
 
-impl LightDebugGizmos {
+impl LineGizmos {
     /// 创建线框管线（复用相机绑定组布局，@group(0)）与初始顶点缓冲。
     pub(super) fn new(
         device: &wgpu::Device,
@@ -219,16 +269,16 @@ impl LightDebugGizmos {
         format: wgpu::TextureFormat,
     ) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("light debug shader"),
+            label: Some("debug line shader"),
             source: ShaderSource::Wgsl(include_str!("debug.wgsl").into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("light debug pipeline layout"),
+            label: Some("debug line pipeline layout"),
             bind_group_layouts: &[Some(camera_bind_group_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("light debug pipeline"),
+            label: Some("debug line pipeline"),
             layout: Some(&pipeline_layout),
             vertex: VertexState {
                 module: &shader,
@@ -267,7 +317,7 @@ impl LightDebugGizmos {
         });
         // 初始 1 顶点占位；绘制时顶点更多再由 ensure_capacity 重建。
         let vertex_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("light debug vertex buffer"),
+            label: Some("debug line vertex buffer"),
             size: std::mem::size_of::<DebugVertex>() as u64,
             usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -286,7 +336,7 @@ impl LightDebugGizmos {
             return;
         }
         self.vertex_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("light debug vertex buffer"),
+            label: Some("debug line vertex buffer"),
             size: needed as u64 * std::mem::size_of::<DebugVertex>() as u64,
             usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -328,6 +378,7 @@ impl LightDebugGizmos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::Camera;
     use crate::engine::core::light::Light;
     use crate::engine::core::transform::Transform;
     use crate::engine::scene::SceneObject;
@@ -365,5 +416,58 @@ mod tests {
             dir.normalize().dot(-light_dir).abs() > 0.99,
             "射线应沿 -light_dir（行进方向），实际 {dir:?}"
         );
+    }
+
+    /// 一个边长 1 的立方体：碰撞箱生成 12 条边（24 顶点），
+    /// 且线段的端点落在立方体 8 个角点上。
+    #[test]
+    fn collision_gizmos_wire_a_single_cube() {
+        let mut scene = Scene::new();
+        let mut meshes = MeshLibrary::new();
+        let key = meshes.register(crate::engine::Mesh::cube());
+        scene.add_object(SceneObject::new(
+            SceneObjectKind::Mesh(key),
+            Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE),
+        ));
+
+        let vertices = build_collision_gizmos(&scene, &meshes);
+        assert_eq!(vertices.len(), 24, "12 条边 × 2 顶点");
+
+        // 所有端点都应落在立方体角点集合（±0.5）上。
+        let corners: Vec<Vec3> = (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 != 0 { 0.5 } else { -0.5 },
+                    if i & 2 != 0 { 0.5 } else { -0.5 },
+                    if i & 4 != 0 { 0.5 } else { -0.5 },
+                )
+            })
+            .collect();
+        for vertex in &vertices {
+            let p = Vec3::from(vertex.position);
+            assert!(
+                corners.iter().any(|c| (*c - p).length() < 1e-6),
+                "端点应落在角点上：{p:?}"
+            );
+        }
+    }
+
+    /// 空场景：无碰撞箱可画；非网格节点（分组/灯光）不会产出线段。
+    #[test]
+    fn collision_gizmos_skip_non_mesh_nodes() {
+        let mut scene = Scene::new();
+        let meshes = MeshLibrary::new();
+        scene.add_object(SceneObject::new(
+            SceneObjectKind::Empty,
+            Transform::IDENTITY,
+        ));
+        scene.add_object(SceneObject::new(
+            SceneObjectKind::Light(Light::point(Vec3::ZERO, 1.0)),
+            Transform::IDENTITY,
+        ));
+        let cam = scene.add_camera(Camera::new(Vec3::ZERO, 0.0, 0.0, 1.0, 1.0, 0.1, 100.0));
+        assert!(scene.set_main_camera(cam));
+
+        assert!(build_collision_gizmos(&scene, &meshes).is_empty());
     }
 }

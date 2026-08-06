@@ -14,7 +14,7 @@ use winit::window::Window;
 use crate::engine::core::camera::CameraUniform;
 use crate::engine::core::mesh::Vertex;
 use crate::engine::core::texture::Texture;
-use crate::engine::render::debug::LightDebugGizmos;
+use crate::engine::render::debug::LineGizmos;
 use crate::engine::render::environment::{EnvConversionPath, EnvironmentResources};
 use crate::engine::render::uniform::{LIGHT_CAPACITY, LightCountUniform, LightUniform, ObjectData};
 use crate::engine::render::{DisplayHandle, Renderer, RendererError};
@@ -389,8 +389,9 @@ impl Renderer {
             conversion_path,
         );
 
-        // 5.8 灯光调试：线框管线复用相机绑定组（@group(0)）。
-        let debug_gizmos = LightDebugGizmos::new(&device, &camera_bind_group_layout, config.format);
+        // 5.8 调试线框：灯光与碰撞箱各一个实例，管线复用相机绑定组（@group(0)）。
+        let light_gizmos = LineGizmos::new(&device, &camera_bind_group_layout, config.format);
+        let collision_gizmos = LineGizmos::new(&device, &camera_bind_group_layout, config.format);
 
         // 6. 渲染管线：网格 + 相机/物体/灯光/纹理/环境。
         let shader = device.create_shader_module(ShaderModuleDescriptor {
@@ -479,7 +480,8 @@ impl Renderer {
             mesh_uploaded_version: 0,
             environment: environment_resources.default_environment.clone(),
             environment_resources,
-            debug_gizmos,
+            light_gizmos,
+            collision_gizmos,
         })
     }
 }

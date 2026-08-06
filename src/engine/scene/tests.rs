@@ -1,6 +1,7 @@
 //! 场景模块测试：层级变换、合并、灯光缓存与主相机生命周期。
 
 use super::*;
+use crate::engine::Mesh;
 use glam::{Quat, Vec3};
 
 /// 环境强度默认应为 1.0（满环境光），避免手误改成 0 后物体失去环境光。
@@ -176,4 +177,116 @@ fn main_camera_invalid_kind_panics() {
     // 绕过 set_main_camera 的校验把相机节点改成其他类型（模拟脏状态）。
     scene.object_mut(cam).unwrap().kind = SceneObjectKind::Empty;
     let _ = scene.main_camera();
+}
+
+/// 主相机操作：平移与旋转按操作应用；无主相机时返回 `false`。
+#[test]
+fn apply_main_camera_action_moves_and_rotates() {
+    let mut scene = Scene::new();
+    let cam = scene.add_camera(Camera::new(Vec3::ZERO, 0.0, 0.0, 1.0, 1.0, 0.1, 100.0));
+    assert!(scene.set_main_camera(cam));
+
+    let action = CameraAction {
+        translate: Vec3::new(1.0, 2.0, 3.0),
+        yaw_delta: 0.5,
+        pitch_delta: -0.25,
+    };
+    assert!(scene.apply_main_camera_action(action));
+
+    let camera = scene.main_camera_ref().expect("主相机应存在");
+    assert_eq!(camera.position(), Vec3::new(1.0, 2.0, 3.0));
+    // forward = (cos yaw·cos pitch, sin pitch, sin yaw·cos pitch)。
+    let f = camera.forward();
+    assert!((f.x - 0.5_f32.cos() * 0.25_f32.cos()).abs() < 1e-6);
+    assert!((f.y + 0.25_f32.sin()).abs() < 1e-6, "俯仰向下：{f:?}");
+    assert!((f.z - 0.5_f32.sin() * 0.25_f32.cos()).abs() < 1e-6);
+
+    // 没有主相机时应用失败，返回 false。
+    let mut empty = Scene::new();
+    assert!(!empty.apply_main_camera_action(CameraAction::default()));
+}
+
+/// 场景碰撞查询的公共脚手架：一个边长 1 的立方体资产 + 放在原点的实例。
+fn cube_world(meshes: &mut MeshLibrary, scene: &mut Scene, position: Vec3) -> ObjectKey {
+    let key = meshes.register(Mesh::cube());
+    scene.add_object(SceneObject::new(
+        SceneObjectKind::Mesh(key),
+        Transform::new(position, Quat::IDENTITY, Vec3::ONE),
+    ))
+}
+
+/// 点包含：立方体中心在盒内，远处点在外，边界算在内。
+#[test]
+fn point_inside_uses_world_aabb() {
+    let mut meshes = MeshLibrary::new();
+    let mut scene = Scene::new();
+    let cube = cube_world(&mut meshes, &mut scene, Vec3::new(2.0, 0.0, 0.0));
+
+    assert!(scene.point_inside(&meshes, cube, Vec3::new(2.0, 0.0, 0.0)));
+    assert!(scene.point_inside(&meshes, cube, Vec3::new(2.5, 0.5, 0.5))); // 边界上
+    assert!(!scene.point_inside(&meshes, cube, Vec3::new(3.0, 0.0, 0.0)));
+    // 非网格节点没有包围盒，任何点都不在内。
+    let empty = scene.add_object(SceneObject::new(
+        SceneObjectKind::Empty,
+        Transform::IDENTITY,
+    ));
+    assert!(!scene.point_inside(&meshes, empty, Vec3::ZERO));
+}
+
+/// 两物体碰撞：中心距 < 边长和的一半时相交，> 时不相交。
+#[test]
+fn objects_collide_uses_world_aabb() {
+    let mut meshes = MeshLibrary::new();
+    let mut scene = Scene::new();
+    let a = cube_world(&mut meshes, &mut scene, Vec3::ZERO);
+    let b = cube_world(&mut meshes, &mut scene, Vec3::new(0.5, 0.0, 0.0));
+    let c = cube_world(&mut meshes, &mut scene, Vec3::new(2.0, 0.0, 0.0));
+
+    assert!(scene.objects_collide(&meshes, a, b), "中心距 0.5 < 1 应相交");
+    assert!(!scene.objects_collide(&meshes, a, c), "中心距 2 > 1 应分离");
+    // 已删除的句柄不参与碰撞。
+    scene.remove_object(c);
+    assert!(!scene.objects_collide(&meshes, a, c));
+}
+
+/// 外部物体：给定 transform + half_extents 与世界碰撞，支持旋转与排除。
+#[test]
+fn collides_with_external_probe() {
+    let mut meshes = MeshLibrary::new();
+    let mut scene = Scene::new();
+    let cube = cube_world(&mut meshes, &mut scene, Vec3::ZERO);
+
+    // 玩家盒子局部 AABB（以自身原点为中心，半尺寸 (0.3, 0.9, 0.3)）：
+    // 中心距 0.6 时与边长 1 的立方体相交。
+    let player = Transform::new(Vec3::new(0.6, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+    let player_box = Aabb::from_half_extents(Vec3::ZERO, Vec3::new(0.3, 0.9, 0.3));
+    assert_eq!(
+        scene.collides_with(&meshes, &player, player_box, &[]),
+        Some(cube)
+    );
+
+    // 远离时无碰撞。
+    let away = Transform::new(Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+    assert_eq!(
+        scene.collides_with(&meshes, &away, player_box, &[]),
+        None
+    );
+
+    // 旋转 45° 后包围盒变大：probe 的 x 半宽从 0.3 增到 0.3√2 ≈ 0.424，
+    // 中心距 0.9 < 0.5 + 0.424 所以相交；不旋转时 0.9 会分离（0.6 > 0.5）。
+    let rotated = Transform::new(
+        Vec3::new(0.9, 0.0, 0.0),
+        Quat::from_rotation_y(std::f32::consts::FRAC_PI_4),
+        Vec3::ONE,
+    );
+    assert_eq!(
+        scene.collides_with(&meshes, &rotated, player_box, &[]),
+        Some(cube)
+    );
+
+    // 排除后跳过该物体。
+    assert_eq!(
+        scene.collides_with(&meshes, &player, player_box, &[cube]),
+        None
+    );
 }

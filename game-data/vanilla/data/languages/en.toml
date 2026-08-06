@@ -1,0 +1,8 @@
+[ui]
+source = "Source:"
+original = "Original"
+
+[levels]
+level-0.title = "Threshold"
+level-0.subtitle = "Level 0"
+level-0.description = "Tread carefully, wanderer. This place is just as much a grave as it is a threshold."

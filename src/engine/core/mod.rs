@@ -2,6 +2,7 @@
 //!
 //! 物理（碰撞需要 Transform/Mesh）、音频等未来子系统也消费这一层。
 
+pub mod aabb;
 pub mod camera;
 pub mod environment;
 pub mod light;

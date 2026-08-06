@@ -22,7 +22,7 @@ pub(crate) mod uniform;
 
 use wgpu::Color;
 
-use self::debug::LightDebugGizmos;
+use self::debug::LineGizmos;
 use self::environment::{EnvironmentGpu, EnvironmentResources};
 
 /// 窗口的显示句柄，用于创建 wgpu 实例。
@@ -85,7 +85,9 @@ pub struct Renderer {
     /// 环境子系统资源（布局、计算管线、天空盒管线等）。
     environment_resources: EnvironmentResources,
     /// 灯光调试可视化（灯泡 + 射线线框；顶点在 load_scene 时上传一次）。
-    debug_gizmos: LightDebugGizmos,
+    light_gizmos: LineGizmos,
+    /// 碰撞箱调试可视化（世界 AABB 线框；顶点在 load_scene 时上传一次）。
+    collision_gizmos: LineGizmos,
 }
 
 /// 资产库中单个网格在合并缓冲里的区间。

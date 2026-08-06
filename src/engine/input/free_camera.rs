@@ -4,13 +4,17 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window};
 
 use super::InputController;
-use crate::engine::core::camera::Camera;
+use crate::engine::core::aabb::Aabb;
+use crate::engine::core::camera::{Camera, CameraAction};
+use crate::engine::core::mesh::MeshLibrary;
+use crate::engine::core::transform::Transform;
+use crate::engine::scene::Scene;
 
 /// 第一人称式相机控制器。
 ///
@@ -21,6 +25,7 @@ use crate::engine::core::camera::Camera;
 /// - Esc：释放鼠标（返回系统光标）
 /// - 滚轮：调整移动速度（乘法步进，带上下限）
 /// - L：切换灯光调试可视化（灯泡 + 射线的显示/隐藏）
+/// - B：切换碰撞箱调试可视化（世界 AABB 线框的显示/隐藏）
 pub struct FreeCameraController {
     /// 移动速度（单位 / 秒）。
     speed: f32,
@@ -46,12 +51,20 @@ pub struct FreeCameraController {
     /// 开关不属于相机状态，用共享原子标志传回 App，保持
     /// "输入控制器只驱动目标"的抽象不被破坏。
     show_light_debug: Arc<AtomicBool>,
+    /// 碰撞箱调试可视化开关（与 App/渲染器共享，B 键翻转）。
+    show_collision_debug: Arc<AtomicBool>,
+    /// 相机碰撞体（局部空间，以相机位置为中心）。移动时与世界障碍
+    /// AABB 做相交测试，撞到就放弃该轴分量（贴墙滑动）。
+    collider: Aabb,
 }
 
 impl FreeCameraController {
-    /// 新建控制器；`show_light_debug` 是与 App 共享的灯光调试开关，
-    /// 由 L 键翻转，App 侧每帧读取决定是否绘制调试线框。
-    pub fn new(show_light_debug: Arc<AtomicBool>) -> Self {
+    /// 新建控制器；两个 `Arc<AtomicBool>` 是与 App 共享的调试开关，
+    /// 分别由 L / B 键翻转，App 侧每帧读取决定是否绘制对应线框。
+    pub fn new(
+        show_light_debug: Arc<AtomicBool>,
+        show_collision_debug: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             speed: 5.0,
             min_speed: 0.5,
@@ -64,7 +77,17 @@ impl FreeCameraController {
             scroll_delta: 0.0,
             mouse_captured: false,
             show_light_debug,
+            show_collision_debug,
+            // 默认：半尺寸 (0.3, 0.9, 0.3) 的小盒子，代表"人"的占位。
+            collider: Aabb::from_half_extents(Vec3::ZERO, Vec3::new(0.3, 0.9, 0.3)),
         }
+    }
+
+    /// 设置相机碰撞体（局部空间，以相机位置为中心）。
+    #[allow(dead_code)] // 公共配置 API：demo/模组可调整碰撞盒大小，暂无调用方
+    pub fn with_collider(mut self, collider: Aabb) -> Self {
+        self.collider = collider;
+        self
     }
 
     fn pressed(&self, code: KeyCode) -> bool {
@@ -91,6 +114,8 @@ impl FreeCameraController {
 }
 
 impl InputController<Camera> for FreeCameraController {
+    type Action = CameraAction;
+
     fn handle_event(&mut self, event: &WindowEvent, window: &Window) {
         match event {
             WindowEvent::KeyboardInput {
@@ -106,6 +131,13 @@ impl InputController<Camera> for FreeCameraController {
                         if code == KeyCode::KeyL && !key_event.repeat {
                             let on = self.show_light_debug.fetch_xor(true, Ordering::Relaxed);
                             eprintln!("灯光调试可视化：{}", if on { "关" } else { "开" });
+                        }
+                        // B：切换碰撞箱调试可视化（长按不重复触发）。
+                        if code == KeyCode::KeyB && !key_event.repeat {
+                            let on = self
+                                .show_collision_debug
+                                .fetch_xor(true, Ordering::Relaxed);
+                            eprintln!("碰撞箱调试可视化：{}", if on { "关" } else { "开" });
                         }
                         // Esc 释放鼠标，回到系统光标。
                         if code == KeyCode::Escape && self.mouse_captured {
@@ -159,12 +191,16 @@ impl InputController<Camera> for FreeCameraController {
         }
     }
 
-    fn update(&mut self, target: &mut Camera, dt: f32) {
+    fn update(
+        &mut self,
+        target: &Camera,
+        dt: f32,
+        scene: &Scene,
+        meshes: &MeshLibrary,
+    ) -> CameraAction {
         // 1. 鼠标旋转（向下拖动鼠标 → 俯视）。
-        target.rotate(
-            self.look_delta.0 * self.sensitivity,
-            -self.look_delta.1 * self.sensitivity,
-        );
+        let yaw_delta = self.look_delta.0 * self.sensitivity;
+        let pitch_delta = -self.look_delta.1 * self.sensitivity;
         self.look_delta = (0.0, 0.0);
 
         // 2. 滚轮调整移动速度（每格 ×1.25，clamp 到 [min_speed, max_speed]）。
@@ -195,14 +231,119 @@ impl InputController<Camera> for FreeCameraController {
             movement -= Vec3::Y;
         }
 
-        if movement != Vec3::ZERO {
-            target.translate(movement.normalize_or_zero() * self.speed * dt);
+        let delta = movement.normalize_or_zero() * self.speed * dt;
+        // 分轴滑动：先水平（X、Z）再垂直（Y），每轴单独测碰撞。
+        // 撞到障碍就放弃该轴分量，其余轴继续——贴墙移动不会卡死，
+        // 斜向撞墙会自然沿墙滑过去。探测基于"目标当前位置 + 已通过分量 +
+        // 本轴分量"，控制器不修改目标，最终平移量由返回的操作携带。
+        let mut translate = Vec3::ZERO;
+        for axis in [Vec3::X, Vec3::Z, Vec3::Y] {
+            let step = delta * axis;
+            if step == Vec3::ZERO {
+                continue;
+            }
+            let probe_center = target.position() + translate + step;
+            let transform = Transform::new(probe_center, Quat::IDENTITY, Vec3::ONE);
+            if scene.collides_with(meshes, &transform, self.collider, &[]).is_none() {
+                translate += step;
+            }
+        }
+
+        CameraAction {
+            translate,
+            yaw_delta,
+            pitch_delta,
         }
     }
 }
 
 impl Default for FreeCameraController {
     fn default() -> Self {
-        Self::new(Arc::new(AtomicBool::new(false)))
+        Self::new(
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{Mesh, SceneObject, SceneObjectKind};
+
+    /// 默认碰撞盒：半尺寸 (0.3, 0.9, 0.3)，以相机位置为中心。
+    fn controller() -> FreeCameraController {
+        let mut c = FreeCameraController::default();
+        c.keys.insert(KeyCode::KeyW);
+        c
+    }
+
+    /// 场景：把若干边长 1 的立方体（`Mesh::cube`）摆在 `centers` 处作为障碍，
+    /// 障碍 AABB 即 [center-0.5, center+0.5]³。
+    fn obstacle_scene(centers: &[Vec3]) -> (Scene, MeshLibrary) {
+        let mut scene = Scene::new();
+        let mut meshes = MeshLibrary::new();
+        for center in centers {
+            let key = meshes.register(Mesh::cube());
+            scene.add_object(SceneObject::new(
+                SceneObjectKind::Mesh(key),
+                Transform::new(*center, Quat::IDENTITY, Vec3::ONE),
+            ));
+        }
+        (scene, meshes)
+    }
+
+    fn camera() -> Camera {
+        Camera::new(Vec3::ZERO, 0.0, 0.0, 1.0, 1.0, 0.1, 100.0)
+    }
+
+    /// 正前方有墙：W 移动被挡，操作平移量为零。
+    #[test]
+    fn forward_movement_blocked_by_wall() {
+        let mut c = controller();
+        let cam = camera();
+        // yaw=0 时 W = 朝 +X；墙在 (1,0,0)，中心距 1 < 0.5+0.3。
+        let (scene, meshes) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
+        let action = c.update(&cam, 0.1, &scene, &meshes);
+        assert_eq!(action.translate, Vec3::ZERO, "撞墙应被挡在原地");
+        assert_eq!(cam.position(), Vec3::ZERO, "控制器不应修改目标");
+    }
+
+    /// 无障碍时正常移动：W 走 speed × dt。
+    #[test]
+    fn forward_movement_free_when_no_obstacle() {
+        let mut c = controller();
+        let cam = camera();
+        let (scene, meshes) = obstacle_scene(&[]);
+        let action = c.update(&cam, 0.1, &scene, &meshes);
+        assert_eq!(action.translate, Vec3::new(0.5, 0.0, 0.0));
+    }
+
+    /// 斜向撞墙：X 分量被挡，Z 分量继续 → 沿墙滑动，不卡死。
+    #[test]
+    fn diagonal_movement_slides_along_wall() {
+        let mut c = controller();
+        c.keys.insert(KeyCode::KeyD);
+        let cam = camera();
+        // W+D：归一化后 (0.707, 0, 0.707)，speed 5 × dt 0.1 = 0.354/轴。
+        // X 轴被墙 (1,0,0) 挡下，Z 轴照常移动。
+        let (scene, meshes) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
+        let action = c.update(&cam, 0.1, &scene, &meshes);
+        assert!(action.translate.x.abs() < 1e-6, "X 应被挡：{:?}", action);
+        assert!(
+            (action.translate.z - std::f32::consts::FRAC_1_SQRT_2 * 0.5).abs() < 1e-6,
+            "Z 应滑动：{:?}",
+            action
+        );
+    }
+
+    /// 移动速度不会被碰撞测试改变（speed 是乘性调参，碰撞只回退位置）。
+    #[test]
+    fn collision_does_not_change_speed() {
+        let mut c = controller();
+        let cam = camera();
+        let (scene, meshes) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
+        c.update(&cam, 0.1, &scene, &meshes);
+        assert_eq!(c.speed, 5.0);
     }
 }

@@ -14,15 +14,15 @@ use winit::window::Window;
 
 use crate::engine::asset;
 use crate::engine::{
-    Camera, DisplayHandle, Environment, FreeCameraController, InputController, Mesh, MeshKey,
-    MeshLibrary, Renderer, RendererError, Scene, Texture, TextureKey, TextureLibrary,
+    Camera, CameraAction, DisplayHandle, Environment, FreeCameraController, InputController, Mesh,
+    MeshKey, MeshLibrary, Renderer, RendererError, Scene, Texture, TextureKey, TextureLibrary,
 };
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
 pub struct App {
     window: Arc<Window>,
     renderer: Renderer,
-    controller: Box<dyn InputController<Camera>>,
+    controller: Box<dyn InputController<Camera, Action = CameraAction>>,
     last_frame: Instant,
     /// 全局网格资产库（永久驻留，跨场景共享）。
     mesh_library: MeshLibrary,
@@ -31,6 +31,8 @@ pub struct App {
     scene: Scene,
     /// 灯光调试可视化开关（控制器按 L 翻转，渲染时读取）。
     show_light_debug: Arc<AtomicBool>,
+    /// 碰撞箱调试可视化开关（控制器按 B 翻转，渲染时读取）。
+    show_collision_debug: Arc<AtomicBool>,
 }
 
 impl App {
@@ -38,8 +40,12 @@ impl App {
     pub fn new(window: Arc<Window>, display: DisplayHandle) -> Result<Self, RendererError> {
         // 灯光调试开关由控制器独占翻转，App 只读；用 Arc 共享给两边。
         let show_light_debug = Arc::new(AtomicBool::new(false));
-        let controller: Box<dyn InputController<Camera>> =
-            Box::new(FreeCameraController::new(show_light_debug.clone()));
+        let show_collision_debug = Arc::new(AtomicBool::new(false));
+        let controller: Box<dyn InputController<Camera, Action = CameraAction>> =
+            Box::new(FreeCameraController::new(
+                show_light_debug.clone(),
+                show_collision_debug.clone(),
+            ));
         let renderer = Renderer::new(&window, display)?;
         let mut app = Self {
             window,
@@ -50,6 +56,7 @@ impl App {
             texture_library: TextureLibrary::new(),
             scene: Scene::default(),
             show_light_debug,
+            show_collision_debug,
         };
         app.load_startup_scene();
         Ok(app)
@@ -184,7 +191,7 @@ impl App {
             }
             None => self.renderer.reset_environment(),
         }
-        self.renderer.load_scene(&scene);
+        self.renderer.load_scene(&scene, &self.mesh_library);
         self.scene = scene;
     }
 
@@ -230,6 +237,7 @@ impl App {
                         camera,
                         &self.scene,
                         self.show_light_debug.load(Ordering::Relaxed),
+                        self.show_collision_debug.load(Ordering::Relaxed),
                     );
                 }
             }
@@ -250,9 +258,13 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32().min(0.25);
         self.last_frame = now;
 
-        if let Some(camera) = self.scene.main_camera_mut() {
-            self.controller.update(camera, dt);
-        }
+        // 控制器只读相机 + 查询场景碰撞，输出一帧操作；操作由场景统一应用
+        // （不可变借用先结束，再可变借用应用，无冲突）。
+        let action = match self.scene.main_camera_ref() {
+            Some(camera) => self.controller.update(camera, dt, &self.scene, &self.mesh_library),
+            None => CameraAction::default(),
+        };
+        self.scene.apply_main_camera_action(action);
         // 请求下一帧，驱动持续渲染。
         self.window.request_redraw();
     }

@@ -24,6 +24,10 @@ pub mod scene;
 #[allow(unused_imports)]
 pub use core::camera::Camera;
 #[allow(unused_imports)]
+pub use core::camera::CameraAction;
+#[allow(unused_imports)]
+pub use core::aabb::Aabb;
+#[allow(unused_imports)]
 pub use core::environment::{Environment, EnvironmentError};
 #[allow(unused_imports)]
 pub use core::light::Light;

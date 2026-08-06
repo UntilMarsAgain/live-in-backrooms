@@ -16,6 +16,21 @@ use glam::camera::rh::proj::directx;
 use glam::camera::rh::view;
 use glam::{Mat4, Vec3};
 
+/// 相机操作：控制器计算出的"变化量"，由场景应用（相机始终由场景持有）。
+///
+/// 控制器每帧读取相机当前状态与场景碰撞，输出这里的变化量；场景在
+/// [`crate::engine::scene::Scene::apply_main_camera_action`] 里统一应用，
+/// 避免控制器直接持有/修改相机造成与场景查询的借用冲突。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CameraAction {
+    /// 平移增量（世界空间，已做分轴碰撞剔除）。
+    pub translate: Vec3,
+    /// 偏航增量（弧度）。
+    pub yaw_delta: f32,
+    /// 俯仰增量（弧度）。
+    pub pitch_delta: f32,
+}
+
 /// 自由相机：位置 + 欧拉角朝向 + 透视投影参数。
 ///
 /// 本阶段世界坐标与物体坐标等同，相机只负责"看"，不做物体变换；

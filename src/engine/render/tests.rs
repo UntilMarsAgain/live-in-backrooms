@@ -250,7 +250,7 @@ fn light_debug_gizmos_headless_smoke() {
     });
 
     // 调试管线 + 两条线段（4 个顶点）绘制到离屏纹理。
-    let mut gizmos = super::debug::LightDebugGizmos::new(
+    let mut gizmos = super::debug::LineGizmos::new(
         &device,
         &camera_layout,
         wgpu::TextureFormat::Rgba8UnormSrgb,

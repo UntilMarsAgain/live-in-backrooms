@@ -8,7 +8,10 @@
 //! 一份顶点/索引缓冲永久驻留，新增网格时整体重传。
 
 use bytemuck::{Pod, Zeroable};
+use glam::Vec3;
 use wgpu::{VertexAttribute, VertexBufferLayout, VertexFormat, VertexStepMode};
+
+use super::aabb::Aabb;
 
 /// 顶点：位置 + 法线 + 切线 + UV + 顶点色。
 ///
@@ -70,11 +73,18 @@ impl Vertex {
 pub struct Mesh {
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
+    /// 顶点包围盒（局部空间）：碰撞查询与资产尺寸校验用。
+    bounds: Aabb,
 }
 
 impl Mesh {
     pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
-        Self { vertices, indices }
+        let bounds = Aabb::from_points(vertices.iter().map(|v| Vec3::from(v.position)));
+        Self {
+            vertices,
+            indices,
+            bounds,
+        }
     }
 
     pub fn vertices(&self) -> &[Vertex] {
@@ -83,6 +93,11 @@ impl Mesh {
 
     pub fn indices(&self) -> &[u32] {
         &self.indices
+    }
+
+    /// 局部空间 AABB（从顶点实时算过一次并缓存）。
+    pub fn bounds(&self) -> Aabb {
+        self.bounds
     }
 
     /// 示例三角形：红绿蓝三色。
@@ -287,5 +302,33 @@ impl MeshLibrary {
     /// 当前版本号：新增资产后 +1。
     pub fn version(&self) -> u64 {
         self.version
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec3;
+
+    /// 示例三角形：顶点覆盖 [-0.5,0.5]×[-0.5,0.5]×{0}。
+    #[test]
+    fn triangle_bounds_match_vertices() {
+        let bounds = Mesh::triangle().bounds();
+        assert_eq!(bounds.min, Vec3::new(-0.5, -0.5, 0.0));
+        assert_eq!(bounds.max, Vec3::new(0.5, 0.5, 0.0));
+    }
+
+    /// 示例立方体：边长 1、中心在原点。
+    #[test]
+    fn cube_bounds_match_vertices() {
+        let bounds = Mesh::cube().bounds();
+        assert_eq!(bounds.min, Vec3::splat(-0.5));
+        assert_eq!(bounds.max, Vec3::splat(0.5));
+    }
+
+    /// 空网格：bounds 为空盒，不误报"存在尺寸"。
+    #[test]
+    fn empty_mesh_bounds_is_empty() {
+        assert!(Mesh::default().bounds().is_empty());
     }
 }
