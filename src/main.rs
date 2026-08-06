@@ -57,12 +57,6 @@ impl ApplicationHandler for WindowedApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(app) = &mut self.app {
-            app.update();
-        }
-    }
-
     fn device_event(
         &mut self,
         _event_loop: &ActiveEventLoop,
@@ -72,6 +66,12 @@ impl ApplicationHandler for WindowedApp {
         // 只做转发：设备事件交给 App 处理。
         if let Some(app) = &mut self.app {
             app.handle_device_event(event);
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(app) = &mut self.app {
+            app.update();
         }
     }
 }
