@@ -17,7 +17,7 @@ use crate::engine::core::mesh::Vertex;
 use crate::engine::core::texture::Texture;
 use crate::engine::render::debug::LineGizmos;
 use crate::engine::render::environment::{EnvConversionPath, EnvironmentResources};
-use crate::engine::render::uniform::{LIGHT_CAPACITY, LightCountUniform, LightUniform, ObjectData};
+use crate::engine::render::uniform::{LIGHT_CAPACITY, LightCountUniform, LightUniform, ObjectDataUniform};
 use crate::engine::render::{DisplayHandle, Renderer};
 
 /// 创建与窗口尺寸一致的深度纹理。
@@ -215,7 +215,7 @@ impl Renderer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: true,
                         min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<ObjectData>() as u64
+                            std::mem::size_of::<ObjectDataUniform>() as u64
                         ),
                     },
                     count: None,
@@ -226,7 +226,7 @@ impl Renderer {
         let object_stride = device
             .limits()
             .min_uniform_buffer_offset_alignment
-            .max(std::mem::size_of::<ObjectData>() as u32);
+            .max(std::mem::size_of::<ObjectDataUniform>() as u32);
         let object_data_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("object data buffer"),
             size: object_stride as u64,
@@ -243,7 +243,7 @@ impl Renderer {
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &object_data_buffer,
                     offset: 0,
-                    size: wgpu::BufferSize::new(std::mem::size_of::<ObjectData>() as u64),
+                    size: wgpu::BufferSize::new(std::mem::size_of::<ObjectDataUniform>() as u64),
                 }),
             }],
         });

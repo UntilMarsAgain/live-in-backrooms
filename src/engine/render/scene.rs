@@ -9,7 +9,7 @@ use crate::engine::core::texture::TextureLibrary;
 use crate::engine::render::debug;
 use crate::engine::render::init::create_texture_view;
 use crate::engine::render::uniform::{
-    AGX_DEFAULT_EV_MAX, AGX_DEFAULT_EV_MIN, AGX_MIDDLE_GRAY_LOG2, ObjectData,
+    AGX_DEFAULT_EV_MAX, AGX_DEFAULT_EV_MIN, AGX_MIDDLE_GRAY_LOG2, ObjectDataUniform,
 };
 use crate::engine::render::{MeshGpu, MeshRange, Renderer};
 use crate::engine::scene::Scene;
@@ -116,7 +116,7 @@ impl Renderer {
             .device
             .limits()
             .min_uniform_buffer_offset_alignment
-            .max(std::mem::size_of::<ObjectData>() as u32);
+            .max(std::mem::size_of::<ObjectDataUniform>() as u32);
         let object_data_buffer = self.device.create_buffer(&BufferDescriptor {
             label: Some("object data buffer"),
             size: (scene.object_count() as u64).max(1) * stride as u64,
@@ -131,7 +131,7 @@ impl Renderer {
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &object_data_buffer,
                     offset: 0,
-                    size: wgpu::BufferSize::new(std::mem::size_of::<ObjectData>() as u64),
+                    size: wgpu::BufferSize::new(std::mem::size_of::<ObjectDataUniform>() as u64),
                 }),
             }],
         });

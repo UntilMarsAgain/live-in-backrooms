@@ -19,18 +19,18 @@
 //! 模组作者按"一个关卡 = 场景 + 环境"来组织资产。
 //! 切换场景由 App 层 API 触发。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use indextree::{Arena, NodeId};
 
+use super::core::aabb::Aabb;
 use super::core::camera::{Camera, CameraAction};
 use super::core::environment::Environment;
 use super::core::light::Light;
 use super::core::material::Material;
 use super::core::mesh::{MeshKey, MeshLibrary};
-use super::core::aabb::Aabb;
 use super::core::transform::Transform;
 
 /// 场景节点句柄：indextree 的节点 ID（带代际，删除后不失效复用）。
@@ -159,7 +159,6 @@ impl Scene {
     /// 参数是**相对中间灰 0.18 的 EV 档位**：默认 -10 ~ +6.5 EV（Blender 一致），
     /// 一般无需修改；想让某个层级更亮/更暗或动态范围更宽/更窄时再调。
     /// 窗口越宽曲线越平缓（整体偏灰），越窄对比越强；要求 `min_ev < max_ev`。
-    #[allow(dead_code)] // 公共配置 API：关卡数据构建场景时使用
     pub fn with_environment_agx_ev(mut self, min_ev: f32, max_ev: f32) -> Self {
         debug_assert!(min_ev < max_ev, "AgX EV 窗口要求 min_ev < max_ev");
         self.agx_min_ev = min_ev;
@@ -476,10 +475,7 @@ impl Scene {
         let probe = local.transformed(transform);
         self.objects()
             .filter(|(key, _)| !exclude.contains(key))
-            .filter_map(|(key, _)| {
-                self.object_aabb_world(meshes, key)
-                    .map(|aabb| (key, aabb))
-            })
+            .filter_map(|(key, _)| self.object_aabb_world(meshes, key).map(|aabb| (key, aabb)))
             .find(|(_, aabb)| aabb.intersects(&probe))
             .map(|(key, _)| key)
     }

@@ -97,7 +97,7 @@ pub(super) fn collect_lights(scene: &Scene, camera_position: Vec3) -> Vec<LightU
 /// 每物体 uniform：模型矩阵 + 法线矩阵（逆转置，正确处理非等比缩放）。
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct ObjectData {
+pub(super) struct ObjectDataUniform {
     pub(super) model: Mat4,
     /// 法线矩阵（WGSL `mat3x3<f32>` 布局：每列 16 字节，含填充）。
     pub(super) normal_matrix: [[f32; 4]; 3],

@@ -9,7 +9,7 @@ use wgpu::{
 use crate::engine::core::camera::{Camera, CameraUniform};
 use crate::engine::render::init::create_depth_texture;
 use crate::engine::render::uniform::{
-    LIGHT_CAPACITY, LightCountUniform, ObjectData, collect_lights,
+    LIGHT_CAPACITY, LightCountUniform, ObjectDataUniform, collect_lights,
 };
 use crate::engine::render::{CLEAR_COLOR, Renderer};
 use crate::engine::scene::Scene;
@@ -65,7 +65,7 @@ impl Renderer {
         // 每帧把物体世界矩阵 + 法线矩阵写入动态 uniform 缓冲（步长 = object_stride）。
         if scene.object_count() > 0 {
             let stride = self.object_stride as usize;
-            let entry_size = std::mem::size_of::<ObjectData>();
+            let entry_size = std::mem::size_of::<ObjectDataUniform>();
             let mut bytes = vec![0u8; scene.object_count() * stride];
             for (i, (key, object)) in scene.objects().enumerate() {
                 let model = scene
@@ -79,7 +79,7 @@ impl Renderer {
                     [cols[3], cols[4], cols[5], 0.0],
                     [cols[6], cols[7], cols[8], 0.0],
                 ];
-                let data = ObjectData {
+                let data = ObjectDataUniform {
                     model,
                     normal_matrix,
                     base_color: object.material.base_color,
