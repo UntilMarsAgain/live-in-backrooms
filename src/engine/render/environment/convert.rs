@@ -1,15 +1,13 @@
 //! 环境子系统：转换编排。
 //!
-//! HDRI → 环境立方体贴图 + 辐照度图 + 镜面预过滤 mip 链 + BRDF LUT；
-//! 按后端分流：Vulkan/Metal 走 GPU 计算，GL 等回退 CPU 转换 + 逐层上传。
+//! HDRI → 环境立方体贴图 + 辐照度图 + 镜面预过滤 mip 链 + BRDF LUT，
+//! 全部走 GPU 计算着色器（项目只启用 PRIMARY 后端，无 GL 回退路径）。
 
 use wgpu::{BindGroupDescriptor, BindGroupEntry, CommandEncoderDescriptor, TextureViewDescriptor};
 
 use super::{
-    BRDF_LUT_SAMPLES, BRDF_LUT_SIZE, ENV_CUBEMAP_SIZE, EnvConversionPath, EnvironmentGpu,
-    EnvironmentResources, IRRADIANCE_SAMPLES, IRRADIANCE_SIZE, PREFILTER_MIP_COUNT,
-    PREFILTER_SAMPLES, PREFILTERED_SIZE, create_2d_texture, create_cube_texture,
-    create_mip_cube_texture,
+    BRDF_LUT_SIZE, ENV_CUBEMAP_SIZE, EnvironmentGpu, EnvironmentResources, IRRADIANCE_SAMPLES,
+    IRRADIANCE_SIZE, PREFILTER_MIP_COUNT, PREFILTER_SAMPLES, PREFILTERED_SIZE,
 };
 use crate::engine::core::environment::Environment;
 use crate::engine::render::uniform::{EnvParams, PrefilterParams};
@@ -17,72 +15,17 @@ use crate::engine::render::uniform::{EnvParams, PrefilterParams};
 impl EnvironmentResources {
     /// 上传环境贴图（HDRI 等距矩形图）并转换成环境立方体贴图 + 辐照度图。
     ///
-    /// 按启动时决定的路径转换：Vulkan/Metal 用 GPU 计算着色器，其余后端
-    /// （GL 等 storage 数组纹理不可靠）回退 CPU 转换 + 逐层上传。
+    /// GPU 计算着色器转换：等距矩形源 → 环境图、辐照度图、镜面预过滤
+    /// mip 链与 BRDF LUT。
     pub(crate) fn convert(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         environment: &Environment,
     ) -> EnvironmentGpu {
-        let face_size = ENV_CUBEMAP_SIZE;
-        let irradiance_size = IRRADIANCE_SIZE;
-
-        // 1. 按路径生成环境图、辐照度图、镜面预过滤图与 BRDF LUT。
+        // 1. GPU 计算生成环境图、辐照度图、镜面预过滤图与 BRDF LUT。
         let (env_texture, irradiance_texture, prefiltered_texture, brdf_lut_texture) =
-            match self.conversion_path {
-                EnvConversionPath::Gpu => self.convert_gpu(device, queue, environment),
-                EnvConversionPath::Cpu => {
-                    // CPU 转换 + 逐层上传（write_texture 无 256 对齐要求）。
-                    let cube_pixels = environment.to_cubemap(face_size);
-                    let irradiance_pixels = Environment::irradiance_map(
-                        &cube_pixels,
-                        face_size,
-                        irradiance_size,
-                        IRRADIANCE_SAMPLES,
-                    );
-                    let prefiltered_mips = Environment::prefilter_map(
-                        &cube_pixels,
-                        face_size,
-                        PREFILTERED_SIZE,
-                        PREFILTER_MIP_COUNT,
-                        PREFILTER_SAMPLES,
-                    );
-                    let brdf_pixels = Environment::brdf_lut(BRDF_LUT_SIZE, BRDF_LUT_SAMPLES);
-                    (
-                        create_cube_texture(
-                            device,
-                            queue,
-                            face_size,
-                            &cube_pixels,
-                            "environment cubemap",
-                        ),
-                        create_cube_texture(
-                            device,
-                            queue,
-                            irradiance_size,
-                            &irradiance_pixels,
-                            "irradiance cubemap",
-                        ),
-                        create_mip_cube_texture(
-                            device,
-                            queue,
-                            PREFILTERED_SIZE,
-                            PREFILTER_MIP_COUNT,
-                            &prefiltered_mips,
-                            "prefiltered cubemap",
-                        ),
-                        create_2d_texture(
-                            device,
-                            queue,
-                            BRDF_LUT_SIZE,
-                            BRDF_LUT_SIZE,
-                            &brdf_pixels,
-                            "brdf lut",
-                        ),
-                    )
-                }
-            };
+            self.convert_gpu(device, queue, environment);
 
         // 2. 立方体视图（采样用）。
         let env_cube_view = env_texture.create_view(&TextureViewDescriptor {
@@ -193,11 +136,8 @@ impl EnvironmentResources {
         );
     }
 
-    /// GPU 路径：上传等距矩形源，计算 pass 产出环境图、辐照度图、
-    /// 镜面预过滤 mip 链与 BRDF LUT。
-    ///
-    /// 只在 storage 数组纹理可靠的后端（Vulkan/Metal）调用；GL 后端在这里
-    /// 会写入全零（见 docs/BUG.md），因此由调用方按 `conversion_path` 分流。
+    /// 上传等距矩形源，计算 pass 产出环境图、辐照度图、镜面预过滤
+    /// mip 链与 BRDF LUT。
     fn convert_gpu(
         &self,
         device: &wgpu::Device,

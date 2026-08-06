@@ -10,7 +10,7 @@ use wgpu::{
 };
 
 use super::{
-    EnvConversionPath, EnvironmentResources, PREFILTER_MIP_COUNT, create_default_environment,
+    EnvironmentResources, PREFILTER_MIP_COUNT, create_default_environment,
 };
 use crate::engine::render::uniform::{EnvParams, EnvironmentParams, PrefilterParams};
 
@@ -22,7 +22,6 @@ impl EnvironmentResources {
         camera_bind_group_layout: &wgpu::BindGroupLayout,
         surface_format: wgpu::TextureFormat,
         float32_filterable: bool,
-        conversion_path: EnvConversionPath,
     ) -> Self {
         // mesh 管线 @group(4)：辐照度图 + 环境图 + 采样器。
         let environment_bind_group_layout =
@@ -194,7 +193,7 @@ impl EnvironmentResources {
             source: ShaderSource::Wgsl(include_str!("environment.wgsl").into()),
         });
 
-        // 计算转换的资源（GPU 路径执行；CPU 回退时同样创建，只是不运行）。
+        // 计算转换的资源（GPU 路径执行）。
         let env_convert_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("equirect convert bind group layout"),
             entries: &[
@@ -474,7 +473,6 @@ impl EnvironmentResources {
         });
 
         Self {
-            conversion_path,
             environment_bind_group_layout,
             skybox_bind_group_layout,
             env_sampler,

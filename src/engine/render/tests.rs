@@ -3,7 +3,7 @@
 //! GPU 相关测试在 llvmpipe 软件渲染上并行跑会段错误，统一用
 //! `cargo test -- --test-threads=1`；无 GPU 环境自动跳过并打印原因。
 
-use super::environment::{EnvConversionPath, create_cube_texture};
+use super::environment::create_cube_texture;
 use super::init::create_depth_texture;
 use super::*;
 use crate::engine::core::camera::CameraUniform;
@@ -43,8 +43,13 @@ fn debug_shader_compiles() {
 
 /// 无窗口设备：请求适配器并创建设备（含 max_bind_groups 8 与
 /// FLOAT32_FILTERABLE 特性）。失败时打印原因并返回 `None`（CI 无 GPU 可跳过）。
-fn headless_device() -> Option<(wgpu::Device, wgpu::Queue, bool, EnvConversionPath)> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+fn headless_device() -> Option<(wgpu::Device, wgpu::Queue, bool)> {
+    // 与运行时一致：只启用 PRIMARY 后端（无 OpenGL），避免踩 GL 后端的
+    // 数组纹理读回 bug（见 docs/BUG.md）。
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
     let adapter = pollster::block_on(instance.request_adapter(&RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::default(),
         force_fallback_adapter: false,
@@ -71,18 +76,14 @@ fn headless_device() -> Option<(wgpu::Device, wgpu::Queue, bool, EnvConversionPa
     }))
     .inspect_err(|e| eprintln!("headless 测试：设备创建失败（{e}），跳过"))
     .ok()?;
-    let conversion_path = match adapter.get_info().backend {
-        wgpu::Backend::Vulkan | wgpu::Backend::Metal => EnvConversionPath::Gpu,
-        _ => EnvConversionPath::Cpu,
-    };
-    Some((device, queue, float32_filterable, conversion_path))
+    Some((device, queue, float32_filterable))
 }
 
 /// 无窗口冒烟测试：不创建 surface，直接请求适配器/设备，验证环境资源创建、
 /// 计算转换与天空盒渲染不触发 wgpu 校验错误；无 GPU 环境（如 CI）则跳过。
 #[test]
 fn environment_headless_smoke() {
-    let Some((device, queue, float32_filterable, conversion_path)) = headless_device() else {
+    let Some((device, queue, float32_filterable)) = headless_device() else {
         return;
     };
 
@@ -138,7 +139,6 @@ fn environment_headless_smoke() {
         &camera_layout,
         wgpu::TextureFormat::Rgba8UnormSrgb,
         float32_filterable,
-        conversion_path,
     );
 
     // 转换一个 2×1 的微型 HDR（左红右绿），验证计算管线与绑定组创建。
@@ -206,7 +206,7 @@ fn environment_headless_smoke() {
 /// 无窗口冒烟测试：灯光调试线框管线的创建与绘制不触发 wgpu 校验错误。
 #[test]
 fn light_debug_gizmos_headless_smoke() {
-    let Some((device, queue, _, _)) = headless_device() else {
+    let Some((device, queue, _)) = headless_device() else {
         return;
     };
 
@@ -328,7 +328,7 @@ fn light_debug_gizmos_headless_smoke() {
 /// （绕开 copy_texture_to_buffer 拷数组纹理的路径，直接验证"上传→采样"。）
 #[test]
 fn skybox_sampling_verifies_texture_content() {
-    let Some((device, queue, float32_filterable, conversion_path)) = headless_device() else {
+    let Some((device, queue, float32_filterable)) = headless_device() else {
         return;
     };
 
@@ -377,7 +377,6 @@ fn skybox_sampling_verifies_texture_content() {
         &camera_layout,
         wgpu::TextureFormat::Rgba8UnormSrgb,
         float32_filterable,
-        conversion_path,
     );
 
     // 1) 已知全红 cube（4×4×6）→ 天空盒渲染 → 应偏红。
@@ -458,13 +457,9 @@ fn skybox_sampling_verifies_texture_content() {
 /// `submit()` 执行），除顶层外的 mip 全部提前 return，预过滤图基本全黑。
 #[test]
 fn specular_ibl_gpu_outputs_nonblack() {
-    let Some((device, queue, float32_filterable, conversion_path)) = headless_device() else {
+    let Some((device, queue, float32_filterable)) = headless_device() else {
         return;
     };
-    if conversion_path != EnvConversionPath::Gpu {
-        eprintln!("跳过：CPU 回退路径不读回纹理（无 COPY_SRC）");
-        return;
-    }
 
     let camera_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some("specular smoke camera layout"),
@@ -501,7 +496,6 @@ fn specular_ibl_gpu_outputs_nonblack() {
         &camera_layout,
         wgpu::TextureFormat::Rgba8UnormSrgb,
         float32_filterable,
-        conversion_path,
     );
 
     // 红绿 2×1 环境图：预过滤 mip 0 与 BRDF LUT 都应有非零分量。

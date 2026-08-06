@@ -26,8 +26,6 @@ pub(super) const PREFILTER_MIP_COUNT: u32 = 8;
 pub(super) const PREFILTER_SAMPLES: u32 = 1024;
 /// BRDF 积分查找表尺寸（x = NdotV，y = roughness）。
 pub(super) const BRDF_LUT_SIZE: u32 = 128;
-/// BRDF LUT 每纹素采样数。
-pub(super) const BRDF_LUT_SAMPLES: u32 = 1024;
 
 /// 环境贴图的 GPU 表示：环境立方体贴图 + 辐照度图 + 镜面预过滤图 + BRDF LUT。
 ///
@@ -66,22 +64,11 @@ pub(super) struct EnvironmentGpu {
     pub(super) skybox_bind_group: wgpu::BindGroup,
 }
 
-/// 环境转换路径：Vulkan/Metal 用 GPU 计算，其余后端回退 CPU。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EnvConversionPath {
-    /// GPU 计算着色器（storage 数组纹理可靠的后端）。
-    Gpu,
-    /// CPU 转换 + 逐层上传（兼容性兜底）。
-    Cpu,
-}
-
 /// 环境子系统的 GPU 资源：绑定组布局、计算管线、天空盒管线、默认绑定组。
 ///
 /// 从 `Renderer::new` 中独立出来，便于无窗口的 headless 测试直接复用同一套
 /// 资源创建与转换逻辑（见 `tests::environment_headless_smoke`）。
 pub(super) struct EnvironmentResources {
-    /// 环境转换路径（启动时按后端决定，日志可见）。
-    pub(super) conversion_path: EnvConversionPath,
     /// mesh 管线 @group(4) 环境绑定组布局。
     pub(super) environment_bind_group_layout: wgpu::BindGroupLayout,
     /// 天空盒管线绑定组布局。
@@ -127,6 +114,4 @@ pub(super) struct EnvironmentResources {
 }
 
 // 再导出：render/mod.rs 与测试仍按原路径使用，拆分不改变对外 API。
-pub(super) use textures::{
-    create_2d_texture, create_cube_texture, create_default_environment, create_mip_cube_texture,
-};
+pub(super) use textures::{create_cube_texture, create_default_environment};

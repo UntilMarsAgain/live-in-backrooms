@@ -16,8 +16,10 @@ use crate::engine::core::camera::CameraUniform;
 use crate::engine::core::mesh::Vertex;
 use crate::engine::core::texture::Texture;
 use crate::engine::render::debug::LineGizmos;
-use crate::engine::render::environment::{EnvConversionPath, EnvironmentResources};
-use crate::engine::render::uniform::{LIGHT_CAPACITY, LightCountUniform, LightUniform, ObjectDataUniform};
+use crate::engine::render::environment::EnvironmentResources;
+use crate::engine::render::uniform::{
+    LIGHT_CAPACITY, LightCountUniform, LightUniform, ObjectDataUniform,
+};
 use crate::engine::render::{DisplayHandle, Renderer};
 
 /// 创建与窗口尺寸一致的深度纹理。
@@ -98,7 +100,10 @@ impl Renderer {
         let (width, height) = (size.width.max(1), size.height.max(1));
 
         // 1. 创建 wgpu 实例（携带事件循环的显示句柄），并接管窗口 surface。
-        let instance = wgpu::Instance::new(InstanceDescriptor::new_with_display_handle(display));
+        let instance = wgpu::Instance::new(InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..InstanceDescriptor::new_with_display_handle(display)
+        });
         let surface = instance.create_surface(window.clone())?;
 
         // 2. 请求与 surface 兼容的适配器，并创建逻辑设备与队列。
@@ -113,20 +118,6 @@ impl Renderer {
             adapter.get_info().name,
             adapter.get_info().backend
         );
-        // 环境转换路径：Vulkan/Metal 的 storage 数组纹理可靠，用 GPU 计算；
-        // 其余后端（GL 等）回退 CPU，见 docs/BUG.md。
-        let conversion_path = match adapter.get_info().backend {
-            wgpu::Backend::Vulkan | wgpu::Backend::Metal => EnvConversionPath::Gpu,
-            _ => EnvConversionPath::Cpu,
-        };
-        eprintln!(
-            "环境转换：{}",
-            match conversion_path {
-                EnvConversionPath::Gpu => "GPU 计算（Vulkan/Metal）",
-                EnvConversionPath::Cpu => "CPU 回退（GL 等后端）",
-            }
-        );
-
         // 环境贴图用 RGBA32F 存储 HDR 数据，线性过滤需要显式请求该特性；
         // 不可用时回退为非过滤采样（环境转换与采样都会点采样）。
         let float32_filterable = adapter
@@ -215,7 +206,7 @@ impl Renderer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: true,
                         min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<ObjectDataUniform>() as u64
+                            std::mem::size_of::<ObjectDataUniform>() as u64,
                         ),
                     },
                     count: None,
@@ -387,7 +378,6 @@ impl Renderer {
             &camera_bind_group_layout,
             config.format,
             float32_filterable,
-            conversion_path,
         );
 
         // 5.8 调试线框：灯光与碰撞箱各一个实例，管线复用相机绑定组（@group(0)）。
