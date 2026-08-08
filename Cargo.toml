@@ -1,9 +1,16 @@
-[package]
-name = "live-in-backrooms"
+[workspace]
+resolver = "2"
+members = ["crates/shared", "crates/client", "crates/server", "crates/game"]
+# 默认成员 = 客户端：`cargo run` 直接启动游戏；
+# 服务端用 `cargo run -p lbr-server`，全量测试用 `cargo test --workspace`。
+default-members = ["crates/client"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0.104"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 glam = { version = "0.33.2", features = ["bytemuck"] }
@@ -18,5 +25,5 @@ toml = "1.1.4"
 wgpu = "30.0.0"
 winit = "0.30.13"
 
-[dev-dependencies]
-naga = "30.0.0"
+[workspace.dependencies.naga]
+version = "30.0.0"

@@ -864,6 +864,56 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "lbr-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "glam 0.33.2",
+ "gltf",
+ "lbr-game",
+ "lbr-server",
+ "lbr-shared",
+ "naga",
+ "paste",
+ "pollster",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "lbr-game"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lbr-shared",
+]
+
+[[package]]
+name = "lbr-server"
+version = "0.1.0"
+dependencies = [
+ "glam 0.33.2",
+ "lbr-game",
+ "lbr-shared",
+]
+
+[[package]]
+name = "lbr-shared"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "glam 0.33.2",
+ "gltf",
+ "image",
+ "indextree",
+ "mikktspace",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -914,26 +964,6 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
-
-[[package]]
-name = "live-in-backrooms"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "glam 0.33.2",
- "gltf",
- "image",
- "indextree",
- "mikktspace",
- "naga",
- "paste",
- "pollster",
- "serde",
- "toml",
- "wgpu",
- "winit",
-]
 
 [[package]]
 name = "lock_api"

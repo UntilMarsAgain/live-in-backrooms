@@ -1,0 +1,15 @@
+[package]
+name = "lbr-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Live in Backrooms 服务端：权威模拟（占位，无渲染依赖）"
+
+[[bin]]
+name = "live-in-backrooms-server"
+path = "src/main.rs"
+
+[dependencies]
+lbr-shared = { path = "../shared" }
+lbr-game = { path = "../game" }
+glam.workspace = true

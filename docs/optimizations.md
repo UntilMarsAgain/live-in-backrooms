@@ -184,7 +184,7 @@
 
 ## 测试覆盖
 
-- **现状**（64 个测试）：
+- **现状**（63 个测试，`cargo test --workspace`）：
   - CPU 单测：场景世界矩阵、glTF 加载、环境转换（`to_cubemap` / `irradiance_map`），
     不碰 GPU，任何环境可跑；资产注册表（世代句柄/复用/pin-unpin）、GamePath
     校验、合并资源空间调度器；
@@ -199,10 +199,11 @@
   - **资产 GPU 同步**：pin 上传 / unpin 回收 / 按需上传（`ensure_*_gpu`）/
     无效句柄报错路径，headless 设备实测。
 - **注意事项**：软件渲染器（llvmpipe / lavapipe）并行跑多个 GPU 测试会段错误
-  （线程问题），因此 GPU 相关测试统一用 `cargo test -- --test-threads=1` 跑；
+  （线程问题），因此 GPU 相关测试统一用 `cargo test --workspace -- --test-threads=1` 跑；
   单线程下全部通过。
 - **可补**：`collect_lights`（方向推导）、uniform 布局（大小/偏移断言）、
   strip/fan 转换的边界。
-- **后端能力验证**：`examples/vulkan_probe.rs`（强制 Vulkan，A/B/C/D 四项实测），
+- **后端能力验证**：`crates/client/examples/vulkan_probe.rs`
+  （`cargo run -p lbr-client --example vulkan_probe`，强制 Vulkan，A/B/C/D 四项实测），
   换机器/驱动后跑一遍即可确认后端能力，避免静默依赖 storage 数组纹理等
   不可靠特性。

@@ -1,0 +1,19 @@
+[package]
+name = "lbr-shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Live in Backrooms：客户端与服务端共有的数据、场景与解析层（无 GPU 依赖）"
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+gltf.workspace = true
+image.workspace = true
+indextree.workspace = true
+mikktspace.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "lbr-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Live in Backrooms 游戏内容层：关卡、玩法与实体定义（占位）"
+
+[dependencies]
+lbr-shared = { path = "../shared" }
+anyhow.workspace = true
