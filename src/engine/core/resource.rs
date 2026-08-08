@@ -13,7 +13,6 @@
 //! 3. `resolve` 改为遍历包根列表、返回首个命中的文件（模组覆盖原版）。
 //! 届时把 `root: PathBuf` 换成包根列表即可，`GamePath` 与接口不变。
 
-use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -52,11 +51,18 @@ impl MergedResourceSpace {
         self.resolve(path).is_file()
     }
 
-    /// 打开文件，返回系统文件句柄。
-    pub fn open(&self, path: &GamePath) -> Result<File> {
+    /// 打开文件，返回只读流句柄。
+    ///
+    /// 故意只暴露 [`Read`] 而不暴露 `Seek`：调用方不需要猜测资源是系统文件、
+    /// zip 压缩流还是内存映射——统一按顺序流读取。后端内部（如 zip 读中央
+    /// 目录定位）可以自由使用 `Seek`，不泄露给调用方；将来若某类资源确实
+    /// 需要随机访问（大文件内部按偏移分块），单独设计流式接口，不污染这里。
+    /// `Send` 让句柄可跨线程（异步加载工作线程）。
+    pub fn open(&self, path: &GamePath) -> Result<Box<dyn Read + Send>> {
         let real = self.resolve(path);
-        File::open(&real)
-            .with_context(|| format!("打开资源文件失败：{path}（{}）", real.display()))
+        let file = std::fs::File::open(&real)
+            .with_context(|| format!("打开资源文件失败：{path}（{}）", real.display()))?;
+        Ok(Box::new(file))
     }
 
     /// 读取文件全部字节（便捷接口；处理大文件仍应直接用 [`Self::open`]）。
