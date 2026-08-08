@@ -176,7 +176,7 @@ impl Renderer {
                     let Some(handle) = object.mesh_handle() else {
                         continue;
                     };
-                    let Some(mesh_gpu) = assets.ensure_mesh_gpu(handle) else {
+                    let Some(mesh_gpu) = assets.ensure_meshes_gpu(handle) else {
                         eprintln!(
                             "渲染违例：场景引用了无效的网格句柄 {handle:?}，跳过绘制"
                         );

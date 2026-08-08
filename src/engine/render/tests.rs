@@ -641,7 +641,7 @@ fn asset_manager_sync_gpu_uploads_and_reclaims() {
     assert!(assets.meshes().get(mesh).is_some());
 }
 
-/// 按需上传：有效句柄未 pin/未同步时，`ensure_mesh_gpu` 现场上传并置驻留；
+/// 按需上传：有效句柄未 pin/未同步时，`ensure_meshes_gpu` 现场上传并置驻留；
 /// 已移除的无效句柄返回 `None`（渲染器据此报错）。
 #[test]
 fn asset_manager_ensure_gpu_uploads_on_demand() {
@@ -655,7 +655,7 @@ fn asset_manager_ensure_gpu_uploads_on_demand() {
 
     // 注册后既未 pin 也未 sync：ensure 应现场上传，且此后 gpu() 有值（不回收）。
     assert!(
-        assets.ensure_mesh_gpu(mesh).is_some(),
+        assets.ensure_meshes_gpu(mesh).is_some(),
         "有效句柄应按需上传"
     );
     assert!(assets.meshes().gpu(mesh).is_some());
@@ -665,7 +665,7 @@ fn asset_manager_ensure_gpu_uploads_on_demand() {
 
     // remove 后句柄无效：ensure 返回 None。
     assert!(assets.meshes_mut().remove(mesh).is_some());
-    assert!(assets.ensure_mesh_gpu(mesh).is_none());
+    assert!(assets.ensure_meshes_gpu(mesh).is_none());
 }
 
 /// 预分配语义：`pin_mesh` 与按需上传同一条路径——注册后不 sync 也立即上传。
@@ -680,11 +680,11 @@ fn asset_manager_pin_upload_preallocates() {
     let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
 
     // pin 即上传：无需等 sync_gpu。
-    assert!(assets.pin_mesh(mesh));
+    assert!(assets.pin_meshes(mesh));
     assert!(assets.meshes().gpu(mesh).is_some());
 
     // 重复 pin 幂等，不重复上传。
-    assert!(assets.pin_mesh(mesh));
+    assert!(assets.pin_meshes(mesh));
     assert!(assets.meshes().gpu(mesh).is_some());
 }
 

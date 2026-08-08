@@ -16,6 +16,7 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use paste::paste;
 use wgpu::{Device, Queue};
 
 use super::mesh::Mesh;
@@ -74,6 +75,15 @@ pub enum AssetState {
     Resident,
     /// 要求 GPU 驻留：`sync_gpu` 确保已上传，禁止回收。
     Pinned,
+}
+
+/// 上传器：把一类资源的 CPU 数据转换为 GPU 表示。
+///
+/// 实现可以携带状态（设备能力分支、调试计数等），由 [`AssetManager`]
+/// 持有并在同步/按需上传时传入注册表。纯数据资源（GPU 类型 `()`）无需
+/// 上传器，注册表相关方法不会被调用。
+pub trait GpuUploader<T, G> {
+    fn upload(&mut self, device: &Device, queue: &Queue, data: &T) -> G;
 }
 
 /// 注册表槽位：世代 + 状态 + CPU 数据 + GPU 表示。
@@ -168,9 +178,9 @@ impl<T, G> AssetRegistry<T, G> {
         device: &Device,
         queue: &Queue,
         handle: Handle<T>,
-        upload: &mut dyn FnMut(&Device, &Queue, &T) -> G,
+        uploader: &mut dyn GpuUploader<T, G>,
     ) -> Option<&G> {
-        if !self.pin_upload(device, queue, handle, upload) {
+        if !self.pin_upload(device, queue, handle, uploader) {
             return None;
         }
         self.slot(handle)?.gpu.as_ref()
@@ -199,14 +209,14 @@ impl<T, G> AssetRegistry<T, G> {
         device: &Device,
         queue: &Queue,
         handle: Handle<T>,
-        upload: &mut dyn FnMut(&Device, &Queue, &T) -> G,
+        uploader: &mut dyn GpuUploader<T, G>,
     ) -> bool {
         let Some(slot) = self.slot_mut(handle) else {
             return false;
         };
         if slot.gpu.is_none() {
             if let Some(data) = &slot.cpu {
-                slot.gpu = Some(upload(device, queue, data));
+                slot.gpu = Some(uploader.upload(device, queue, data));
             }
         }
         slot.state = AssetState::Pinned;
@@ -269,20 +279,20 @@ impl<T, G> AssetRegistry<T, G> {
 
     /// 同步 GPU：pinned 且未上传的上传；非 pinned 的回收 GPU 表示。
     ///
-    /// `upload` 由资源类型决定如何把 CPU 数据转成 GPU 表示；
+    /// `uploader` 由资源类型决定如何把 CPU 数据转成 GPU 表示；
     /// 渲染器在合适时机（每帧或脏时）调用 [`AssetManager::sync_gpu`]。
     pub fn sync_gpu(
         &mut self,
         device: &Device,
         queue: &Queue,
-        upload: &mut dyn FnMut(&Device, &Queue, &T) -> G,
+        uploader: &mut dyn GpuUploader<T, G>,
     ) {
         for slot in self.slots.iter_mut().flatten() {
             match slot.state {
                 AssetState::Pinned => {
                     if slot.gpu.is_none() {
                         if let Some(data) = &slot.cpu {
-                            slot.gpu = Some(upload(device, queue, data));
+                            slot.gpu = Some(uploader.upload(device, queue, data));
                         }
                     }
                 }
@@ -328,181 +338,209 @@ pub struct TextureGpu {
     pub view: wgpu::TextureView,
 }
 
-/// 把网格上传为独立 GPU 缓冲（顶点 + 索引）。
-fn upload_mesh_gpu(device: &Device, queue: &Queue, mesh: &Mesh) -> MeshGpu {
-    use wgpu::util::DeviceExt;
+/// 网格上传器：把 `Mesh` 转成独立 GPU 缓冲（顶点 + 索引）。
+#[derive(Debug, Default)]
+pub struct MeshUploader;
 
-    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("mesh vertex buffer"),
-        contents: bytemuck::cast_slice(mesh.vertices()),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("mesh index buffer"),
-        contents: bytemuck::cast_slice(mesh.indices()),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-    let _ = queue; // 上传走 create_buffer_init（映射创建），queue 仅作签名一致。
-    MeshGpu {
-        vertex_buffer,
-        index_buffer,
-        index_count: mesh.indices().len() as u32,
+impl GpuUploader<Mesh, MeshGpu> for MeshUploader {
+    fn upload(&mut self, device: &Device, queue: &Queue, mesh: &Mesh) -> MeshGpu {
+        use wgpu::util::DeviceExt;
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh vertex buffer"),
+            contents: bytemuck::cast_slice(mesh.vertices()),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh index buffer"),
+            contents: bytemuck::cast_slice(mesh.indices()),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let _ = queue; // 上传走 create_buffer_init（映射创建），queue 仅作签名一致。
+        MeshGpu {
+            vertex_buffer,
+            index_buffer,
+            index_count: mesh.indices().len() as u32,
+        }
     }
 }
 
-/// 把纹理上传为 GPU 纹理（RGBA8 sRGB，TEXTURE_BINDING）。
-fn upload_texture_gpu(device: &Device, queue: &Queue, texture: &Texture) -> TextureGpu {
-    let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("texture"),
-        size: wgpu::Extent3d {
-            width: texture.width,
-            height: texture.height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &gpu_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &texture.rgba8,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(texture.width * 4),
-            rows_per_image: Some(texture.height),
-        },
-        wgpu::Extent3d {
-            width: texture.width,
-            height: texture.height,
-            depth_or_array_layers: 1,
-        },
-    );
-    let view = gpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    TextureGpu {
-        texture: gpu_texture,
-        view,
+/// 贴图上传器：把 `Texture` 转成 GPU 纹理（RGBA8 sRGB，TEXTURE_BINDING）。
+#[derive(Debug, Default)]
+pub struct TextureUploader;
+
+impl GpuUploader<Texture, TextureGpu> for TextureUploader {
+    fn upload(&mut self, device: &Device, queue: &Queue, texture: &Texture) -> TextureGpu {
+        let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("texture"),
+            size: wgpu::Extent3d {
+                width: texture.width,
+                height: texture.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &gpu_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &texture.rgba8,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(texture.width * 4),
+                rows_per_image: Some(texture.height),
+            },
+            wgpu::Extent3d {
+                width: texture.width,
+                height: texture.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = gpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        TextureGpu {
+            texture: gpu_texture,
+            view,
+        }
     }
+}
+
+/// 纯 CPU 资源（GPU 类型 `()`）的占位上传器：`upload` 是空操作。
+///
+/// rustc 会把空函数调用内联掉，无性能损失。将来若要在宏里支持
+/// "无上传器"条目（`None` 分支），需要逐条目分发 + 字段/方法条件生成，
+/// 实现复杂，暂以空函数占位替代。
+#[derive(Debug, Default)]
+pub struct NoGpuUploader;
+
+impl<T> GpuUploader<T, ()> for NoGpuUploader {
+    fn upload(&mut self, _device: &Device, _queue: &Queue, _data: &T) {}
+}
+
+/// 纯 CPU 数据资源示例（无 GPU 阶段）：关卡数据、AI 数据等走此模式。
+///
+/// 注册表 GPU 类型用 `()`、上传器用 [`NoGpuUploader`] 空函数占位；
+/// `sync_gpu` 对它是空操作（只遍历无上传）。
+#[derive(Debug, Clone)]
+pub struct LevelData {
+    pub name: String,
 }
 
 /// 声明资产管理器的资源类型集合。
 ///
-/// 每个条目：字段名 + CPU 类型 => GPU 类型。纯数据资源（关卡、AI 等）
-/// 用 `()` 作 GPU 类型，状态机没有显存阶段。新增资源类型 = 加一行。
+/// 每个条目：`字段名: CPU类型 => GPU类型, 上传器类型`。纯数据资源
+/// （关卡、AI 等）用 `()` 作 GPU 类型、上传器给一个空函数占位
+/// （[`NoGpuUploader`]）；状态机没有显存阶段。新增资源类型 = 加一行。
 macro_rules! asset_types {
-    ($($field:ident, $field_mut:ident: $ty:ident => $gpu:ty),* $(,)?) => {
-        /// 统一资产管理器：持有设备，按类型分注册表。
-        ///
-        /// 游戏逻辑侧：注册/查询/pin/unpin（见各注册表方法）；
-        /// 渲染器侧：`sync_gpu` 后按句柄取 GPU 数据。
-        #[derive(Debug)]
-        pub struct AssetManager {
-            device: Option<Arc<Device>>,
-            queue: Option<Arc<Queue>>,
-            $( $field: AssetRegistry<$ty, $gpu>, )*
-        }
-
-        impl AssetManager {
-            /// 新建管理器；`device` + `queue` 用于创建/管理 GPU 资源
-            /// （wgpu 的 Device/Queue 都是内部引用计数，clone 廉价）。
-            pub fn new(device: Arc<Device>, queue: Arc<Queue>) -> Self {
-                Self {
-                    device: Some(device),
-                    queue: Some(queue),
-                    $( $field: AssetRegistry::new(), )*
-                }
+    ($($field:ident: $ty:ident => $gpu:ty, $uploader:ident),* $(,)?) => {
+        paste! {
+            /// 统一资产管理器：持有设备/队列与各类型注册表、上传器。
+            ///
+            /// 游戏逻辑侧：注册/查询/pin/unpin（见各注册表方法）；
+            /// 渲染器侧：`sync_gpu` / `ensure_*_gpu` 后按句柄取 GPU 数据。
+            #[derive(Debug)]
+            pub struct AssetManager {
+                device: Option<Arc<Device>>,
+                queue: Option<Arc<Queue>>,
+                $(
+                    $field: AssetRegistry<$ty, $gpu>,
+                    [<$field _uploader>]: $uploader,
+                )*
             }
 
-            /// 无 GPU 环境（纯数据/碰撞测试）用：`sync_gpu` 自动跳过。
-            pub fn without_gpu() -> Self {
-                Self {
-                    device: None,
-                    queue: None,
-                    $( $field: AssetRegistry::new(), )*
+            impl AssetManager {
+                /// 新建管理器；`device` + `queue` 用于创建/管理 GPU 资源
+                /// （wgpu 的 Device/Queue 都是内部引用计数，clone 廉价）。
+                pub fn new(device: Arc<Device>, queue: Arc<Queue>) -> Self {
+                    Self {
+                        device: Some(device),
+                        queue: Some(queue),
+                        $( $field: AssetRegistry::new(), [<$field _uploader>]: $uploader::default(), )*
+                    }
                 }
+
+                /// 无 GPU 环境（纯数据/碰撞测试）用：`sync_gpu` 自动跳过。
+                pub fn without_gpu() -> Self {
+                    Self {
+                        device: None,
+                        queue: None,
+                        $( $field: AssetRegistry::new(), [<$field _uploader>]: $uploader::default(), )*
+                    }
+                }
+
+                /// 底层设备（上传/同步时使用）；无 GPU 构造时为 `None`。
+                pub fn device(&self) -> Option<&Device> {
+                    self.device.as_deref()
+                }
+
+                /// 同步所有注册表的 GPU 资源：pinned 且未上传的上传，
+                /// 非 pinned 的回收。渲染器每帧或脏时调用。
+                pub fn sync_gpu(&mut self) {
+                    let (Some(device), Some(queue)) = (&self.device, &self.queue) else {
+                        return; // 无 GPU 构造：纯 CPU 使用，不上传
+                    };
+                    $(
+                        self.$field
+                            .sync_gpu(device, queue, &mut self.[<$field _uploader>]);
+                    )*
+                }
+
+                $(
+                    /// 对应类型的注册表访问器。
+                    pub fn $field(&self) -> &AssetRegistry<$ty, $gpu> {
+                        &self.$field
+                    }
+
+                    /// 对应类型的注册表可变访问器。
+                    pub fn [<$field _mut>](&mut self) -> &mut AssetRegistry<$ty, $gpu> {
+                        &mut self.$field
+                    }
+
+                    /// 按需确保该类型资源已上传（渲染器绘制前的兜底）；
+                    /// 句柄无效返回 `None`。
+                    pub fn [<ensure_ $field _gpu>](
+                        &mut self,
+                        handle: Handle<$ty>,
+                    ) -> Option<&$gpu> {
+                        let (device, queue) = (self.device.as_ref()?, self.queue.as_ref()?);
+                        self.$field.ensure_gpu(
+                            device,
+                            queue,
+                            handle,
+                            &mut self.[<$field _uploader>],
+                        )
+                    }
+
+                    /// 预上传并驻留该类型资源（预分配语义）；无 GPU 构造
+                    /// 只标记驻留状态。
+                    pub fn [<pin_ $field>](&mut self, handle: Handle<$ty>) -> bool {
+                        match (&self.device, &self.queue) {
+                            (Some(device), Some(queue)) => self.$field.pin_upload(
+                                device,
+                                queue,
+                                handle,
+                                &mut self.[<$field _uploader>],
+                            ),
+                            _ => self.$field.pin(handle),
+                        }
+                    }
+                )*
             }
-
-            /// 底层设备（上传/同步时使用）；无 GPU 构造时为 `None`。
-            pub fn device(&self) -> Option<&Device> {
-                self.device.as_deref()
-            }
-
-            $(
-                /// 对应类型的注册表访问器。
-                pub fn $field(&self) -> &AssetRegistry<$ty, $gpu> {
-                    &self.$field
-                }
-
-                /// 对应类型的注册表可变访问器。
-                pub fn $field_mut(&mut self) -> &mut AssetRegistry<$ty, $gpu> {
-                    &mut self.$field
-                }
-            )*
         }
     };
 }
 
 asset_types! {
-    meshes, meshes_mut: Mesh => MeshGpu,
-    textures, textures_mut: Texture => TextureGpu,
-}
-
-impl AssetManager {
-    /// 同步所有注册表的 GPU 资源：pinned 且未上传的上传，非 pinned 的回收。
-    ///
-    /// 渲染器在合适时机调用（每帧或脏时）；上传/回收按注册表遍历，量小。
-    pub fn sync_gpu(&mut self) {
-        let (Some(device), Some(queue)) = (&self.device, &self.queue) else {
-            return; // 无 GPU 构造：纯 CPU 使用，不上传
-        };
-        self.meshes
-            .sync_gpu(device, queue, &mut upload_mesh_gpu);
-        self.textures
-            .sync_gpu(device, queue, &mut upload_texture_gpu);
-    }
-
-    /// 按需确保网格已上传（渲染器绘制前的兜底）；句柄无效返回 `None`。
-    pub fn ensure_mesh_gpu(&mut self, handle: Handle<Mesh>) -> Option<&MeshGpu> {
-        let (device, queue) = (self.device.as_ref()?, self.queue.as_ref()?);
-        self.meshes
-            .ensure_gpu(device, queue, handle, &mut upload_mesh_gpu)
-    }
-
-    /// 按需确保贴图已上传；句柄无效返回 `None`。
-    pub fn ensure_texture_gpu(&mut self, handle: Handle<Texture>) -> Option<&TextureGpu> {
-        let (device, queue) = (self.device.as_ref()?, self.queue.as_ref()?);
-        self.textures
-            .ensure_gpu(device, queue, handle, &mut upload_texture_gpu)
-    }
-
-    /// 预上传并驻留网格（预分配语义）；无 GPU 构造只标记驻留状态。
-    pub fn pin_mesh(&mut self, handle: Handle<Mesh>) -> bool {
-        match (&self.device, &self.queue) {
-            (Some(device), Some(queue)) => {
-                self.meshes
-                    .pin_upload(device, queue, handle, &mut upload_mesh_gpu)
-            }
-            _ => self.meshes.pin(handle),
-        }
-    }
-
-    /// 预上传并驻留贴图（预分配语义）；无 GPU 构造只标记驻留状态。
-    pub fn pin_texture(&mut self, handle: Handle<Texture>) -> bool {
-        match (&self.device, &self.queue) {
-            (Some(device), Some(queue)) => {
-                self.textures
-                    .pin_upload(device, queue, handle, &mut upload_texture_gpu)
-            }
-            _ => self.textures.pin(handle),
-        }
-    }
+    meshes: Mesh => MeshGpu, MeshUploader,
+    textures: Texture => TextureGpu, TextureUploader,
+    levels: LevelData => (), NoGpuUploader,
 }
 
 #[cfg(test)]
@@ -594,5 +632,21 @@ mod tests {
         };
         // 不同 T 的 Handle 不是同一个类型（编译器保证），此处仅作存在性说明。
         let _ = (mesh, texture);
+    }
+
+    /// 纯 CPU 资源（`None` 上传器）：注册/查询/移除正常，不涉及 GPU。
+    #[test]
+    fn pure_cpu_asset_registers_and_queries() {
+        let mut assets = AssetManager::without_gpu();
+        let handle = assets
+            .levels_mut()
+            .register(LevelData { name: "level-0".into() });
+        assert_eq!(
+            assets.levels().get(handle).map(|l| l.name.as_str()),
+            Some("level-0")
+        );
+        assert_eq!(assets.levels().state(handle), Some(AssetState::Resident));
+        assert!(assets.levels_mut().remove(handle).is_some());
+        assert!(assets.levels().get(handle).is_none());
     }
 }

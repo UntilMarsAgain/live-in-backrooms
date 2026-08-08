@@ -187,10 +187,10 @@ impl App {
     fn pin_scene_assets(&mut self, scene: &Scene) {
         for (_, object) in scene.objects() {
             if let Some(handle) = object.mesh_handle() {
-                self.assets.pin_mesh(handle);
+                self.assets.pin_meshes(handle);
             }
             for handle in object.material.texture_handles() {
-                self.assets.pin_texture(handle);
+                self.assets.pin_textures(handle);
             }
         }
     }
