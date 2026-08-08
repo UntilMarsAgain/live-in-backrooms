@@ -4,7 +4,7 @@ use std::mem::size_of;
 
 use wgpu::{BindGroupDescriptor, BindGroupEntry, BufferDescriptor, BufferUsages};
 
-use crate::engine::core::asset::AssetManager;
+use crate::engine::render::AssetManager;
 use crate::engine::core::environment::Environment;
 use crate::engine::render::debug;
 use crate::engine::render::uniform::{

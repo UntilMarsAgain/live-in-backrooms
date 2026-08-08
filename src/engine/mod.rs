@@ -24,7 +24,9 @@ pub mod scene;
 #[allow(unused_imports)]
 pub use core::aabb::Aabb;
 #[allow(unused_imports)]
-pub use core::asset::{AssetManager, AssetRegistry, AssetState, Handle, MeshGpu, TextureGpu};
+pub use core::asset::{
+    AssetRegistry, AssetState, GpuUploader, Handle, LevelData, MeshSource, NoGpuUploader,
+};
 #[allow(unused_imports)]
 pub use core::camera::Camera;
 #[allow(unused_imports)]
@@ -44,6 +46,6 @@ pub use core::transform::Transform;
 #[allow(unused_imports)]
 pub use input::{FreeCameraController, InputController};
 #[allow(unused_imports)]
-pub use render::{DisplayHandle, Renderer};
+pub use render::{AssetManager, DisplayHandle, MeshGpu, Renderer, TextureGpu};
 #[allow(unused_imports)]
 pub use scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};

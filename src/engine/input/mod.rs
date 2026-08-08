@@ -13,7 +13,7 @@ mod free_camera;
 
 pub use free_camera::FreeCameraController;
 
-use crate::engine::core::asset::AssetManager;
+use crate::engine::core::asset::MeshSource;
 use crate::engine::scene::Scene;
 use winit::event::{DeviceEvent, WindowEvent};
 use winit::window::Window;
@@ -38,6 +38,6 @@ pub trait InputController<T> {
         target: &T,
         dt: f32,
         scene: &Scene,
-        assets: &AssetManager,
+        meshes: &dyn MeshSource,
     ) -> Self::Action;
 }

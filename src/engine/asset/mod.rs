@@ -3,12 +3,14 @@
 //! 目前只处理“模型”部分：
 //! - 节点层级与局部变换 → [`Scene`]（每个 glTF 节点一个容器物体，网格 primitive
 //!   作为其子物体，保证“父节点动、子节点跟着动”的层级关系）；
-//! - 每个 primitive → [`Mesh`] 注册进统一 [`AssetManager`]（按网格索引去重，多节点
+//! - 每个 primitive → [`Mesh`] 注册进统一
+//!   [`AssetManager`](crate::engine::render::AssetManager)（按网格索引去重，多节点
 //!   共享同一网格时不会重复上传）；
 //! - 顶点属性按 glTF 2.0 语义读取：POSITION（必需）、NORMAL、TEXCOORD_0、
 //!   COLOR_0，各种存储格式（f32 / 归一化整数）统一转换成运行时的 f32 布局。
 //! - 材质基础色（`baseColorFactor` + `baseColorTexture`）读取，贴图注册进
-//!   [`AssetManager`]；金属度/粗糙度、法线、自发光等 PBR 通道暂不读取。
+//!   [`AssetManager`](crate::engine::render::AssetManager)；金属度/粗糙度、
+//!   法线、自发光等 PBR 通道暂不读取。
 //!
 //! 相机、动画、蒙皮暂不读取。
 
@@ -20,7 +22,8 @@ use glam::{Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use gltf::scene::Transform as GltfTransform;
 
-use super::core::asset::{AssetManager, Handle};
+use crate::engine::render::AssetManager;
+use super::core::asset::Handle;
 use super::core::material::Material;
 use super::core::mesh::{Mesh, Vertex};
 use super::core::texture::Texture;

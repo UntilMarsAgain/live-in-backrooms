@@ -11,7 +11,7 @@ use winit::window::{CursorGrabMode, Window};
 
 use super::InputController;
 use crate::engine::core::aabb::Aabb;
-use crate::engine::core::asset::AssetManager;
+use crate::engine::core::asset::MeshSource;
 use crate::engine::core::camera::{Camera, CameraAction};
 use crate::engine::core::transform::Transform;
 use crate::engine::scene::Scene;
@@ -191,7 +191,7 @@ impl InputController<Camera> for FreeCameraController {
         target: &Camera,
         dt: f32,
         scene: &Scene,
-        assets: &AssetManager,
+        meshes: &dyn MeshSource,
     ) -> CameraAction {
         // 1. 鼠标旋转（向下拖动鼠标 → 俯视）。
         let yaw_delta = self.look_delta.0 * self.sensitivity;
@@ -240,7 +240,7 @@ impl InputController<Camera> for FreeCameraController {
             let probe_center = target.position() + translate + step;
             let transform = Transform::new(probe_center, Quat::IDENTITY, Vec3::ONE);
             if scene
-                .collides_with(assets, &transform, self.collider, &[])
+                .collides_with(meshes, &transform, self.collider, &[])
                 .is_none()
             {
                 translate += step;
@@ -267,7 +267,7 @@ impl Default for FreeCameraController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::core::asset::AssetManager;
+    use crate::engine::AssetManager;
     use crate::engine::{Mesh, SceneObject, SceneObjectKind};
 
     /// 默认碰撞盒：半尺寸 (0.3, 0.9, 0.3)，以相机位置为中心。

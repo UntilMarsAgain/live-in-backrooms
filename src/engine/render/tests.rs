@@ -622,7 +622,7 @@ fn asset_manager_sync_gpu_uploads_and_reclaims() {
     };
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
-    let mut assets = crate::engine::core::asset::AssetManager::new(device, queue);
+    let mut assets = crate::engine::render::AssetManager::new(device, queue);
     let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
 
     // 未 pin：sync 后不应有 GPU 资源。
@@ -650,7 +650,7 @@ fn asset_manager_ensure_gpu_uploads_on_demand() {
     };
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
-    let mut assets = crate::engine::core::asset::AssetManager::new(device, queue);
+    let mut assets = crate::engine::render::AssetManager::new(device, queue);
     let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
 
     // 注册后既未 pin 也未 sync：ensure 应现场上传，且此后 gpu() 有值（不回收）。
@@ -676,7 +676,7 @@ fn asset_manager_pin_upload_preallocates() {
     };
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
-    let mut assets = crate::engine::core::asset::AssetManager::new(device, queue);
+    let mut assets = crate::engine::render::AssetManager::new(device, queue);
     let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
 
     // pin 即上传：无需等 sync_gpu。

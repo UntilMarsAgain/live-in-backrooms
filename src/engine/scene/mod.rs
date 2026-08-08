@@ -26,7 +26,7 @@ use glam::{Mat4, Vec3};
 use indextree::{Arena, NodeId};
 
 use super::core::aabb::Aabb;
-use super::core::asset::{AssetManager, Handle};
+use super::core::asset::{Handle, MeshSource};
 use super::core::camera::{Camera, CameraAction};
 use super::core::environment::Environment;
 use super::core::light::Light;
@@ -427,16 +427,16 @@ impl Scene {
 
     // ---- AABB 碰撞查询 ----
     //
-    // 网格数据在统一 `AssetManager` 中、场景不持有，因此查询需要调用方传入资产管理器
-    // （依赖方向 scene → core，不引入 asset 层）。世界 AABB = 网格局部 bounds
+    // 网格数据由资产管理器持有、场景不持有，因此查询需要调用方传入
+    // [`MeshSource`]（core 接口，scene 不反向依赖 render）。世界 AABB = 网格局部 bounds
     // 经该节点世界矩阵变换后的包围盒（旋转会使其变大，属 AABB 的正常行为）。
     //
     // 现阶段查询为 O(物体数)：场景规模小足够；Level 0 区块落地时再上空间分区。
 
     /// 节点在世界空间中的 AABB；句柄失效、非网格节点或空包围盒时返回 `None`。
-    pub fn object_aabb_world(&self, assets: &AssetManager, key: ObjectKey) -> Option<Aabb> {
+    pub fn object_aabb_world(&self, meshes: &dyn MeshSource, key: ObjectKey) -> Option<Aabb> {
         let handle = self.object(key)?.mesh_handle()?;
-        let local = assets.meshes().get(handle)?.bounds();
+        let local = meshes.mesh(handle)?.bounds();
         if local.is_empty() {
             return None;
         }
@@ -445,16 +445,16 @@ impl Scene {
     }
 
     /// 世界点是否落在 `key` 所指物体的世界 AABB 内（含边界）。
-    pub fn point_inside(&self, assets: &AssetManager, key: ObjectKey, point: Vec3) -> bool {
-        self.object_aabb_world(assets, key)
+    pub fn point_inside(&self, meshes: &dyn MeshSource, key: ObjectKey, point: Vec3) -> bool {
+        self.object_aabb_world(meshes, key)
             .is_some_and(|aabb| aabb.contains(point))
     }
 
     /// 两个已存在物体是否碰撞（世界 AABB 相交）。
-    pub fn objects_collide(&self, assets: &AssetManager, a: ObjectKey, b: ObjectKey) -> bool {
+    pub fn objects_collide(&self, meshes: &dyn MeshSource, a: ObjectKey, b: ObjectKey) -> bool {
         let (Some(aa), Some(bb)) = (
-            self.object_aabb_world(assets, a),
-            self.object_aabb_world(assets, b),
+            self.object_aabb_world(meshes, a),
+            self.object_aabb_world(meshes, b),
         ) else {
             return false;
         };
@@ -469,7 +469,7 @@ impl Scene {
     /// 手持物）；传入空切片表示测试全部网格节点。
     pub fn collides_with(
         &self,
-        assets: &AssetManager,
+        meshes: &dyn MeshSource,
         transform: &Transform,
         local: Aabb,
         exclude: &[ObjectKey],
@@ -477,7 +477,7 @@ impl Scene {
         let probe = local.transformed(transform);
         self.objects()
             .filter(|(key, _)| !exclude.contains(key))
-            .filter_map(|(key, _)| self.object_aabb_world(assets, key).map(|aabb| (key, aabb)))
+            .filter_map(|(key, _)| self.object_aabb_world(meshes, key).map(|aabb| (key, aabb)))
             .find(|(_, aabb)| aabb.intersects(&probe))
             .map(|(key, _)| key)
     }

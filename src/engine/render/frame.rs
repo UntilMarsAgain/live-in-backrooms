@@ -8,7 +8,7 @@ use wgpu::{
 };
 
 use crate::engine::core::camera::{Camera, CameraUniform};
-use crate::engine::core::asset::AssetManager;
+use crate::engine::render::AssetManager;
 use crate::engine::render::init::{create_depth_texture, create_hdr_texture};
 use crate::engine::render::uniform::{
     LIGHT_CAPACITY, LightCountUniform, ObjectData, collect_lights,

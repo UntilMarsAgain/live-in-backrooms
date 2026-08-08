@@ -17,7 +17,7 @@ use wgpu::{
 };
 
 use crate::engine::core::aabb::Aabb;
-use crate::engine::core::asset::AssetManager;
+use crate::engine::core::asset::MeshSource;
 use crate::engine::core::light::LightKind;
 use crate::engine::scene::{Scene, SceneObjectKind};
 
@@ -98,11 +98,11 @@ pub(super) fn build_light_gizmos(scene: &Scene) -> Vec<DebugVertex> {
 /// （12 条边 = 24 个顶点）。
 ///
 /// 固定橙色线框；空包围盒（无网格数据）的节点自动跳过。
-pub(super) fn build_collision_gizmos(scene: &Scene, assets: &AssetManager) -> Vec<DebugVertex> {
+pub(super) fn build_collision_gizmos(scene: &Scene, meshes: &dyn MeshSource) -> Vec<DebugVertex> {
     let color = Vec3::new(1.0, 0.55, 0.1);
     let mut vertices = Vec::new();
     for (key, _) in scene.objects() {
-        if let Some(aabb) = scene.object_aabb_world(assets, key) {
+        if let Some(aabb) = scene.object_aabb_world(meshes, key) {
             push_aabb(&mut vertices, &aabb, color);
         }
     }
@@ -378,6 +378,7 @@ impl LineGizmos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::AssetManager;
     use crate::engine::Camera;
     use crate::engine::core::light::Light;
     use crate::engine::core::transform::Transform;

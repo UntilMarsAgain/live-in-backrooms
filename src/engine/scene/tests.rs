@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::engine::Mesh;
-use crate::engine::core::asset::AssetManager;
+use crate::engine::AssetManager;
 use glam::{Quat, Vec3};
 
 /// 环境强度默认应为 1.0（满环境光），避免手误改成 0 后物体失去环境光。

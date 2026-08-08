@@ -8,8 +8,10 @@
 //! - [`environment`]：环境贴图（天空盒 + IBL）的 GPU 资源与转换；
 //! - [`debug`]：灯光调试可视化；
 //! - [`blit`]：色调映射 blit（HDR 中间目标 → 交换链）；
+//! - [`asset`]：资产管理器（GPU 表示类型、上传器、统一句柄资源管理）；
 //! - [`tests`]：WGSL 校验 + 无头冒烟测试（仅测试构建）。
 
+mod asset;
 mod blit;
 mod debug;
 mod environment;
@@ -20,6 +22,7 @@ mod scene;
 mod tests;
 pub(crate) mod uniform;
 
+pub use asset::{AssetManager, MeshGpu, TextureGpu};
 use self::blit::BlitResources;
 use wgpu::Color;
 

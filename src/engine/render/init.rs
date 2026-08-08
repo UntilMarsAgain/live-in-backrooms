@@ -502,7 +502,7 @@ impl Renderer {
         })
     }
 
-    /// 底层设备克隆（供 [`AssetManager`](crate::engine::core::asset::AssetManager)
+    /// 底层设备克隆（供 [`AssetManager`](crate::engine::render::AssetManager)
     /// 等资源系统创建 GPU 资源用；wgpu 的 Device 是内部引用计数，clone 廉价）。
     pub fn device(&self) -> wgpu::Device {
         self.device.clone()

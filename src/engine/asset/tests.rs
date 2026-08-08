@@ -2,7 +2,7 @@
 
 use super::*;
 
-use crate::engine::core::asset::AssetManager;
+use crate::engine::AssetManager;
 
 /// 一个带位置/法线/UV/顶点色和索引的三角形 glTF（TRIANGLES 模式）。
 const TRIANGLE_JSON: &str = r#"{
