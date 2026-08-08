@@ -9,9 +9,7 @@ use wgpu::{
     RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, VertexState,
 };
 
-use super::{
-    EnvironmentResources, PREFILTER_MIP_COUNT, create_default_environment,
-};
+use super::{EnvironmentResources, PREFILTER_MIP_COUNT, create_default_environment};
 use crate::engine::render::uniform::{EnvParams, EnvironmentParams, PrefilterParams};
 
 impl EnvironmentResources {
@@ -20,7 +18,7 @@ impl EnvironmentResources {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera_bind_group_layout: &wgpu::BindGroupLayout,
-        surface_format: wgpu::TextureFormat,
+        color_target_format: wgpu::TextureFormat,
         float32_filterable: bool,
     ) -> Self {
         // mesh 管线 @group(4)：辐照度图 + 环境图 + 采样器。
@@ -463,7 +461,7 @@ impl EnvironmentResources {
                 entry_point: Some("skybox_fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(ColorTargetState {
-                    format: surface_format,
+                    format: color_target_format,
                     blend: None,
                     write_mask: ColorWrites::ALL,
                 })],

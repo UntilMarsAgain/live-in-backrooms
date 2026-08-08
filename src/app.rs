@@ -41,11 +41,9 @@ impl App {
         // 灯光调试开关由控制器独占翻转，App 只读；用 Arc 共享给两边。
         let show_light_debug = Arc::new(AtomicBool::new(false));
         let show_collision_debug = Arc::new(AtomicBool::new(false));
-        let controller: Box<dyn InputController<Camera, Action = CameraAction>> =
-            Box::new(FreeCameraController::new(
-                show_light_debug.clone(),
-                show_collision_debug.clone(),
-            ));
+        let controller: Box<dyn InputController<Camera, Action = CameraAction>> = Box::new(
+            FreeCameraController::new(show_light_debug.clone(), show_collision_debug.clone()),
+        );
         let renderer = Renderer::new(&window, display)?;
         let mut app = Self {
             window,
@@ -250,7 +248,9 @@ impl App {
         // 控制器只读相机 + 查询场景碰撞，输出一帧操作；操作由场景统一应用
         // （不可变借用先结束，再可变借用应用，无冲突）。
         let action = match self.scene.main_camera_ref() {
-            Some(camera) => self.controller.update(camera, dt, &self.scene, &self.mesh_library),
+            Some(camera) => self
+                .controller
+                .update(camera, dt, &self.scene, &self.mesh_library),
             None => CameraAction::default(),
         };
         self.scene.apply_main_camera_action(action);

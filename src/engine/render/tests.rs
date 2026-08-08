@@ -3,11 +3,14 @@
 //! GPU 相关测试在 llvmpipe 软件渲染上并行跑会段错误，统一用
 //! `cargo test -- --test-threads=1`；无 GPU 环境自动跳过并打印原因。
 
+use super::blit::BlitResources;
 use super::environment::create_cube_texture;
-use super::init::create_depth_texture;
+use super::init::{create_depth_texture, create_hdr_texture};
+use super::uniform::EnvironmentParams;
 use super::*;
 use crate::engine::core::camera::CameraUniform;
 use crate::engine::core::environment::Environment;
+use std::mem::size_of;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingType, BufferBindingType, BufferDescriptor, BufferUsages, CommandEncoderDescriptor,
@@ -39,6 +42,11 @@ fn environment_shader_compiles() {
 #[test]
 fn debug_shader_compiles() {
     validate_wgsl(include_str!("debug/debug.wgsl"));
+}
+
+#[test]
+fn blit_shader_compiles() {
+    validate_wgsl(include_str!("blit.wgsl"));
 }
 
 /// 无窗口设备：请求适配器并创建设备（含 max_bind_groups 8 与
@@ -137,7 +145,7 @@ fn environment_headless_smoke() {
         &device,
         &queue,
         &camera_layout,
-        wgpu::TextureFormat::Rgba8UnormSrgb,
+        super::HDR_FORMAT,
         float32_filterable,
     );
 
@@ -150,22 +158,9 @@ fn environment_headless_smoke() {
     let gpu_env = resources.convert(&device, &queue, &env);
 
     // 天空盒渲染到离屏纹理，验证渲染管线 + 绑定组 + 实际绘制。
-    let color_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("smoke color texture"),
-        size: wgpu::Extent3d {
-            width: 4,
-            height: 4,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
+    // 天空盒管线现在输出到 HDR 中间目标（原始辐射值）。
+    let (_, color_view) = create_hdr_texture(&device, 4, 4);
     let depth = create_depth_texture(&device, 4, 4);
-    let color_view = color_texture.create_view(&TextureViewDescriptor::default());
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("smoke encoder"),
     });
@@ -250,11 +245,8 @@ fn light_debug_gizmos_headless_smoke() {
     });
 
     // 调试管线 + 两条线段（4 个顶点）绘制到离屏纹理。
-    let mut gizmos = super::debug::LineGizmos::new(
-        &device,
-        &camera_layout,
-        wgpu::TextureFormat::Rgba8UnormSrgb,
-    );
+    let mut gizmos =
+        super::debug::LineGizmos::new(&device, &camera_layout, wgpu::TextureFormat::Rgba8UnormSrgb);
     let color_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("debug smoke color texture"),
         size: wgpu::Extent3d {
@@ -375,7 +367,7 @@ fn skybox_sampling_verifies_texture_content() {
         &device,
         &queue,
         &camera_layout,
-        wgpu::TextureFormat::Rgba8UnormSrgb,
+        super::HDR_FORMAT,
         float32_filterable,
     );
 
@@ -425,11 +417,13 @@ fn skybox_sampling_verifies_texture_content() {
     );
 
     // 2) 真实 HDR → convert（CPU 转换 + 逐层上传）→ 天空盒渲染 → 非黑。
-    let env = Environment::from_hdr_file(std::path::Path::new("test/test.hdr"))
-        .unwrap_or_else(|_| Environment {
-            width: 2,
-            height: 1,
-            rgb: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+    let env =
+        Environment::from_hdr_file(std::path::Path::new("test/test.hdr")).unwrap_or_else(|_| {
+            Environment {
+                width: 2,
+                height: 1,
+                rgb: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            }
         });
     let gpu_env = resources.convert(&device, &queue, &env);
     let data = render_skybox_rgb(
@@ -494,7 +488,7 @@ fn specular_ibl_gpu_outputs_nonblack() {
         &device,
         &queue,
         &camera_layout,
-        wgpu::TextureFormat::Rgba8UnormSrgb,
+        super::HDR_FORMAT,
         float32_filterable,
     );
 
@@ -519,16 +513,56 @@ fn specular_ibl_gpu_outputs_nonblack() {
     assert!(max_brdf > 0.0, "BRDF LUT 全黑");
 }
 
-/// 把天空盒渲染到 4×4 离屏 Rgba8UnormSrgb 并读回像素字节。
-fn render_skybox_rgb(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    resources: &EnvironmentResources,
-    camera_bind_group: &wgpu::BindGroup,
-    skybox_bind_group: &wgpu::BindGroup,
-) -> Vec<u8> {
+/// 无窗口验证：HDR 中间目标清成白色（radiance=1）后经 blit 色调映射，
+/// 写 Rgba8UnormSrgb 应仍是高亮——证明"HDR 值 → 可显示"的最后一环工作。
+#[test]
+fn blit_tone_maps_hdr_radiance() {
+    let Some((device, queue, _)) = headless_device() else {
+        return;
+    };
+
+    // 环境参数（AgX EV 窗口默认值）：blit 绑定组需要这块 uniform。
+    let env_params = device.create_buffer(&BufferDescriptor {
+        label: Some("blit test env params"),
+        size: size_of::<EnvironmentParams>() as u64,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(
+        &env_params,
+        0,
+        bytemuck::bytes_of(&EnvironmentParams::default()),
+    );
+
+    // HDR 目标清成白色：场景 pass 的占位（真实场景会画物体/天空盒）。
+    let (_hdr_texture, hdr_view) = create_hdr_texture(&device, 4, 4);
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("blit test clear encoder"),
+    });
+    {
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("blit test clear pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: &hdr_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Clear(Color::WHITE),
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        // 不画任何东西：只清屏。
+    }
+    queue.submit([encoder.finish()]);
+
+    // blit → Rgba8UnormSrgb，读回。
+    let blit = BlitResources::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let blit_bind_group = blit.create_bind_group(&device, &hdr_view, &env_params);
     let color_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("verify color"),
+        label: Some("blit test color"),
         size: wgpu::Extent3d {
             width: 4,
             height: 4,
@@ -541,20 +575,66 @@ fn render_skybox_rgb(
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    let depth = create_depth_texture(device, 4, 4);
     let color_view = color_texture.create_view(&TextureViewDescriptor::default());
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("verify encoder"),
+        label: Some("blit test encoder"),
     });
     {
         let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-            label: Some("verify pass"),
+            label: Some("blit test pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view: &color_view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: Operations {
                     load: LoadOp::Clear(Color::BLACK),
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        blit.draw(&mut pass, &blit_bind_group);
+    }
+    queue.submit([encoder.finish()]);
+
+    let data = read_texture_rgba8(&device, &queue, &color_texture, 4, 4);
+    let max = data
+        .chunks_exact(4)
+        .map(|p| p[0].max(p[1]).max(p[2]))
+        .max()
+        .unwrap_or(0);
+    eprintln!("纯白 HDR blit 后最大分量：{max}");
+    assert!(
+        max > 180,
+        "白色 HDR（radiance=1）经 blit 应映射为高亮，实际 {max}"
+    );
+}
+
+/// 把天空盒渲染到 HDR 目标，再过 blit 色调映射写 4×4 离屏 Rgba8UnormSrgb，
+/// 读回像素字节。覆盖"场景 pass → HDR → blit → 交换链格式"的完整链路。
+fn render_skybox_rgb(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    resources: &EnvironmentResources,
+    camera_bind_group: &wgpu::BindGroup,
+    skybox_bind_group: &wgpu::BindGroup,
+) -> Vec<u8> {
+    // 1) 场景 pass：天空盒 → HDR 中间目标（原始辐射值）。
+    let (_hdr_texture, hdr_view) = create_hdr_texture(device, 4, 4);
+    let depth = create_depth_texture(device, 4, 4);
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("verify scene encoder"),
+    });
+    {
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("verify scene pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: &hdr_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Clear(CLEAR_COLOR),
                     store: StoreOp::Store,
                 },
             })],
@@ -575,10 +655,62 @@ fn render_skybox_rgb(
     }
     queue.submit([encoder.finish()]);
 
-    let aligned_row = 256u32; // 4 像素 × 4 字节 = 16，按 copy 要求对齐到 256
+    // 2) blit pass：HDR → AgX 色调映射 → Rgba8UnormSrgb。
+    let blit = BlitResources::new(device, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let blit_bind_group = blit.create_bind_group(device, &hdr_view, &resources.env_params_buffer);
+    let color_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("verify color"),
+        size: wgpu::Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let color_view = color_texture.create_view(&TextureViewDescriptor::default());
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("verify blit encoder"),
+    });
+    {
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("verify blit pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: &color_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Clear(Color::BLACK),
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        blit.draw(&mut pass, &blit_bind_group);
+    }
+    queue.submit([encoder.finish()]);
+
+    // 3) 读回 u8。
+    read_texture_rgba8(device, queue, &color_texture, 4, 4)
+}
+
+/// 从 Rgba8UnormSrgb 纹理读回像素字节（逐行按 256 对齐）。
+fn read_texture_rgba8(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let aligned_row = 256u32; // 按 copy 要求每行对齐到 256
     let readback = device.create_buffer(&BufferDescriptor {
         label: Some("verify readback"),
-        size: (aligned_row * 4) as u64,
+        size: (aligned_row * height) as u64,
         usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -587,7 +719,7 @@ fn render_skybox_rgb(
     });
     enc.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
-            texture: &color_texture,
+            texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
@@ -597,12 +729,12 @@ fn render_skybox_rgb(
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(aligned_row),
-                rows_per_image: Some(4),
+                rows_per_image: Some(height),
             },
         },
         wgpu::Extent3d {
-            width: 4,
-            height: 4,
+            width,
+            height,
             depth_or_array_layers: 1,
         },
     );
@@ -617,7 +749,7 @@ fn render_skybox_rgb(
         .expect("poll 应成功");
     rx.recv().expect("map 回调应触发").expect("map 应成功");
     let data = slice.get_mapped_range().expect("取范围应成功");
-    data[..(4 * 4 * 4) as usize].to_vec()
+    data[..(width * height * 4) as usize].to_vec()
 }
 
 /// 从 RGBA32F 纹理读回一小片区域（单层单 mip，逐行按 256 对齐）。

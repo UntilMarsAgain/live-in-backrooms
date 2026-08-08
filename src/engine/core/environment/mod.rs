@@ -90,10 +90,7 @@ impl Environment {
     ///
     /// LDR 图片本身是 sRGB 语义，直接当线性用会让画面偏暗偏灰；
     /// 线性化后再乘曝光，才能和 HDR 路径共用同一套天空盒/IBL 流程。
-    pub fn from_ldr_image(
-        image: &image::DynamicImage,
-        exposure: f32,
-    ) -> Result<Self> {
+    pub fn from_ldr_image(image: &image::DynamicImage, exposure: f32) -> Result<Self> {
         let rgb8 = image.to_rgb8();
         let (width, height) = rgb8.dimensions();
         let rgb = rgb8

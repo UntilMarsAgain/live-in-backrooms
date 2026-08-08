@@ -7,8 +7,10 @@
 //! - [`uniform`]：GPU uniform 布局与灯光收集；
 //! - [`environment`]：环境贴图（天空盒 + IBL）的 GPU 资源与转换；
 //! - [`debug`]：灯光调试可视化；
+//! - [`blit`]：色调映射 blit（HDR 中间目标 → 交换链）；
 //! - [`tests`]：WGSL 校验 + 无头冒烟测试（仅测试构建）。
 
+mod blit;
 mod debug;
 mod environment;
 mod frame;
@@ -18,6 +20,7 @@ mod scene;
 mod tests;
 pub(crate) mod uniform;
 
+use self::blit::BlitResources;
 use wgpu::Color;
 
 use self::debug::LineGizmos;
@@ -34,6 +37,10 @@ pub const CLEAR_COLOR: Color = Color {
     a: 1.0,
 };
 
+/// HDR 中间目标的纹理格式：16 位浮点，可在 WebGPU 全后端作为渲染目标
+/// 且默认支持过滤（不像 RGBA32F 需要 FLOAT32_FILTERABLE）。
+pub(super) const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
 /// wgpu 渲染器：持有 surface / device / queue，负责清屏渲染。
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -44,12 +51,10 @@ pub struct Renderer {
     /// 相机 uniform 缓冲区与绑定组。
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    /// 物体数据（动态 uniform，模型矩阵）相关。
+    /// 物体数据（全部物体一个只读 storage 数组，按实例索引取）。
     object_bind_group_layout: wgpu::BindGroupLayout,
     object_data_buffer: wgpu::Buffer,
     object_bind_group: wgpu::BindGroup,
-    /// 物体数据步长：每个物体的矩阵在缓冲中的间隔（满足设备对齐要求）。
-    object_stride: u32,
     /// 灯光：数量 uniform + 只读 storage 数组（每帧写入收集结果）。
     light_count_buffer: wgpu::Buffer,
     light_storage_buffer: wgpu::Buffer,
@@ -74,6 +79,14 @@ pub struct Renderer {
     /// 深度缓冲（纹理 + 视图），随窗口尺寸重建。
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    /// HDR 中间目标：场景 pass（网格 + 天空盒 + 调试线框）渲染到这里，
+    /// blit pass 采样它做色调映射后写交换链。随窗口尺寸重建。
+    hdr_texture: wgpu::Texture,
+    hdr_view: wgpu::TextureView,
+    /// 色调映射 blit 资源（管线 + 绑定组布局 + 采样器）。
+    blit_resources: BlitResources,
+    /// blit 绑定组：引用 HDR 视图与环境参数 uniform，resize 时重建。
+    blit_bind_group: wgpu::BindGroup,
     /// 全局网格缓冲（永久驻留，所有注册网格合并），由 upload_meshes 维护。
     mesh_buffer: Option<MeshGpu>,
     /// 已上传的网格库版本，避免重复上传。

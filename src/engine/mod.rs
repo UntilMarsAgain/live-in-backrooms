@@ -22,11 +22,11 @@ pub mod scene;
 
 // 引擎对外 API（应用层/游戏层从这里取用；部分类型当前尚未用到，属预留）。
 #[allow(unused_imports)]
+pub use core::aabb::Aabb;
+#[allow(unused_imports)]
 pub use core::camera::Camera;
 #[allow(unused_imports)]
 pub use core::camera::CameraAction;
-#[allow(unused_imports)]
-pub use core::aabb::Aabb;
 #[allow(unused_imports)]
 pub use core::environment::Environment;
 #[allow(unused_imports)]

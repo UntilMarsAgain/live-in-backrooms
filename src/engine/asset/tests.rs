@@ -125,8 +125,7 @@ fn load_repo_test_glb() {
     }
     let mut library = MeshLibrary::new();
     let mut textures = TextureLibrary::new();
-    let scene = load_scene(path, &mut library, &mut textures)
-        .expect("test/test.glb 应能加载");
+    let scene = load_scene(path, &mut library, &mut textures).expect("test/test.glb 应能加载");
     assert!(!library.is_empty());
     assert!(!textures.is_empty(), "PBR 样例应带基础色贴图");
     assert!(scene.object_count() > 0);

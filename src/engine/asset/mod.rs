@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use glam::{Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use gltf::scene::Transform as GltfTransform;
@@ -33,9 +33,7 @@ pub fn load_scene(
     texture_library: &mut TextureLibrary,
 ) -> Result<Scene> {
     let (document, buffers, images) = gltf::import(path)?;
-    let scene = document
-        .default_scene()
-        .context("glTF 文件没有默认场景")?;
+    let scene = document.default_scene().context("glTF 文件没有默认场景")?;
 
     let buffer_slices: Vec<&[u8]> = buffers.iter().map(|b| b.0.as_slice()).collect();
     let mut loader = Loader {
@@ -134,10 +132,7 @@ impl Loader<'_> {
 
     /// 注册一个 glTF 网格（按网格索引去重），返回每个 primitive 对应的
     /// (MeshKey, Material) 列表。
-    fn register_mesh(
-        &mut self,
-        mesh: &gltf::Mesh<'_>,
-    ) -> Result<Vec<(MeshKey, Material)>> {
+    fn register_mesh(&mut self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(MeshKey, Material)>> {
         if self.mesh_keys.contains_key(&mesh.index()) {
             // 材质属于 primitive，不随网格去重缓存，需要重新读取。
             return self.materials_for(mesh);
@@ -154,10 +149,7 @@ impl Loader<'_> {
     }
 
     /// 重新读取一个网格所有 primitive 的材质（去重缓存只存了 MeshKey）。
-    fn materials_for(
-        &mut self,
-        mesh: &gltf::Mesh<'_>,
-    ) -> Result<Vec<(MeshKey, Material)>> {
+    fn materials_for(&mut self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(MeshKey, Material)>> {
         // 走与 register_mesh 相同的路径需要 &mut self（贴图注册），这里直接重新构造。
         let keys = self
             .mesh_keys
@@ -172,10 +164,7 @@ impl Loader<'_> {
     }
 
     /// 读取 primitive 的材质：基础色因子 + 基础色贴图。
-    fn material_from_primitive(
-        &mut self,
-        primitive: &gltf::Primitive<'_>,
-    ) -> Result<Material> {
+    fn material_from_primitive(&mut self, primitive: &gltf::Primitive<'_>) -> Result<Material> {
         // gltf::Material 总是存在（未指定时是默认材质，因子为 1）。
         let gltf_material = primitive.material();
         let pbr = gltf_material.pbr_metallic_roughness();

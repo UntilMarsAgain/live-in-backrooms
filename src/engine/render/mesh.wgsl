@@ -51,7 +51,9 @@ struct EnvironmentParams {
 const PI: f32 = 3.141592653589793;
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
-@group(1) @binding(0) var<uniform> object_data: ObjectData;
+// 物体数据：全部物体一个 storage 数组，按实例索引（instance_index）取。
+// 相比动态 uniform 的逐物体绑定：每帧只绑一次，无 256 字节对齐浪费。
+@group(1) @binding(0) var<storage, read> object_data: array<ObjectData>;
 @group(2) @binding(0) var<uniform> light_count: LightCount;
 @group(2) @binding(1) var<storage, read> lights: array<LightData>;
 @group(3) @binding(0) var base_color_tex: texture_2d<f32>;
@@ -66,6 +68,8 @@ const PI: f32 = 3.141592653589793;
 @group(4) @binding(5) var brdf_lut_tex: texture_2d<f32>;
 
 struct VertexInput {
+    // 绘制时用实例区间 i..i+1 编码物体索引，这里即 object_data 数组下标。
+    @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) tangent: vec4<f32>,
@@ -80,6 +84,8 @@ struct VertexOutput {
     @location(2) color: vec3<f32>,
     @location(3) tex_coord: vec2<f32>,
     @location(4) world_tangent: vec4<f32>,
+    // flat：同一三角形所有片元拿到所属物体的索引（片元阶段取材质参数用）。
+    @location(5) @interpolate(flat) object_index: u32,
 }
 
 // ---------- PBR BRDF ----------
@@ -108,94 +114,18 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - cos_theta, 5.0);
 }
 
-// AgX Tone Mapping（与 Blender/Filament/three.js 同源实现，天空盒同一算法）。
-// 参考: https://github.com/mrdoob/three.js（tonemapping_pars_fragment）
-// 保证物体与背景亮度/对比一致；输出线性 [0,1]，由 sRGB 交换链完成编码。
-
-// 线性 sRGB ↔ 线性 Rec.2020（AgX 在 Rec.2020 基色上工作）。
-// WGSL mat3x3 按列填充，以下每 3 个数为一列（r0, r1, r2）。
-const SRGB_TO_REC2020: mat3x3<f32> = mat3x3<f32>(
-    0.6274, 0.0691, 0.0164,
-    0.3293, 0.9195, 0.0880,
-    0.0433, 0.0113, 0.8956,
-);
-const REC2020_TO_SRGB: mat3x3<f32> = mat3x3<f32>(
-    1.6605, -0.1246, -0.0182,
-    -0.5876, 1.1329, -0.1006,
-    -0.0728, -0.0083, 1.1187,
-);
-
-// AgX Inset / Outset 色域矩阵。
-const AGX_INSET_MAT: mat3x3<f32> = mat3x3<f32>(
-    0.856627153315983, 0.137318972929847, 0.11189821299995,
-    0.0951212405381588, 0.761241990602591, 0.0767994186031903,
-    0.0482516061458583, 0.101439036467562, 0.811302368396859,
-);
-const AGX_OUTSET_MAT: mat3x3<f32> = mat3x3<f32>(
-    1.1271005818144368, -0.1413297634984383, -0.14132976349843826,
-    -0.11060664309660323, 1.157823702216272, -0.11060664309660294,
-    -0.016493938717834573, -0.016493938717834257, 1.2519364065950405,
-);
-
-// AgX Default 对比曲线（7 项多项式拟合，非 smoothstep；误差平方 ≈ 3.7e-6）。
-fn agx_default_contrast(x: vec3<f32>) -> vec3<f32> {
-    let x2 = x * x;
-    let x4 = x2 * x2;
-    return 15.5 * x4 * x2
-        - 40.14 * x4 * x
-        + 31.96 * x4
-        - 6.868 * x2 * x
-        + 0.4298 * x2
-        + 0.1191 * x
-        - 0.00232;
-}
-
-// AgX Default 色调映射（输入/输出均为线性 sRGB）。
-// EV 窗口来自 uniform（默认 -12.47393 / 4.026069，即中间灰上下 -10 ~ +6.5 EV），
-// 场景可覆盖，这是 AgX 相对 ACES 的核心优势：每个层级配置自己的动态范围窗口。
-fn agx_tone_map(color: vec3<f32>) -> vec3<f32> {
-    // 1. 线性 sRGB → Rec.2020 → AgX 基础色域。
-    var c = AGX_INSET_MAT * (SRGB_TO_REC2020 * color);
-
-    // 2. Log2 编码 + 归一化（EV 窗口以中间灰 0.18 为锚点）。
-    c = max(c, vec3<f32>(1e-10));
-    c = log2(c);
-    c = (c - vec3<f32>(environment_params.agx_min_ev))
-        / vec3<f32>(environment_params.agx_max_ev - environment_params.agx_min_ev);
-    c = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
-
-    // 3. AgX Default 对比曲线。
-    c = agx_default_contrast(c);
-
-    // 4. Outset 矩阵 + 2.2 线性化 → 转回线性 sRGB。
-    c = AGX_OUTSET_MAT * c;
-    c = pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
-    return REC2020_TO_SRGB * c;
-}
-
-// ACES Filmic Tone Mapping（Narkowicz 2015 拟合）。
-// 保留作对比；当前用修正后的 AgX。
-fn aces_filmic(color: vec3<f32>) -> vec3<f32> {
-    let a = 2.51;
-    let b = 0.03;
-    let c = 2.43;
-    let d = 0.59;
-    let e = 0.14;
-    return clamp(
-        (color * (a * color + b)) / (color * (c * color + d) + e),
-        vec3<f32>(0.0),
-        vec3<f32>(1.0),
-    );
-}
-
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let world_position = object_data.model * vec4<f32>(input.position, 1.0);
+    // instance_index = base_instance + 实例编号；绘制时每个物体用实例区间
+    // i..i+1 编码，因此这里就是物体在 object_data 数组里的下标。
+    let object = object_data[input.instance_index];
+    out.object_index = input.instance_index;
+    let world_position = object.model * vec4<f32>(input.position, 1.0);
     out.clip_position = camera.view_proj * world_position;
     out.world_position = world_position.xyz;
-    out.world_normal = object_data.normal_matrix * input.normal;
-    out.world_tangent = vec4<f32>(object_data.normal_matrix * input.tangent.xyz, input.tangent.w);
+    out.world_normal = object.normal_matrix * input.normal;
+    out.world_tangent = vec4<f32>(object.normal_matrix * input.tangent.xyz, input.tangent.w);
     out.color = input.color;
     out.tex_coord = input.tex_coord;
     return out;
@@ -203,14 +133,15 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let object = object_data[input.object_index];
     // 基础色 = 贴图 × 材质因子 × 顶点色（glTF 组合规则）。
     let tex_color = textureSample(base_color_tex, base_color_sampler, input.tex_coord);
-    let albedo = tex_color.rgb * object_data.base_color.rgb * input.color;
+    let albedo = tex_color.rgb * object.base_color.rgb * input.color;
 
     // 金属度 / 粗糙度（glTF metallic-roughness：B=金属度，G=粗糙度）。
     let mr = textureSample(metallic_roughness_tex, base_color_sampler, input.tex_coord);
-    let metallic = mr.b * object_data.metallic;
-    let roughness = max(mr.g * object_data.roughness, 0.04);
+    let metallic = mr.b * object.metallic;
+    let roughness = max(mr.g * object.roughness, 0.04);
 
     // 法线贴图：切线空间 → 世界空间（Gram-Schmidt 正交化 T）。
     let n_world = normalize(input.world_normal);
@@ -226,7 +157,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     // IBL 漫反射：辐照度图已含 π 因子（E(n) = π * avg），这里除以 π 恢复物理量。
-    // Phase 1 暂无镜面 IBL（预过滤环境图 + BRDF LUT），金属材质的环境高光暂缺。
+    // 镜面 IBL 走 split-sum（预过滤环境图 + BRDF LUT），两者都乘环境强度。
     let irradiance = textureSampleLevel(irradiance_tex, environment_sampler, n, 0.0).rgb;
     let k_d_ambient = (vec3<f32>(1.0) - f0) * (1.0 - metallic);
     let ambient_diffuse = k_d_ambient * albedo / PI * irradiance * environment_params.intensity;
@@ -292,5 +223,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 n_dot_l;
         }
     }
-    return vec4<f32>(agx_tone_map(color), 1.0);
+    // 输出原始辐射值（线性 HDR，可 >1）；色调映射由最后的 blit pass 统一完成。
+    return vec4<f32>(color, 1.0);
 }

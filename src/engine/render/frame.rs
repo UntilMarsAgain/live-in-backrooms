@@ -1,4 +1,5 @@
-//! 每帧渲染：相机/灯光/物体数据提交、主 pass 绘制与呈现。
+//! 每帧渲染：相机/灯光/物体数据提交、场景 pass 绘制到 HDR 目标、
+//! 色调映射 blit pass 写交换链并呈现。
 
 use glam::Mat3;
 use wgpu::{
@@ -7,9 +8,9 @@ use wgpu::{
 };
 
 use crate::engine::core::camera::{Camera, CameraUniform};
-use crate::engine::render::init::create_depth_texture;
+use crate::engine::render::init::{create_depth_texture, create_hdr_texture};
 use crate::engine::render::uniform::{
-    LIGHT_CAPACITY, LightCountUniform, ObjectDataUniform, collect_lights,
+    LIGHT_CAPACITY, LightCountUniform, ObjectData, collect_lights,
 };
 use crate::engine::render::{CLEAR_COLOR, Renderer};
 use crate::engine::scene::Scene;
@@ -26,12 +27,23 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
         // 深度缓冲必须与交换链尺寸保持一致。
         (self.depth_texture, self.depth_view) = create_depth_texture(&self.device, width, height);
+        // HDR 中间目标同样随尺寸重建；blit 绑定组引用它的视图，需要一并重建。
+        (self.hdr_texture, self.hdr_view) = create_hdr_texture(&self.device, width, height);
+        self.blit_bind_group = self.blit_resources.create_bind_group(
+            &self.device,
+            &self.hdr_view,
+            &self.environment_resources.env_params_buffer,
+        );
     }
 
     /// 渲染一帧：写入相机与物体 uniform，清屏，绘制场景中所有物体并呈现。
     ///
     /// `show_light_debug` / `show_collision_debug` 为 `true` 时，在网格之后
     /// 叠加对应的调试线框（顶点在 `load_scene` 时已上传，见 [`debug`] 模块）。
+    ///
+    /// 两段式：场景 pass 把天空盒/网格/线框画进 HDR 中间目标（原始辐射值，
+    /// 可 >1），blit pass 采样它做 AgX 色调映射后写交换链。色调映射全帧
+    /// 只做一次，后处理（Bloom/SSAO/SSR 等）以后可以插在两步之间。
     pub fn render(
         &mut self,
         camera: &Camera,
@@ -62,11 +74,10 @@ impl Renderer {
                 .write_buffer(&self.light_storage_buffer, 0, bytemuck::cast_slice(&lights));
         }
 
-        // 每帧把物体世界矩阵 + 法线矩阵写入动态 uniform 缓冲（步长 = object_stride）。
+        // 每帧把物体数据写入 storage 数组（紧凑布局，无对齐步长填充）。
         if scene.object_count() > 0 {
-            let stride = self.object_stride as usize;
-            let entry_size = size_of::<ObjectDataUniform>();
-            let mut bytes = vec![0u8; scene.object_count() * stride];
+            let entry_size = size_of::<ObjectData>();
+            let mut bytes = vec![0u8; scene.object_count() * entry_size];
             for (i, (key, object)) in scene.objects().enumerate() {
                 let model = scene
                     .world_transform(key)
@@ -79,7 +90,7 @@ impl Renderer {
                     [cols[3], cols[4], cols[5], 0.0],
                     [cols[6], cols[7], cols[8], 0.0],
                 ];
-                let data = ObjectDataUniform {
+                let data = ObjectData {
                     model,
                     normal_matrix,
                     base_color: object.material.base_color,
@@ -87,7 +98,7 @@ impl Renderer {
                     roughness: object.material.roughness_factor,
                     _pad: [0.0; 2],
                 };
-                bytes[i * stride..i * stride + entry_size]
+                bytes[i * entry_size..(i + 1) * entry_size]
                     .copy_from_slice(bytemuck::bytes_of(&data));
             }
             self.queue.write_buffer(&self.object_data_buffer, 0, &bytes);
@@ -115,11 +126,12 @@ impl Renderer {
                     label: Some("frame encoder"),
                 });
 
+            // ---- Pass 1：场景 pass，渲染到 HDR 中间目标 ----
             {
                 let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                    label: Some("main pass"),
+                    label: Some("scene pass (HDR)"),
                     color_attachments: &[Some(RenderPassColorAttachment {
-                        view: &view,
+                        view: &self.hdr_view,
                         depth_slice: None,
                         resolve_target: None,
                         ops: Operations {
@@ -149,6 +161,8 @@ impl Renderer {
                 if let Some(mesh_buffer) = &self.mesh_buffer {
                     pass.set_pipeline(&self.pipeline);
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    // 物体数据 storage 数组：整组绑定一次，逐物体不再切换。
+                    pass.set_bind_group(1, &self.object_bind_group, &[]);
                     pass.set_bind_group(2, &self.light_bind_group, &[]);
                     pass.set_bind_group(4, &self.environment.mesh_bind_group, &[]);
                     pass.set_vertex_buffer(0, mesh_buffer.vertex_buffer.slice(..));
@@ -157,20 +171,19 @@ impl Renderer {
                         wgpu::IndexFormat::Uint32,
                     );
 
-                    // 每个物体：绑定它的世界矩阵（动态偏移），按句柄直取网格区间；
+                    // 每个物体：用实例区间 i..i+1 编码物体索引（instance_index = i，
+                    // 顶点着色器据此取 object_data[i]），按句柄直取网格区间；
                     // 非网格节点（分组、未来的灯光/相机等）跳过。
                     for (i, (_, object)) in scene.objects().enumerate() {
                         let Some(mesh_key) = object.mesh_key() else {
                             continue;
                         };
                         let range = mesh_buffer.mesh_ranges[mesh_key.index()];
-                        let offset = (i * self.object_stride as usize) as u32;
-                        pass.set_bind_group(1, &self.object_bind_group, &[offset]);
                         pass.set_bind_group(3, &self.material_bind_groups[i], &[]);
                         pass.draw_indexed(
                             range.index_offset..range.index_offset + range.index_count,
                             0,
-                            0..1,
+                            i as u32..i as u32 + 1,
                         );
                     }
                 }
@@ -184,6 +197,26 @@ impl Renderer {
                     self.collision_gizmos
                         .draw(&mut pass, &self.camera_bind_group);
                 }
+            }
+
+            // ---- Pass 2：色调映射 blit，HDR 目标 → 交换链 ----
+            {
+                let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("tone map blit pass"),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: Operations {
+                            // 场景 pass 覆盖全屏，Load 值无所谓；Clear 保持确定性。
+                            load: LoadOp::Clear(CLEAR_COLOR),
+                            store: StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    ..Default::default()
+                });
+                self.blit_resources.draw(&mut pass, &self.blit_bind_group);
             }
 
             self.queue.submit([encoder.finish()]);

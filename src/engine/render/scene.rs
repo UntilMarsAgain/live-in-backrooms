@@ -1,5 +1,7 @@
 //! 场景数据上传：网格合并、纹理增量上传、环境设置与关卡加载。
 
+use std::mem::size_of;
+
 use wgpu::util::DeviceExt;
 use wgpu::{BindGroupDescriptor, BindGroupEntry, BufferDescriptor, BufferUsages};
 
@@ -9,7 +11,7 @@ use crate::engine::core::texture::TextureLibrary;
 use crate::engine::render::debug;
 use crate::engine::render::init::create_texture_view;
 use crate::engine::render::uniform::{
-    AGX_DEFAULT_EV_MAX, AGX_DEFAULT_EV_MIN, AGX_MIDDLE_GRAY_LOG2, ObjectDataUniform,
+    AGX_DEFAULT_EV_MAX, AGX_DEFAULT_EV_MIN, AGX_MIDDLE_GRAY_LOG2, ObjectData,
 };
 use crate::engine::render::{MeshGpu, MeshRange, Renderer};
 use crate::engine::scene::Scene;
@@ -109,18 +111,14 @@ impl Renderer {
         self.set_environment_agx_ev(AGX_DEFAULT_EV_MIN, AGX_DEFAULT_EV_MAX);
     }
 
-    /// 加载场景：按物体数量重建动态 uniform 缓冲（网格资产已在 `upload_meshes` 中常驻）。
+    /// 加载场景：按物体数量重建物体数据 storage 缓冲
+    /// （网格资产已在 `upload_meshes` 中常驻）。
     pub fn load_scene(&mut self, scene: &Scene, meshes: &MeshLibrary) {
-        // 按物体数量重建动态 uniform 缓冲与绑定组。
-        let stride = self
-            .device
-            .limits()
-            .min_uniform_buffer_offset_alignment
-            .max(std::mem::size_of::<ObjectDataUniform>() as u32);
+        // 按物体数量重建 storage 缓冲与绑定组（紧凑数组，无对齐步长浪费）。
         let object_data_buffer = self.device.create_buffer(&BufferDescriptor {
             label: Some("object data buffer"),
-            size: (scene.object_count() as u64).max(1) * stride as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            size: (scene.object_count() as u64).max(1) * size_of::<ObjectData>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let object_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
@@ -128,17 +126,13 @@ impl Renderer {
             layout: &self.object_bind_group_layout,
             entries: &[BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &object_data_buffer,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(std::mem::size_of::<ObjectDataUniform>() as u64),
-                }),
+                // 绑定整个缓冲：着色器按实例索引访问，无动态偏移。
+                resource: object_data_buffer.as_entire_binding(),
             }],
         });
 
         self.object_data_buffer = object_data_buffer;
         self.object_bind_group = object_bind_group;
-        self.object_stride = stride as u32;
 
         // 灯光改为每帧收集（所有方向光 + 离相机最近的 X 盏局部光），见 render()；
         // 这里只保留静态数据（调试线框）的加载。
@@ -146,7 +140,8 @@ impl Renderer {
         // 调试线框同样是静态数据：加载时生成并上传一次，
         // 渲染时只按开关决定是否绘制，避免每帧重建/上传。
         let light_gizmos = debug::build_light_gizmos(scene);
-        self.light_gizmos.upload(&self.device, &self.queue, &light_gizmos);
+        self.light_gizmos
+            .upload(&self.device, &self.queue, &light_gizmos);
         let collision_gizmos = debug::build_collision_gizmos(scene, meshes);
         self.collision_gizmos
             .upload(&self.device, &self.queue, &collision_gizmos);

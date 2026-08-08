@@ -1,0 +1,12 @@
+# 上游来源，列表可填写多个。
+# source = ["original"] # 原创的这样填写，original是魔数字。
+# 一般不将上游来源和original并列提及，即使游戏也可以解析和显示
+source = ["https://backrooms-wiki.wikidot.com/level-0"]
+
+[terrain]
+mode = "jigsaw" # 地形的模式有：jigsaw（不涉及楼层的拼图）、model（加载模型）、heightmap（用LOD加载高度图或程序化生成高度图）
+size = 2.0
+[[terrain.pool]]
+id = ""
+model = ""
+

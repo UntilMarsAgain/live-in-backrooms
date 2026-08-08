@@ -7,14 +7,16 @@
 
 - **阴影贴图**：PBR 目前没有阴影。从灯光视角渲染深度贴图（独立 pass），
   片元着色器采样比较即可；方向光优先。
-- **镜面 IBL**：只有漫反射 IBL，金属材质的环境高光缺失（阴影里偏黑）。
-  预过滤环境图（GGX 重要性采样 mip 链）+ BRDF LUT。
+- **后处理（Bloom 等）**：HDR 中间目标已就位（场景 pass → 色调映射 blit），
+  可在两步之间插入 Bloom / SSAO / SSR 等后处理 pass；Bloom 也是自发光通道
+  落地的前提（没有 Bloom，emissive 只能"发光"不能"发亮"）。
 - **半透明物体**：管线 `blend: None`，全部不透明。加第二条管线
   （深度测试开、写入关、blend 开），透明物体从远到近排序。
 - **UI 叠加层**：HUD、菜单、交互提示等 2D 叠加渲染，最终由 winit 事件驱动
   交互（与 FreeCameraController 的鼠标捕获协调）。
-- **色调映射升级**：当前 `1 - exp(-exposure × radiance)` 指数映射，
-  可升级 ACES 等更可控的曲线；曝光改成可调 uniform。
+- **曝光统一**：色调映射已统一到 blit pass（AgX + 场景级 EV 窗口）；
+  `environment_params.intensity` 仍兼任 IBL 系数与天空盒曝光，IBL 漫反射
+  不经过曝光，与天空盒亮度未必一致——拆出独立曝光后乘法统一放 blit。
 
 ## 游戏内容 / 关卡
 

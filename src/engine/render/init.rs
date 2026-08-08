@@ -17,10 +17,8 @@ use crate::engine::core::mesh::Vertex;
 use crate::engine::core::texture::Texture;
 use crate::engine::render::debug::LineGizmos;
 use crate::engine::render::environment::EnvironmentResources;
-use crate::engine::render::uniform::{
-    LIGHT_CAPACITY, LightCountUniform, LightUniform, ObjectDataUniform,
-};
-use crate::engine::render::{DisplayHandle, Renderer};
+use crate::engine::render::uniform::{LIGHT_CAPACITY, LightCountUniform, LightUniform, ObjectData};
+use crate::engine::render::{BlitResources, DisplayHandle, HDR_FORMAT, Renderer};
 
 /// 创建与窗口尺寸一致的深度纹理。
 pub(super) fn create_depth_texture(
@@ -40,6 +38,32 @@ pub(super) fn create_depth_texture(
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth24Plus,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// 创建与窗口尺寸一致的 HDR 中间目标（场景 pass 渲染到这里）。
+///
+/// 同时作为渲染附件（RENDER_ATTACHMENT）与 blit 采样输入（TEXTURE_BINDING）。
+pub(super) fn create_hdr_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("HDR color texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -154,6 +178,8 @@ impl Renderer {
 
         // 3.5 深度缓冲：管线与渲染通道都要用它来做正确的遮挡关系。
         let (depth_texture, depth_view) = create_depth_texture(&device, width, height);
+        // 3.6 HDR 中间目标：场景 pass 渲染到这里，blit pass 采样后写交换链。
+        let (hdr_texture, hdr_view) = create_hdr_texture(&device, width, height);
 
         // 绑定组与着色器阶段的约定（改布局/着色器时两边都要对账）：
         //   group 0 相机    ：VERTEX 用 view_proj，FRAGMENT 用 position
@@ -194,7 +220,7 @@ impl Renderer {
             }],
         });
 
-        // 5. 物体数据：动态 uniform 缓冲布局（每个物体一个模型矩阵）。
+        // 5. 物体数据：全部物体一个 storage 数组（按实例索引取，每帧只绑一次）。
         let object_bind_group_layout =
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some("object bind group layout"),
@@ -203,25 +229,21 @@ impl Renderer {
                     // 顶点用模型/法线矩阵，片元用 base_color 因子。
                     visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
                     ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
                         min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<ObjectDataUniform>() as u64,
+                            std::mem::size_of::<ObjectData>() as u64
                         ),
                     },
                     count: None,
                 }],
             });
 
-        // 物体数据至少一个 ObjectData 大小，且动态偏移必须是设备对齐值的整数倍。
-        let object_stride = device
-            .limits()
-            .min_uniform_buffer_offset_alignment
-            .max(size_of::<ObjectDataUniform>() as u32);
+        // 初始 1 个元素的占位缓冲；load_scene 按物体数重建。
         let object_data_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("object data buffer"),
-            size: object_stride as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            size: size_of::<ObjectData>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let object_bind_group = device.create_bind_group(&BindGroupDescriptor {
@@ -229,13 +251,8 @@ impl Renderer {
             layout: &object_bind_group_layout,
             entries: &[BindGroupEntry {
                 binding: 0,
-                // 动态偏移的校验以这里声明的绑定范围为准：只声明一个矩阵（64 字节），
-                // 这样每个物体的偏移（i * stride）才不会"顶穿"整个缓冲。
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &object_data_buffer,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(size_of::<ObjectDataUniform>() as u64),
-                }),
+                // 绑定整个缓冲：storage 数组按实例索引访问，无动态偏移。
+                resource: object_data_buffer.as_entire_binding(),
             }],
         });
 
@@ -372,19 +389,29 @@ impl Renderer {
         });
 
         // 5.7 环境子系统：布局、计算管线、天空盒管线与默认绑定组。
+        // 天空盒输出原始辐射值，目标格式是 HDR 中间目标而非交换链格式。
         let environment_resources = EnvironmentResources::new(
             &device,
             &queue,
             &camera_bind_group_layout,
-            config.format,
+            HDR_FORMAT,
             float32_filterable,
         );
 
         // 5.8 调试线框：灯光与碰撞箱各一个实例，管线复用相机绑定组（@group(0)）。
-        let light_gizmos = LineGizmos::new(&device, &camera_bind_group_layout, config.format);
-        let collision_gizmos = LineGizmos::new(&device, &camera_bind_group_layout, config.format);
+        // 调试线框画进 HDR 目标（与场景一起被色调映射）。
+        let light_gizmos = LineGizmos::new(&device, &camera_bind_group_layout, HDR_FORMAT);
+        let collision_gizmos = LineGizmos::new(&device, &camera_bind_group_layout, HDR_FORMAT);
 
-        // 6. 渲染管线：网格 + 相机/物体/灯光/纹理/环境。
+        // 5.9 色调映射 blit：采样 HDR 目标 → AgX 映射 → 写交换链。
+        let blit_resources = BlitResources::new(&device, config.format);
+        let blit_bind_group = blit_resources.create_bind_group(
+            &device,
+            &hdr_view,
+            &environment_resources.env_params_buffer,
+        );
+
+        // 6. 渲染管线：网格 + 相机/物体/灯光/纹理/环境，输出到 HDR 目标。
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("mesh shader"),
             source: ShaderSource::Wgsl(include_str!("mesh.wgsl").into()),
@@ -432,7 +459,7 @@ impl Renderer {
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(ColorTargetState {
-                    format: config.format,
+                    format: HDR_FORMAT,
                     blend: None,
                     write_mask: ColorWrites::ALL,
                 })],
@@ -452,7 +479,6 @@ impl Renderer {
             object_bind_group_layout,
             object_data_buffer,
             object_bind_group,
-            object_stride: object_stride as u32,
             light_count_buffer,
             light_storage_buffer,
             light_bind_group,
@@ -467,6 +493,10 @@ impl Renderer {
             pipeline,
             depth_texture,
             depth_view,
+            hdr_texture,
+            hdr_view,
+            blit_resources,
+            blit_bind_group,
             mesh_buffer: None,
             mesh_uploaded_version: 0,
             environment: environment_resources.default_environment.clone(),

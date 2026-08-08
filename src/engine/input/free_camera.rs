@@ -61,10 +61,7 @@ pub struct FreeCameraController {
 impl FreeCameraController {
     /// 新建控制器；两个 `Arc<AtomicBool>` 是与 App 共享的调试开关，
     /// 分别由 L / B 键翻转，App 侧每帧读取决定是否绘制对应线框。
-    pub fn new(
-        show_light_debug: Arc<AtomicBool>,
-        show_collision_debug: Arc<AtomicBool>,
-    ) -> Self {
+    pub fn new(show_light_debug: Arc<AtomicBool>, show_collision_debug: Arc<AtomicBool>) -> Self {
         Self {
             speed: 5.0,
             min_speed: 0.5,
@@ -134,9 +131,7 @@ impl InputController<Camera> for FreeCameraController {
                         }
                         // B：切换碰撞箱调试可视化（长按不重复触发）。
                         if code == KeyCode::KeyB && !key_event.repeat {
-                            let on = self
-                                .show_collision_debug
-                                .fetch_xor(true, Ordering::Relaxed);
+                            let on = self.show_collision_debug.fetch_xor(true, Ordering::Relaxed);
                             eprintln!("碰撞箱调试可视化：{}", if on { "关" } else { "开" });
                         }
                         // Esc 释放鼠标，回到系统光标。
@@ -244,7 +239,10 @@ impl InputController<Camera> for FreeCameraController {
             }
             let probe_center = target.position() + translate + step;
             let transform = Transform::new(probe_center, Quat::IDENTITY, Vec3::ONE);
-            if scene.collides_with(meshes, &transform, self.collider, &[]).is_none() {
+            if scene
+                .collides_with(meshes, &transform, self.collider, &[])
+                .is_none()
+            {
                 translate += step;
             }
         }

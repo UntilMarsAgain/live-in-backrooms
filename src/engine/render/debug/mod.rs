@@ -16,8 +16,8 @@ use wgpu::{
     PrimitiveTopology, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, VertexState,
 };
 
-use crate::engine::core::light::LightKind;
 use crate::engine::core::aabb::Aabb;
+use crate::engine::core::light::LightKind;
 use crate::engine::core::mesh::MeshLibrary;
 use crate::engine::scene::{Scene, SceneObjectKind};
 
