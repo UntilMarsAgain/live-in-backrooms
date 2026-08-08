@@ -1,9 +1,11 @@
 # BUG 记录
 
-当前依赖或实现中存在的 bug：现象、根因、现在的方案。
-性能/优化债见 [optimizations.md](./optimizations.md)。
+当前依赖或实现中存在的 bug（现象、根因、方案）与已修复记录。
+当前无未修复项；性能/优化债见 [optimizations.md](./optimizations.md)。
 
-## GPU 转换只写环境图左上角（参数缓冲分时复用）
+## 已修复
+
+### GPU 转换只写环境图左上角（参数缓冲分时复用）
 
 - 现象：Vulkan 上 GPU 路径天空盒仍黑；单 pass 探针却正常。
 - 根因：`queue.write_buffer` 立即入队、先于 `submit()` 里的 pass 执行；
@@ -11,8 +13,6 @@
   （size=32），256² 环境图只有左上角 32×32 有数据。
 - 方案：两个计算 pass 各用独立参数缓冲（`env_convert_params` /
   `irradiance_params`）。
-
-## 已修复
 
 ### wgpu GL 后端数组纹理读回全零（已通过移除 GL 后端规避）
 

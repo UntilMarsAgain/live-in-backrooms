@@ -26,30 +26,11 @@
 - **已铺好的路**：`collect_lights` 独立成函数、`size` 字段已为 LTC 预留；
   灯数超过几十时换 storage buffer（`var<storage>` + 运行时长度数组）即可去掉上限。
 
-## 网格资产：新增时整体重传
-
-- **现状**：`MeshLibrary` 只追加、带版本号；`upload_meshes` 版本变了就把全部网格
-  合并缓冲整体重建（旧缓冲 drop，wgpu 延迟销毁）。
-- **问题**：运行时新增资产会有一瞬重传（调色盘量级只是几毫秒级，无感）。
-- **已铺好的路**：`MeshLibrary.version` 机制可扩展到灯光/物体；`write_buffer` 支持
-  偏移，增量上传只传新增网格的区间。
-- **触发时机**：运行中高频注册资产、或上传量级大到出现可见卡顿。多 Level 后若显存
-  吃紧，把"永久驻留"改成"按 Level 分组的驻留/淘汰"（bundle 模式），形状不变。
-
-## 网格句柄依赖"只追加不删除"
-
-- **现状**：`MeshKey` 是稠密编号，`mesh_ranges[handle.index()]` 一跳直达，靠"库只追加
-  不删除"保证编号稳定。
-- **问题**：一旦需要删除资产（比如做资产淘汰），稠密编号会失效。
-- **已铺好的路**：届时换成代际句柄 + `handle_to_range` 映射表即可， 渲染侧改动集中在 
-  `upload_meshes`。
-- **触发时机**：引入资产淘汰/卸载时。
-
 ## 渲染批次：每物体一次 draw
 
 - **现状**：每个网格物体一次 `set_bind_group` + `draw_indexed`（几百次调用以内没问题）。
-- **优化方向**：静态几何合并成大缓冲按区间画（区块化时自然到来）、重复物体 instancing
-  （管线加实例输入即可，`draw_indexed(..., 0..instances)` 原生支持）。
+- **优化方向**：重复物体 instancing（管线加实例输入即可，`draw_indexed(..., 0..instances)`
+  原生支持）；`AssetManager` 的每网格独立缓冲天然支持按句柄一次 instanced draw。
 - **触发时机**：Level 0 迷宫/区块体系落地时一起做。
 
 ## MultiDrawIndirect：从 CPU 逐条画改为 GPU 批量画
@@ -74,8 +55,10 @@
   `INDIRECT_FIRST_INSTANCE`），不是所有后端都支持 → 保留现有 CPU 循环做回退
   （能力探测后二选一）。
 - **已铺好的路**：调色盘按材质分组天然对应"每组一条 multi-draw"；
-  `MeshLibrary` 的大顶点/索引缓冲 + `mesh_ranges` 区间正好映射到
-  `first_index`/`base_vertex`；`Vertex::layout()` 扩展性已就位。
+  物体数据已是 storage 数组 + `@builtin(instance_index)`（`first_instance` 当
+  draw ID 的技巧已可用）；`AssetManager` 每网格独立缓冲在 MDI 下按"每缓冲
+  一次 indirect 调用"组织（与"每网格一种缓冲"的绘制路径一致）；
+  `Vertex::layout()` 扩展性已就位。
 - **参考**：Minecraft 26.3 Snapshot 6 公告（含 terrain shader 为 multi-draw 重构、
   `DynamicTransforms` 内存重排、OIT 相关的 `RENDERPEARL_EXPLICIT_DEPTH_INVARIANCE`）：
   https://www.minecraft.net/en-us/article/minecraft-26-3-snapshot-6
@@ -139,8 +122,9 @@
 
 ## 纹理：基础色 / 金属度粗糙度 / 法线已接入
 
-- **现状**：`TextureLibrary`（只追加、版本号驱动增量上传）+ `Material`
-  （base_color / metallic / roughness / normal 因子与贴图）已落地；glTF 的
+- **现状**：统一 `AssetManager`（`Handle<T>` 世代句柄、pin/unpin、按需上传/
+  回收）+ `Material`（base_color / metallic / roughness / normal 因子与贴图）
+  已落地；glTF 的
   `baseColorTexture` / `metallicRoughnessTexture`（B=金属度、G=粗糙度）/
   `normalTexture` 加载并采样，缺贴图时用 1×1 兜底纹理（白 / 中性法线）；
   顶点新增 TANGENT（法线贴图 TBN）。
@@ -172,8 +156,8 @@
 ## 异步加载、多线程与加载提示
 
 - **现状**：glTF 加载/网格上传都在主线程、启动时一次性完成。
-- **已铺好的路**：资产不可变 + 全局库，将来异步加载时用 `Arc<Mesh>` 传递所有权
-  （所有权分裂时 Arc 才值得用）；上传仍在主线程，构建/解析走工作线程。
+- **已铺好的路**：资产不可变 + 统一 `AssetManager`，将来异步加载时解析走
+  工作线程、注册仍主线程；`pin` 后 `sync_gpu` 负责上传，加载队列可插在中间。
 - **触发时机**：加载时间开始影响体验时。
 
 ## 顶点格式扩展
@@ -200,21 +184,25 @@
 
 ## 测试覆盖
 
-- **现状**（26 个测试）：
+- **现状**（64 个测试）：
   - CPU 单测：场景世界矩阵、glTF 加载、环境转换（`to_cubemap` / `irradiance_map`），
-    不碰 GPU，任何环境可跑；
+    不碰 GPU，任何环境可跑；资产注册表（世代句柄/复用/pin-unpin）、GamePath
+    校验、合并资源空间调度器；
   - **WGSL 语法校验**：用 naga 解析并校验 `mesh.wgsl` / `environment.wgsl`，
     语法与绑定组声明错误在 `cargo test` 阶段暴露（`cargo build` 不编译 WGSL）；
-  - **无头冒烟测试**：不创建窗口，请求软件渲染设备（llvmpipe GL），真跑
+  - **无头冒烟测试**：不创建窗口，请求 PRIMARY 后端设备（无 OpenGL），真跑
     环境资源创建 → 转换 → 天空盒渲染到离屏 → 读回像素验证非黑；无 GPU
     环境自动跳过并打印原因；
   - **端到端像素验证**：真实 `test/test.hdr` 转换后渲染天空盒，断言平均亮度非黑。
   - **镜面 IBL 读回验证**：GPU 路径下读回预过滤 mip 0 与 BRDF LUT，断言非黑
     （防"参数缓冲复用导致预过滤图全黑"这类回归）。
-- **注意事项**：llvmpipe 软件渲染器并行跑多个 GPU 测试会段错误（线程问题），
-  因此 GPU 相关测试统一用 `cargo test -- --test-threads=1` 跑；单线程下全部通过。
-- **可补**：`collect_lights`（方向推导）、`upload_meshes` 合并区间、uniform 布局
-  （大小/偏移断言）、strip/fan 转换的边界。
+  - **资产 GPU 同步**：pin 上传 / unpin 回收 / 按需上传（`ensure_*_gpu`）/
+    无效句柄报错路径，headless 设备实测。
+- **注意事项**：软件渲染器（llvmpipe / lavapipe）并行跑多个 GPU 测试会段错误
+  （线程问题），因此 GPU 相关测试统一用 `cargo test -- --test-threads=1` 跑；
+  单线程下全部通过。
+- **可补**：`collect_lights`（方向推导）、uniform 布局（大小/偏移断言）、
+  strip/fan 转换的边界。
 - **后端能力验证**：`examples/vulkan_probe.rs`（强制 Vulkan，A/B/C/D 四项实测），
   换机器/驱动后跑一遍即可确认后端能力，避免静默依赖 storage 数组纹理等
   不可靠特性。
