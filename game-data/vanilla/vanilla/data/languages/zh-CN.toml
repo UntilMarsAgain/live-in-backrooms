@@ -1,9 +1,0 @@
-[ui]
-source = "来源："
-original = "原创"
-
-# 层级表，大标题、小标题、描述均为必填
-[levels]
-level-0.title = "阈限"
-level-0.subtitle = "Level 0"
-level-0.description = "小心前行，流浪者。这里既是坟墓，也是门槛。"

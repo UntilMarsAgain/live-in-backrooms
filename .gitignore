@@ -4,6 +4,6 @@
 /game-data/vanilla/assets/*
 
 # 测试数据目录：内容不入库，仅保留说明文件。
-/test/*
-!/test/
-!/test/README.md
+/game-data/vanilla/test/*
+!/game-data/vanilla/test/
+!/game-data/vanilla/test/README.md
