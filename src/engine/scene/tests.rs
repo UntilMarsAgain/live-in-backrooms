@@ -3,6 +3,7 @@
 use super::*;
 use crate::engine::Mesh;
 use crate::engine::AssetManager;
+use crate::engine::MergedResourceSpace;
 use glam::{Quat, Vec3};
 
 /// 环境强度默认应为 1.0（满环境光），避免手误改成 0 后物体失去环境光。
@@ -219,7 +220,7 @@ fn cube_world(assets: &mut AssetManager, scene: &mut Scene, position: Vec3) -> O
 /// 点包含：立方体中心在盒内，远处点在外，边界算在内。
 #[test]
 fn point_inside_uses_world_aabb() {
-    let mut assets = AssetManager::without_gpu();
+    let mut assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
     let mut scene = Scene::new();
     let cube = cube_world(&mut assets, &mut scene, Vec3::new(2.0, 0.0, 0.0));
 
@@ -237,7 +238,7 @@ fn point_inside_uses_world_aabb() {
 /// 两物体碰撞：中心距 < 边长和的一半时相交，> 时不相交。
 #[test]
 fn objects_collide_uses_world_aabb() {
-    let mut assets = AssetManager::without_gpu();
+    let mut assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
     let mut scene = Scene::new();
     let a = cube_world(&mut assets, &mut scene, Vec3::ZERO);
     let b = cube_world(&mut assets, &mut scene, Vec3::new(0.5, 0.0, 0.0));
@@ -256,7 +257,7 @@ fn objects_collide_uses_world_aabb() {
 /// 外部物体：给定 transform + half_extents 与世界碰撞，支持旋转与排除。
 #[test]
 fn collides_with_external_probe() {
-    let mut assets = AssetManager::without_gpu();
+    let mut assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
     let mut scene = Scene::new();
     let cube = cube_world(&mut assets, &mut scene, Vec3::ZERO);
 

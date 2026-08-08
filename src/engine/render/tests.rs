@@ -622,7 +622,7 @@ fn asset_manager_sync_gpu_uploads_and_reclaims() {
     };
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
-    let mut assets = crate::engine::render::AssetManager::new(device, queue);
+    let mut assets = crate::engine::render::AssetManager::new(device, queue, crate::engine::core::resource::MergedResourceSpace::new(std::env::temp_dir()));
     let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
 
     // 未 pin：sync 后不应有 GPU 资源。
@@ -638,7 +638,7 @@ fn asset_manager_sync_gpu_uploads_and_reclaims() {
     assert!(assets.meshes_mut().unpin(mesh));
     assets.sync_gpu();
     assert!(assets.meshes().gpu(mesh).is_none());
-    assert!(assets.meshes().get(mesh).is_some());
+    assert!(assets.get_meshes(mesh).is_some());
 }
 
 /// 按需上传：有效句柄未 pin/未同步时，`ensure_meshes_gpu` 现场上传并置驻留；
@@ -650,7 +650,7 @@ fn asset_manager_ensure_gpu_uploads_on_demand() {
     };
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
-    let mut assets = crate::engine::render::AssetManager::new(device, queue);
+    let mut assets = crate::engine::render::AssetManager::new(device, queue, crate::engine::core::resource::MergedResourceSpace::new(std::env::temp_dir()));
     let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
 
     // 注册后既未 pin 也未 sync：ensure 应现场上传，且此后 gpu() 有值（不回收）。
@@ -676,7 +676,7 @@ fn asset_manager_pin_upload_preallocates() {
     };
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
-    let mut assets = crate::engine::render::AssetManager::new(device, queue);
+    let mut assets = crate::engine::render::AssetManager::new(device, queue, crate::engine::core::resource::MergedResourceSpace::new(std::env::temp_dir()));
     let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
 
     // pin 即上传：无需等 sync_gpu。

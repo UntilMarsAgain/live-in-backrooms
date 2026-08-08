@@ -268,6 +268,7 @@ impl Default for FreeCameraController {
 mod tests {
     use super::*;
     use crate::engine::AssetManager;
+    use crate::engine::MergedResourceSpace;
     use crate::engine::{Mesh, SceneObject, SceneObjectKind};
 
     /// 默认碰撞盒：半尺寸 (0.3, 0.9, 0.3)，以相机位置为中心。
@@ -281,7 +282,7 @@ mod tests {
     /// 障碍 AABB 即 [center-0.5, center+0.5]³。
     fn obstacle_scene(centers: &[Vec3]) -> (Scene, AssetManager) {
         let mut scene = Scene::new();
-        let mut assets = AssetManager::without_gpu();
+        let mut assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
         for center in centers {
             let key = assets.meshes_mut().register(Mesh::cube());
             scene.add_object(SceneObject::new(

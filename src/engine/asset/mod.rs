@@ -15,36 +15,68 @@
 //! 相机、动画、蒙皮暂不读取。
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use glam::{Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use gltf::scene::Transform as GltfTransform;
 
+use crate::engine::core::asset::{AssetLoader, Handle};
+use crate::engine::core::game_path::GamePath;
+use crate::engine::core::resource::MergedResourceSpace;
 use crate::engine::render::AssetManager;
-use super::core::asset::Handle;
 use super::core::material::Material;
 use super::core::mesh::{Mesh, Vertex};
 use super::core::texture::Texture;
 use super::core::transform::Transform;
 use super::scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};
 
-/// 从 glTF 文件加载场景：网格/贴图资产注册进 `assets`，返回带层级的 `Scene`。
+/// 从 glTF 文件加载场景（按游戏路径从合并资源空间读取）：
+/// 网格/贴图资产注册进 `assets`，返回带层级的 `Scene`。
 pub fn load_scene(
-    path: &Path,
+    path: &GamePath,
     assets: &mut AssetManager,
 ) -> Result<Scene> {
-    let (document, buffers, images) = gltf::import(path)?;
+    // 先从合并资源空间读字节（借用 assets.space() 在 read 后结束），
+    // 之后可安全地 &mut assets 注册资产。
+    let bytes = assets.space().read(path)?;
+    let (document, _buffers, _images, glb) =
+        parse_glb(&bytes).with_context(|| format!("解析 glTF 失败：{path}"))?;
     let scene = document.default_scene().context("glTF 文件没有默认场景")?;
 
-    let buffer_slices: Vec<&[u8]> = buffers.iter().map(|b| b.0.as_slice()).collect();
+    // 1. 解析结果进内存层 + 注册 File 条目（mesh / texture 各按数组索引，
+    //    与 [`GlbLoader`] 的 entries 顺序一致，可重载）。
+    let mesh_handles: Vec<Handle<Mesh>> = glb
+        .meshes
+        .iter()
+        .enumerate()
+        .map(|(i, _)| assets.meshes_mut().register_file(path.clone(), Box::new(i as u32)))
+        .collect();
+    let texture_handles: Vec<Handle<Texture>> = glb
+        .textures
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            assets
+                .textures_mut()
+                .register_file(path.clone(), Box::new(i as u32))
+        })
+        .collect();
+    assets.memory_insert(path.clone(), Box::new(glb));
+
+    // 2. document 网格 → primitive 句柄列表（mesh_handles 是全局 primitive 顺序）。
+    let mut mesh_keys: HashMap<usize, Vec<Handle<Mesh>>> = HashMap::new();
+    let mut offset = 0;
+    for mesh in document.meshes() {
+        let count = mesh.primitives().count();
+        mesh_keys.insert(mesh.index(), mesh_handles[offset..offset + count].to_vec());
+        offset += count;
+    }
+
+    // 3. 场景树构建：句柄已注册，Loader 只负责层级与材质引用。
     let mut loader = Loader {
-        assets,
-        buffers: &buffer_slices,
-        images: &images,
-        mesh_keys: HashMap::new(),
-        texture_keys: HashMap::new(),
+        mesh_keys,
+        texture_keys: texture_handles,
     };
 
     let mut out = Scene::new();
@@ -55,17 +87,14 @@ pub fn load_scene(
 }
 
 /// 加载过程中的临时状态。
-struct Loader<'a> {
-    assets: &'a mut AssetManager,
-    buffers: &'a [&'a [u8]],
-    images: &'a [gltf::image::Data],
+struct Loader {
     /// glTF 网格索引 → 已注册的句柄列表（每个 primitive 一个）。
     mesh_keys: HashMap<usize, Vec<Handle<Mesh>>>,
-    /// glTF 图片索引 → 已注册的句柄（按图去重）。
-    texture_keys: HashMap<usize, Handle<Texture>>,
+    /// glTF 图片索引 → 已注册的贴图句柄（File 条目，索引即 image 下标）。
+    texture_keys: Vec<Handle<Texture>>,
 }
 
-impl Loader<'_> {
+impl Loader {
     /// 递归加载 glTF 节点：每个节点一个容器物体，网格与子节点挂在它下面。
     fn load_node(
         &mut self,
@@ -131,30 +160,8 @@ impl Loader<'_> {
         Ok(())
     }
 
-    /// 注册一个 glTF 网格（按网格索引去重），返回每个 primitive 对应的
-    /// (句柄, Material) 列表。
-    fn register_mesh(&mut self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(Handle<Mesh>, Material)>> {
-        if self.mesh_keys.contains_key(&mesh.index()) {
-            // 材质属于 primitive，不随网格去重缓存，需要重新读取。
-            return self.materials_for(mesh);
-        }
-        let mut meshes = Vec::new();
-        let mut materials = Vec::new();
-        for primitive in mesh.primitives() {
-            meshes.push(self.mesh_from_primitive(&primitive)?);
-            materials.push(self.material_from_primitive(&primitive)?);
-        }
-        let keys: Vec<_> = meshes
-            .into_iter()
-            .map(|mesh| self.assets.meshes_mut().register(mesh))
-            .collect();
-        self.mesh_keys.insert(mesh.index(), keys.clone());
-        Ok(keys.into_iter().zip(materials).collect())
-    }
-
-    /// 重新读取一个网格所有 primitive 的材质（去重缓存只存了句柄）。
-    fn materials_for(&mut self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(Handle<Mesh>, Material)>> {
-        // 走与 register_mesh 相同的路径需要 &mut self（贴图注册），这里直接重新构造。
+    /// 取一个 glTF 网格各 primitive 的 (句柄, 材质) 列表（句柄在 load_scene 预注册）。
+    fn register_mesh(&self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(Handle<Mesh>, Material)>> {
         let keys = self
             .mesh_keys
             .get(&mesh.index())
@@ -168,50 +175,36 @@ impl Loader<'_> {
     }
 
     /// 读取 primitive 的材质：基础色因子 + 基础色贴图。
-    fn material_from_primitive(&mut self, primitive: &gltf::Primitive<'_>) -> Result<Material> {
+    fn material_from_primitive(&self, primitive: &gltf::Primitive<'_>) -> Result<Material> {
         // gltf::Material 总是存在（未指定时是默认材质，因子为 1）。
         let gltf_material = primitive.material();
         let pbr = gltf_material.pbr_metallic_roughness();
-        let base_color_texture = match pbr.base_color_texture() {
-            Some(info) => Some(self.register_texture(info.texture().source().index())?),
-            None => None,
-        };
-        let metallic_roughness_texture = match pbr.metallic_roughness_texture() {
-            Some(info) => Some(self.register_texture(info.texture().source().index())?),
-            None => None,
-        };
-        let normal_texture = match gltf_material.normal_texture() {
-            Some(info) => Some(self.register_texture(info.texture().source().index())?),
-            None => None,
+        // 贴图已在 load_scene 预注册为 File 条目，这里按 image 索引直接取句柄。
+        // 基础色/金属度粗糙度是 `Info`，法线是 `NormalTexture`，分开处理。
+        let tex_of_info =
+            |info: Option<gltf::texture::Info>| info.map(|i| self.texture_keys[i.texture().source().index()]);
+        let tex_of_normal = |info: Option<gltf::material::NormalTexture>| {
+            info.map(|i| self.texture_keys[i.texture().source().index()])
         };
         Ok(Material {
             base_color: pbr.base_color_factor(),
-            base_color_texture,
+            base_color_texture: tex_of_info(pbr.base_color_texture()),
             metallic_factor: pbr.metallic_factor(),
             roughness_factor: pbr.roughness_factor(),
-            metallic_roughness_texture,
-            normal_texture,
+            metallic_roughness_texture: tex_of_info(pbr.metallic_roughness_texture()),
+            normal_texture: tex_of_normal(gltf_material.normal_texture()),
         })
     }
+}
 
-    /// 注册 glTF 图片（按图片索引去重）。
-    fn register_texture(&mut self, image_index: usize) -> Result<Handle<Texture>> {
-        if let Some(key) = self.texture_keys.get(&image_index) {
-            return Ok(*key);
-        }
-        let image = self
-            .images
-            .get(image_index)
-            .with_context(|| format!("图片索引 {image_index} 不存在"))?;
-        let texture = gltf_image_to_texture(image)?;
-        let key = self.assets.textures_mut().register(texture);
-        self.texture_keys.insert(image_index, key);
-        Ok(key)
-    }
-
-    /// 把一个 primitive 转换成运行时 `Mesh`（顶点属性统一转 f32，索引转 u32）。
-    fn mesh_from_primitive(&self, primitive: &gltf::Primitive<'_>) -> Result<Mesh> {
-        let reader = primitive.reader(|buffer| self.buffers.get(buffer.index()).copied());
+/// 把一个 glTF primitive 转换成运行时 `Mesh`（顶点属性统一转 f32，索引转 u32）。
+///
+/// 从 [`Loader::mesh_from_primitive`] 提取，供场景加载与 [`GlbLoader`] 共用。
+fn mesh_from_primitive(
+    buffers: &[&[u8]],
+    primitive: &gltf::Primitive<'_>,
+) -> Result<Mesh> {
+        let reader = primitive.reader(|buffer| buffers.get(buffer.index()).copied());
         let Some(positions) = reader.read_positions() else {
             bail!("primitive 缺少 POSITION 属性");
         };
@@ -267,6 +260,95 @@ impl Loader<'_> {
         }
 
         Ok(Mesh::new(vertices, indices))
+    }
+
+/// glTF 文件解析结果：该文件的所有网格与贴图（不含场景树）。
+///
+/// 内存层按 `GamePath` 缓存一份，所有条目共享；mesh / texture 的
+/// `Extra` 分别是各自数组里的索引。
+#[derive(Debug)]
+pub struct GlbAssets {
+    pub meshes: Vec<Mesh>,
+    pub textures: Vec<Texture>,
+}
+
+/// 解析 glb 字节：返回文档（场景树）与解析出的网格/贴图资产。
+///
+/// [`GlbLoader`]（按文件加载）与 [`load_scene`]（场景加载）共用同一解析，
+/// 保证两类入口产出的条目顺序一致（`GlbAssets` 数组索引即 File 条目的 Extra）。
+fn parse_glb(
+    bytes: &[u8],
+) -> Result<(
+    gltf::Document,
+    Vec<gltf::buffer::Data>,
+    Vec<gltf::image::Data>,
+    GlbAssets,
+)> {
+    let (document, buffers, images) = gltf::import_slice(bytes)?;
+    let buffer_slices: Vec<&[u8]> = buffers.iter().map(|b| b.0.as_slice()).collect();
+    let meshes = document
+        .meshes()
+        .flat_map(|mesh| mesh.primitives())
+        .map(|primitive| mesh_from_primitive(&buffer_slices, &primitive))
+        .collect::<Result<Vec<_>>>()?;
+    let textures = images
+        .iter()
+        .map(gltf_image_to_texture)
+        .collect::<Result<Vec<_>>>()?;
+    Ok((document, buffers, images, GlbAssets { meshes, textures }))
+}
+
+/// glTF 加载器：一个 `.glb` 文件 → 多个 Mesh + 多个 Texture。
+///
+/// 实现 [`AssetLoader`] 的两个实例（mesh 与 texture）：文件解析一次、
+/// 结果进内存层，两类条目分别按各自数组索引定位。
+#[derive(Debug, Default)]
+pub struct GlbLoader;
+
+impl AssetLoader<Mesh> for GlbLoader {
+    type Extra = u32;
+    type Parsed = GlbAssets;
+
+    fn load(&self, space: &MergedResourceSpace, path: &GamePath) -> Result<GlbAssets> {
+        let bytes = space.read(path)?;
+        let (_, _, _, assets) = parse_glb(&bytes)
+            .with_context(|| format!("解析 glTF 失败：{path}"))?;
+        Ok(assets)
+    }
+
+    fn entries(&self, parsed: &GlbAssets) -> Vec<(Mesh, u32)> {
+        parsed
+            .meshes
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.clone(), i as u32))
+            .collect()
+    }
+
+    fn entry<'a>(&self, parsed: &'a GlbAssets, extra: &u32) -> Option<&'a Mesh> {
+        parsed.meshes.get(*extra as usize)
+    }
+}
+
+impl AssetLoader<Texture> for GlbLoader {
+    type Extra = u32;
+    type Parsed = GlbAssets;
+
+    fn load(&self, space: &MergedResourceSpace, path: &GamePath) -> Result<GlbAssets> {
+        <Self as AssetLoader<Mesh>>::load(self, space, path)
+    }
+
+    fn entries(&self, parsed: &GlbAssets) -> Vec<(Texture, u32)> {
+        parsed
+            .textures
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.clone(), i as u32))
+            .collect()
+    }
+
+    fn entry<'a>(&self, parsed: &'a GlbAssets, extra: &u32) -> Option<&'a Texture> {
+        parsed.textures.get(*extra as usize)
     }
 }
 

@@ -15,11 +15,13 @@
 #![allow(dead_code)]
 
 use std::marker::PhantomData;
+use std::any::Any;
 
 use wgpu::{Device, Queue};
 
+use super::game_path::GamePath;
 use super::mesh::Mesh;
-use super::texture::Texture;
+use super::resource::MergedResourceSpace;
 
 /// 资源句柄：世代编号 + 类型参数。
 #[derive(Debug)]
@@ -68,12 +70,63 @@ impl<T> Handle<T> {
 /// 资源驻留状态：内存（CPU 数据）与显存（GPU 表示）的生命周期。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetState {
-    /// 未加载：数据不在内存。
+    /// 已移除：句柄失效，数据与来源均不保留。
     Unloaded,
-    /// CPU 数据驻留内存；GPU 表示可存在、可回收。
+    /// 数据不在内存，但来源（`GamePath`）保留，可经 `ensure_loaded` 从磁盘重载。
+    DiskOnly,
+    /// CPU 数据驻留内存（内联数据或内存层文件结果）；GPU 表示可存在、可回收。
     Resident,
-    /// 要求 GPU 驻留：`sync_gpu` 确保已上传，禁止回收。
+    /// 要求 GPU 驻留：上传后禁止回收。
     Pinned,
+}
+
+/// 条目的 CPU 数据来源。
+///
+/// - [`DataSource::Inline`]：程序生成/直接给的（`Mesh::cube`），数据随注册表持有；
+/// - [`DataSource::File`]：来自文件解析结果（内存层），`extra` 是解析器自定义的
+///   定位信息（如 glb 的 primitive 索引、音频的音轨名）——具体类型只有解析器
+///   知道，取回时按 [`AssetLoader::Extra`] downcast。
+pub enum DataSource<T> {
+    Inline(T),
+    File {
+        source: GamePath,
+        extra: Box<dyn Any + Send + Sync>,
+    },
+}
+
+// `extra` 是类型擦除的 `Box<dyn Any>`，无法 derive Debug；手动实现只打印来源。
+impl<T: std::fmt::Debug> std::fmt::Debug for DataSource<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inline(data) => write!(f, "Inline({data:?})"),
+            Self::File { source, .. } => write!(f, "File({source})"),
+        }
+    }
+}
+
+/// 资源加载器：把游戏路径解析为若干 CPU 数据条目。
+///
+/// 解析粒度为**文件**（一个文件可能产出多条，如 glb 的多个网格）；`Extra` 是
+/// 条目在解析结果中的定位信息（类型由解析器自定，通过 `Box<dyn Any>` 存储），
+/// `Parsed` 是文件级解析结果（内存层按 `GamePath` 缓存一份，供所有条目共享）。
+pub trait AssetLoader<T> {
+    /// 条目定位信息类型（如 glb 的 primitive 索引、音频的音轨名）。
+    type Extra: Any + Send + Sync + PartialEq;
+    /// 文件解析结果类型（内存层以 `Box<dyn Any>` 存储，重载时整份复用）。
+    type Parsed: Any + Send + Sync;
+
+    /// 解析文件（从合并资源空间读取），返回文件级解析结果。
+    fn load(&self, space: &MergedResourceSpace, path: &GamePath)
+        -> anyhow::Result<Self::Parsed>;
+
+    /// 从解析结果产出条目（注册时调用：每条目一个 `(数据, 定位信息)`）。
+    fn entries(&self, parsed: &Self::Parsed) -> Vec<(T, Self::Extra)>;
+
+    /// 按定位信息从解析结果取回条目数据（重载/访问时调用）。
+    ///
+    /// 返回引用绑定 `parsed`（内存层数据），而非 `self`——这样调用方拿到的
+    /// 数据引用只借内存层，可以与上传器等其他字段的可变借用共存。
+    fn entry<'a>(&self, parsed: &'a Self::Parsed, extra: &Self::Extra) -> Option<&'a T>;
 }
 
 /// 上传器：把一类资源的 CPU 数据转换为 GPU 表示。
@@ -98,7 +151,8 @@ pub trait MeshSource {
 struct Slot<T, G> {
     generation: u32,
     state: AssetState,
-    cpu: Option<T>,
+    /// `None` = 已移除（世代保留，槽位可复用）。
+    data: Option<DataSource<T>>,
     gpu: Option<G>,
 }
 
@@ -123,13 +177,27 @@ impl<T, G> AssetRegistry<T, G> {
 
     /// 注册一份 CPU 数据，返回稳定句柄（世代防复用误用）。
     pub fn register(&mut self, data: T) -> Handle<T> {
+        self.register_with_source(DataSource::Inline(data))
+    }
+
+    /// 注册一个来自文件解析结果的条目（`source` 为文件路径，`extra` 为
+    /// 条目定位信息）。数据本体在内存层的文件结果中，注册表只记来源。
+    pub fn register_file(
+        &mut self,
+        source: GamePath,
+        extra: Box<dyn Any + Send + Sync>,
+    ) -> Handle<T> {
+        self.register_with_source(DataSource::File { source, extra })
+    }
+
+    fn register_with_source(&mut self, data: DataSource<T>) -> Handle<T> {
         let handle = if let Some(index) = self.free.pop() {
             let slot = self.slots[index as usize]
                 .as_mut()
                 .expect("free 列表必然指向存活槽位");
             // remove 时世代已递增，复用直接用当前世代（旧句柄已失效）。
             slot.state = AssetState::Resident;
-            slot.cpu = Some(data);
+            slot.data = Some(data);
             slot.gpu = None;
             Handle {
                 index,
@@ -141,7 +209,7 @@ impl<T, G> AssetRegistry<T, G> {
             self.slots.push(Some(Slot {
                 generation: 1,
                 state: AssetState::Resident,
-                cpu: Some(data),
+                data: Some(data),
                 gpu: None,
             }));
             Handle {
@@ -159,37 +227,13 @@ impl<T, G> AssetRegistry<T, G> {
         self.slot(handle).is_some()
     }
 
-    /// CPU 数据只读访问；句柄失效返回 `None`。
-    pub fn get(&self, handle: Handle<T>) -> Option<&T> {
-        self.slot(handle)?.cpu.as_ref()
-    }
-
-    /// CPU 数据可变访问（游戏逻辑更新数据用；`sync_gpu` 会重新上传）。
-    pub fn get_mut(&mut self, handle: Handle<T>) -> Option<&mut T> {
-        self.slot_mut(handle)?.cpu.as_mut()
+    /// 条目的数据来源（内联数据或文件引用）；句柄失效返回 `None`。
+    pub fn data_source(&self, handle: Handle<T>) -> Option<&DataSource<T>> {
+        self.slot(handle)?.data.as_ref()
     }
 
     /// GPU 表示访问（渲染器用）；未上传或句柄失效返回 `None`。
     pub fn gpu(&self, handle: Handle<T>) -> Option<&G> {
-        self.slot(handle)?.gpu.as_ref()
-    }
-
-    /// 立即确保 GPU 表示存在并标记驻留（与 [`Self::pin_upload`] 完全相同的
-    /// 路径）：句柄有效但未上传时**立即上传**，再置 `Pinned`；句柄无效
-    /// 返回 `None`。
-    ///
-    /// 渲染器绘制前的兜底：正常流程由调用方提前 [`Self::pin_upload`] 预上传，
-    /// 这里处理"忘了 pin"的遗漏，把静默跳过变成真上传。
-    pub fn ensure_gpu(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-        handle: Handle<T>,
-        uploader: &mut dyn GpuUploader<T, G>,
-    ) -> Option<&G> {
-        if !self.pin_upload(device, queue, handle, uploader) {
-            return None;
-        }
         self.slot(handle)?.gpu.as_ref()
     }
 
@@ -198,34 +242,20 @@ impl<T, G> AssetRegistry<T, G> {
         self.slot(handle).map(|s| s.state)
     }
 
+    /// 设置驻留状态（AssetManager 在内存加载/卸载时调用）。
+    pub fn set_state(&mut self, handle: Handle<T>, state: AssetState) -> bool {
+        let Some(slot) = self.slot_mut(handle) else {
+            return false;
+        };
+        slot.state = state;
+        true
+    }
+
     /// 标记 GPU 驻留（不立即上传；上传由 `sync_gpu` 或 [`Self::pin_upload`]）。
     pub fn pin(&mut self, handle: Handle<T>) -> bool {
         let Some(slot) = self.slot_mut(handle) else {
             return false;
         };
-        slot.state = AssetState::Pinned;
-        true
-    }
-
-    /// 立即确保 GPU 表示存在并标记驻留（预分配语义：与按需上传同一条路径，
-    /// 只是提前调用——`Vec::with_capacity` 式的优化，而非必选）。
-    ///
-    /// 句柄有效且未上传时先上传，再置 `Pinned`；句柄无效返回 `false`。
-    pub fn pin_upload(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-        handle: Handle<T>,
-        uploader: &mut dyn GpuUploader<T, G>,
-    ) -> bool {
-        let Some(slot) = self.slot_mut(handle) else {
-            return false;
-        };
-        if slot.gpu.is_none() {
-            if let Some(data) = &slot.cpu {
-                slot.gpu = Some(uploader.upload(device, queue, data));
-            }
-        }
         slot.state = AssetState::Pinned;
         true
     }
@@ -239,10 +269,10 @@ impl<T, G> AssetRegistry<T, G> {
         true
     }
 
-    /// 卸载：释放 CPU 数据与 GPU 表示，句柄从此失效。
-    pub fn remove(&mut self, handle: Handle<T>) -> Option<T> {
+    /// 卸载：释放 CPU 数据（DataSource）与 GPU 表示，句柄从此失效。
+    pub fn remove(&mut self, handle: Handle<T>) -> Option<DataSource<T>> {
         let slot = self.slot_mut(handle)?;
-        let data = slot.cpu.take();
+        let data = slot.data.take();
         slot.gpu = None; // drop GPU 资源，wgpu 延迟到队列空闲回收
         slot.state = AssetState::Unloaded;
         slot.generation += 1; // 旧句柄从此失效（世代不匹配）
@@ -260,7 +290,7 @@ impl<T, G> AssetRegistry<T, G> {
     pub fn len(&self) -> usize {
         self.slots
             .iter()
-            .filter(|s| s.as_ref().is_some_and(|slot| slot.cpu.is_some()))
+            .filter(|s| s.as_ref().is_some_and(|slot| slot.data.is_some()))
             .count()
     }
 
@@ -268,46 +298,26 @@ impl<T, G> AssetRegistry<T, G> {
         self.len() == 0
     }
 
-    /// 遍历所有存活资源（句柄 + CPU 数据）。
-    pub fn iter(&self) -> impl Iterator<Item = (Handle<T>, &T)> + '_ {
+    /// 遍历所有存活资源句柄（供 AssetManager 同步 GPU / 收集清单用）。
+    pub fn iter(&self) -> impl Iterator<Item = Handle<T>> + '_ {
         self.slots.iter().enumerate().filter_map(|(index, slot)| {
             let slot = slot.as_ref()?;
-            let data = slot.cpu.as_ref()?;
-            Some((
+            if slot.data.is_none() {
+                return None;
+            }
+            Some(
                 Handle {
                     index: index as u32,
                     generation: slot.generation,
                     _marker: PhantomData,
                 },
-                data,
-            ))
+            )
         })
     }
 
-    /// 同步 GPU：pinned 且未上传的上传；非 pinned 的回收 GPU 表示。
-    ///
-    /// `uploader` 由资源类型决定如何把 CPU 数据转成 GPU 表示；
-    /// 渲染器在合适时机调用资产管理器的 `sync_gpu`。
-    pub fn sync_gpu(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-        uploader: &mut dyn GpuUploader<T, G>,
-    ) {
-        for slot in self.slots.iter_mut().flatten() {
-            match slot.state {
-                AssetState::Pinned => {
-                    if slot.gpu.is_none() {
-                        if let Some(data) = &slot.cpu {
-                            slot.gpu = Some(uploader.upload(device, queue, data));
-                        }
-                    }
-                }
-                AssetState::Resident | AssetState::Unloaded => {
-                    slot.gpu = None;
-                }
-            }
-        }
+    /// GPU 表示的可变访问（AssetManager 上传/回收时写入）。
+    pub fn gpu_mut(&mut self, handle: Handle<T>) -> Option<&mut Option<G>> {
+        self.slot_mut(handle).map(|slot| &mut slot.gpu)
     }
 
     fn slot(&self, handle: Handle<T>) -> Option<&Slot<T, G>> {
@@ -338,15 +348,6 @@ impl<T> GpuUploader<T, ()> for NoGpuUploader {
     fn upload(&mut self, _device: &Device, _queue: &Queue, _data: &T) {}
 }
 
-/// 纯 CPU 数据资源示例（无 GPU 阶段）：关卡数据、AI 数据等走此模式。
-///
-/// 注册表 GPU 类型用 `()`、上传器用 [`NoGpuUploader`] 空函数占位；
-/// `sync_gpu` 对它是空操作（只遍历无上传）。
-#[derive(Debug, Clone)]
-pub struct LevelData {
-    pub name: String,
-}
-
 /// 声明资产管理器的资源类型集合。
 ///
 /// 每个条目：`字段名: CPU类型 => GPU类型, 上传器类型`。纯数据资源
@@ -355,13 +356,14 @@ pub struct LevelData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::core::texture::Texture;
 
     #[test]
     fn register_and_get_roundtrip() {
         let mut meshes: AssetRegistry<Mesh, ()> = AssetRegistry::new();
         let handle = meshes.register(Mesh::triangle());
         assert!(meshes.is_valid(handle));
-        assert_eq!(meshes.get(handle).map(|m| m.vertices().len()), Some(3));
+        assert!(matches!(meshes.data_source(handle), Some(DataSource::Inline(_))));
         assert_eq!(meshes.state(handle), Some(AssetState::Resident));
     }
 
@@ -373,7 +375,7 @@ mod tests {
         let removed = textures.remove(a);
         assert!(removed.is_some());
         assert!(!textures.is_valid(a));
-        assert!(textures.get(a).is_none());
+        assert!(textures.data_source(a).is_none());
 
         // 复用同一槽位注册新资源：旧句柄世代不匹配，仍无效。
         let b = textures.register(Texture::checkerboard(2, 1));
@@ -381,8 +383,8 @@ mod tests {
         assert_ne!(b.generation(), a.generation(), "世代应递增");
         assert!(!textures.is_valid(a));
         assert!(textures.is_valid(b));
-        assert!(textures.get(a).is_none());
-        assert!(textures.get(b).is_some());
+        assert!(textures.data_source(a).is_none());
+        assert!(textures.data_source(b).is_some());
     }
 
     /// pin/unpin 切换驻留状态；对失效句柄操作返回 false。
@@ -404,23 +406,13 @@ mod tests {
         assert!(!meshes.unpin(stale));
     }
 
-    /// get_mut 后数据可更新（GPU 侧由 sync_gpu 重新上传）。
-    #[test]
-    fn get_mut_updates_cpu_data() {
-        let mut meshes: AssetRegistry<Mesh, ()> = AssetRegistry::new();
-        let handle = meshes.register(Mesh::triangle());
-        let updated = meshes.get_mut(handle).expect("句柄有效");
-        *updated = Mesh::quad();
-        assert_eq!(meshes.get(handle).map(|m| m.vertices().len()), Some(4));
-    }
-
     /// 迭代器遍历全部存活资源。
     #[test]
     fn iter_yields_all_live_assets() {
         let mut textures: AssetRegistry<Texture, ()> = AssetRegistry::new();
         let a = textures.register(Texture::white());
         let b = textures.register(Texture::checkerboard(2, 1));
-        let keys: Vec<_> = textures.iter().map(|(k, _)| k).collect();
+        let keys: Vec<_> = textures.iter().collect();
         assert_eq!(keys.len(), 2);
         assert!(keys.contains(&a));
         assert!(keys.contains(&b));

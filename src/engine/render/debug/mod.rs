@@ -379,6 +379,7 @@ impl LineGizmos {
 mod tests {
     use super::*;
     use crate::engine::AssetManager;
+    use crate::engine::MergedResourceSpace;
     use crate::engine::Camera;
     use crate::engine::core::light::Light;
     use crate::engine::core::transform::Transform;
@@ -424,7 +425,7 @@ mod tests {
     #[test]
     fn collision_gizmos_wire_a_single_cube() {
         let mut scene = Scene::new();
-        let mut assets = AssetManager::without_gpu();
+        let mut assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
         let key = assets.meshes_mut().register(crate::engine::Mesh::cube());
         scene.add_object(SceneObject::new(
             SceneObjectKind::Mesh(key),
@@ -457,7 +458,7 @@ mod tests {
     #[test]
     fn collision_gizmos_skip_non_mesh_nodes() {
         let mut scene = Scene::new();
-        let assets = AssetManager::without_gpu();
+        let assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
         scene.add_object(SceneObject::new(
             SceneObjectKind::Empty,
             Transform::IDENTITY,

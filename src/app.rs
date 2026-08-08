@@ -3,7 +3,6 @@
 //! 这里持有窗口与渲染器等子系统，把 winit 事件翻译成上层逻辑。
 //! 后续的输入、游戏逻辑、场景管理都可以从这里接入。
 
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -14,8 +13,8 @@ use winit::window::Window;
 
 use crate::engine::asset;
 use crate::engine::{
-    AssetManager, Camera, CameraAction, DisplayHandle, Environment, FreeCameraController, Handle,
-    InputController, Mesh, Renderer, Scene, Texture,
+    AssetManager, Camera, CameraAction, DisplayHandle, Environment, FreeCameraController, GamePath,
+    Handle, InputController, MergedResourceSpace, Mesh, Renderer, Scene, Texture,
 };
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
@@ -46,6 +45,7 @@ impl App {
         let assets = AssetManager::new(
             std::sync::Arc::new(renderer.device()),
             std::sync::Arc::new(renderer.queue().clone()),
+            MergedResourceSpace::new("game-data/vanilla/".into()),
         );
         let mut app = Self {
             window,
@@ -83,43 +83,56 @@ impl App {
                 .with_environment(env.clone())
                 .with_environment_intensity(1.0);
         }
-        let test_glb = Path::new("test/test.glb");
-        if test_glb.is_file() {
-            match asset::load_scene(test_glb, &mut self.assets) {
-                Ok(gltf_scene) => {
-                    // 把测试模型放大 5 倍（等比），并挪到演示物体右前方，
-                    // 避免和原点处的三角形重叠。
-                    for key in scene.merge(&gltf_scene) {
-                        if let Some(object) = scene.object_mut(key) {
-                            object.transform.scale *= 5.0;
-                            object.transform.position += glam::Vec3::new(1.8, 0.0, -1.2);
-                        }
+        // 通过游戏路径加载测试模型：走合并资源空间 → 解析 → 资产库。
+        let test_path: GamePath = match "test:test.glb".parse() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("测试模型路径无效：{e}");
+                return;
+            }
+        };
+        // 场景加载（节点摆放/材质）走 GamePath 一次解析，并进 demo。
+        // "路径 → 句柄"的 File 条目链路（load_meshes/load_textures）由测试覆盖。
+        match asset::load_scene(&test_path, &mut self.assets) {
+            Ok(gltf_scene) => {
+                // 把测试模型放大 5 倍（等比），并挪到演示物体右前方，
+                // 避免和原点处的三角形重叠。
+                for key in scene.merge(&gltf_scene) {
+                    if let Some(object) = scene.object_mut(key) {
+                        object.transform.scale *= 5.0;
+                        object.transform.position += glam::Vec3::new(1.8, 0.0, -1.2);
                     }
                 }
-                Err(e) => eprintln!("加载 {} 失败：{e}", test_glb.display()),
             }
+            Err(e) => eprintln!("加载 {} 场景失败：{e}", test_path),
         }
         self.load_scene(scene);
     }
 
-    /// 加载环境贴图：`BACKROOMS_ENV` 环境变量优先，否则尝试 `test/test.hdr`。
-    /// 按文件内容自动识别 HDR / LDR（PNG/JPEG 等）。
+    /// 加载环境贴图：`BACKROOMS_ENV`（GamePath 字符串）优先，否则 `test:test.hdr`。
+    /// 经合并资源空间读取，按内容自动识别 HDR / LDR。
     fn load_example_environment(&mut self) -> Option<Arc<Environment>> {
-        let path = std::env::var_os("BACKROOMS_ENV")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("test/test.hdr"));
-        match Environment::from_file(&path) {
+        let path: GamePath = std::env::var("BACKROOMS_ENV")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| "test:test.hdr".parse().expect("内置环境路径合法"));
+        let bytes = match self.assets.space().read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("环境贴图读取失败 {path}：{e}");
+                return None;
+            }
+        };
+        match Environment::from_bytes(&bytes) {
             Ok(env) => {
                 eprintln!(
-                    "环境贴图 {} 加载成功（{}×{}）",
-                    path.display(),
-                    env.width,
-                    env.height
+                    "环境贴图 {path} 加载成功（{}×{}）",
+                    env.width, env.height
                 );
                 Some(Arc::new(env))
             }
             Err(e) => {
-                eprintln!("环境贴图加载失败 {}：{e}", path.display());
+                eprintln!("环境贴图解码失败 {path}：{e}");
                 None
             }
         }
@@ -127,7 +140,11 @@ impl App {
 
     /// 尝试从 glTF 文件加载场景；成功返回 `true`，失败打印原因并返回 `false`。
     #[allow(dead_code)] // 预留：BACKROOMS_GLTF / game-data 场景加载路径，demo 阶段未启用
-    fn try_load_gltf(&mut self, path: &Path, environment: Option<&Arc<Environment>>) -> bool {
+    fn try_load_gltf(
+        &mut self,
+        path: &GamePath,
+        environment: Option<&Arc<Environment>>,
+    ) -> bool {
         match asset::load_scene(path, &mut self.assets) {
             Ok(scene) => {
                 let scene = match environment {
@@ -138,7 +155,7 @@ impl App {
                 true
             }
             Err(e) => {
-                eprintln!("加载 glTF {} 失败：{e}", path.display());
+                eprintln!("加载 glTF {path} 失败：{e}");
                 false
             }
         }

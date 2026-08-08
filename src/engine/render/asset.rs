@@ -4,16 +4,21 @@
 //! 上传器等）从 core 独立出来，依赖方向 render → core：
 //! core 只保留抽象（[`AssetRegistry`]、[`Handle`]、[`GpuUploader`] trait）。
 
+use std::any::Any;
+use std::collections::HashMap;
 #[allow(unused_imports)] // Arc 由宏展开后的 AssetManager 使用，静态分析误报
 use std::sync::Arc;
 
 use paste::paste;
 use wgpu::{Device, Queue};
 
+use crate::engine::asset::GlbLoader;
 use crate::engine::core::asset::{
-    AssetRegistry, GpuUploader, Handle, LevelData, MeshSource, NoGpuUploader,
+    AssetLoader, AssetRegistry, AssetState, DataSource, GpuUploader, Handle, MeshSource,
 };
+use crate::engine::core::game_path::GamePath;
 use crate::engine::core::mesh::Mesh;
+use crate::engine::core::resource::MergedResourceSpace;
 use crate::engine::core::texture::Texture;
 
 /// 网格的 GPU 表示：每网格独立的顶点/索引缓冲。
@@ -109,48 +114,112 @@ impl GpuUploader<Texture, TextureGpu> for TextureUploader {
     }
 }
 
+/// 无文件加载的占位加载器（程序生成资产用）：`load` 必然失败。
+///
+/// mesh/texture 目前走程序注册（glTF 加载器尚未接 GamePath），下一步接入
+/// GlbLoader（glTF 复合加载：一个文件产出网格 + 贴图 + 场景）后替换。
+#[derive(Debug, Default)]
+pub struct NoLoader;
+
+impl<T> AssetLoader<T> for NoLoader {
+    type Extra = ();
+    type Parsed = ();
+
+    fn load(&self, _space: &MergedResourceSpace, _path: &GamePath) -> anyhow::Result<()> {
+        anyhow::bail!("该资源类型尚不支持从文件加载（加载器未接入）");
+    }
+
+    fn entries(&self, _parsed: &()) -> Vec<(T, ())> {
+        Vec::new()
+    }
+
+    fn entry<'a>(&self, _parsed: &'a (), _extra: &()) -> Option<&'a T> {
+        None
+    }
+}
+
+/// 内存层：文件级解析结果（按 `GamePath` 缓存一份，供该文件所有条目共享）。
+///
+/// 值类型由各加载器的 `Parsed` 决定（`Box<dyn Any>` 擦除），取回时 downcast。
+/// 内存卸载 = 从这里移除对应文件——"磁盘 → 内存 → 显存"三级驻留的内存层。
+#[derive(Default)]
+pub struct MemoryLayer {
+    files: HashMap<GamePath, Box<dyn Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for MemoryLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MemoryLayer {{ files: {} }}", self.files.len())
+    }
+}
+
+impl MemoryLayer {
+    fn insert(&mut self, source: GamePath, parsed: Box<dyn Any + Send + Sync>) {
+        self.files.insert(source, parsed);
+    }
+
+    fn get(&self, source: &GamePath) -> Option<&(dyn Any + Send + Sync)> {
+        self.files.get(source).map(|b| b.as_ref())
+    }
+
+    fn remove(&mut self, source: &GamePath) -> Option<Box<dyn Any + Send + Sync>> {
+        self.files.remove(source)
+    }
+}
+
 /// 声明资产管理器的资源类型集合。
 ///
-/// 每个条目：`字段名: CPU类型 => GPU类型, 上传器类型`。纯数据资源
-/// （关卡、AI 等）用 `()` 作 GPU 类型、上传器给一个空函数占位
-/// （[`NoGpuUploader`]）；状态机没有显存阶段。新增资源类型 = 加一行。
+/// 每个条目：`字段名: CPU类型 => GPU类型, 上传器类型, 加载器类型`。
+/// 加载器实现 [`AssetLoader`]（从 `GamePath` 解析 CPU 数据）；程序生成资产
+/// 用 [`NoLoader`] 占位。新增资源类型 = 加一行。
 macro_rules! asset_types {
-    ($($field:ident: $ty:ident => $gpu:ty, $uploader:ident),* $(,)?) => {
+    ($($field:ident: $ty:ident => $gpu:ty, $uploader:ident, $loader:ident),* $(,)?) => {
         paste! {
-            /// 统一资产管理器：持有设备/队列与各类型注册表、上传器。
+            /// 统一资产管理器：持有设备/队列/合并资源空间/内存层与各类型
+            /// 注册表、上传器、加载器。
             ///
-            /// 游戏逻辑侧：注册/查询/pin/unpin（见各注册表方法）；
-            /// 渲染器侧：`sync_gpu` / `ensure_*_gpu` 后按句柄取 GPU 数据。
+            /// 三级驻留：磁盘（`load_*` 按 `GamePath` 读取）→ 内存（内存层
+            /// 文件结果，`unload_*_memory` 卸载）→ 显存（`pin` / `sync_gpu`）。
             #[derive(Debug)]
             pub struct AssetManager {
                 device: Option<Arc<Device>>,
                 queue: Option<Arc<Queue>>,
+                space: MergedResourceSpace,
+                memory: MemoryLayer,
                 $(
                     $field: AssetRegistry<$ty, $gpu>,
                     [<$field _uploader>]: $uploader,
+                    [<$field _loader>]: $loader,
                 )*
             }
 
-            // 宏为每种资源全量生成 ensure/pin 便捷方法，部分在调用方
-            // 未覆盖前属于公共 API 预留，暂时保留。
+            // 宏为每种资源全量生成 load/get/ensure/unload/pin 方法，
+            // 部分在调用方未覆盖前属于公共 API 预留，暂时保留。
             #[allow(dead_code)]
             impl AssetManager {
-                /// 新建管理器；`device` + `queue` 用于创建/管理 GPU 资源
-                /// （wgpu 的 Device/Queue 都是内部引用计数，clone 廉价）。
-                pub fn new(device: Arc<Device>, queue: Arc<Queue>) -> Self {
+                /// 新建管理器；`device` + `queue` 用于 GPU，`space` 是合并资源空间。
+                pub fn new(
+                    device: Arc<Device>,
+                    queue: Arc<Queue>,
+                    space: MergedResourceSpace,
+                ) -> Self {
                     Self {
                         device: Some(device),
                         queue: Some(queue),
-                        $( $field: AssetRegistry::new(), [<$field _uploader>]: $uploader::default(), )*
+                        space,
+                        memory: MemoryLayer::default(),
+                        $( $field: AssetRegistry::new(), [<$field _uploader>]: $uploader::default(), [<$field _loader>]: $loader::default(), )*
                     }
                 }
 
                 /// 无 GPU 环境（纯数据/碰撞测试）用：`sync_gpu` 自动跳过。
-                pub fn without_gpu() -> Self {
+                pub fn without_gpu(space: MergedResourceSpace) -> Self {
                     Self {
                         device: None,
                         queue: None,
-                        $( $field: AssetRegistry::new(), [<$field _uploader>]: $uploader::default(), )*
+                        space,
+                        memory: MemoryLayer::default(),
+                        $( $field: AssetRegistry::new(), [<$field _uploader>]: $uploader::default(), [<$field _loader>]: $loader::default(), )*
                     }
                 }
 
@@ -159,15 +228,52 @@ macro_rules! asset_types {
                     self.device.as_deref()
                 }
 
+                /// 合并资源空间（`GamePath` → 文件流）。
+                pub fn space(&self) -> &MergedResourceSpace {
+                    &self.space
+                }
+
                 /// 同步所有注册表的 GPU 资源：pinned 且未上传的上传，
-                /// 非 pinned 的回收。渲染器每帧或脏时调用。
+                /// 非 pinned 的回收。数据从内存层/内联来源取。
                 pub fn sync_gpu(&mut self) {
                     let (Some(device), Some(queue)) = (&self.device, &self.queue) else {
                         return; // 无 GPU 构造：纯 CPU 使用，不上传
                     };
                     $(
-                        self.$field
-                            .sync_gpu(device, queue, &mut self.[<$field _uploader>]);
+                        let handles: Vec<_> = self.$field.iter().collect();
+                        for handle in handles {
+                            match self.$field.state(handle) {
+                                Some(AssetState::Pinned) => {
+                                    if self.$field.gpu(handle).is_none() {
+                                        // 内联取数据（借 self 字段，可与 uploader 可变借用共存）。
+                                        let data = match self.$field.data_source(handle) {
+                                            Some(DataSource::Inline(data)) => Some(data),
+                                            Some(DataSource::File { source, extra }) => {
+                                                let parsed = self.memory.get(source)
+                                                    .expect("File 条目的 source 应在内存层（先 ensure_loaded）");
+                                                let parsed = parsed
+                                                    .downcast_ref::<<$loader as AssetLoader<$ty>>::Parsed>()
+                                                    .expect("内存层解析结果类型与加载器 Parsed 不匹配（解析器 bug）");
+                                                let extra = extra
+                                                    .downcast_ref::<<$loader as AssetLoader<$ty>>::Extra>()
+                                                    .expect("extra 类型与加载器 Extra 不匹配（解析器 bug）");
+                                                self.[<$field _loader>].entry(parsed, extra)
+                                            }
+                                            None => None,
+                                        };
+                                        if let Some(data) = data {
+                                            let gpu = self.[<$field _uploader>]
+                                                .upload(device, queue, data);
+                                            *self.$field.gpu_mut(handle).expect("存活") = Some(gpu);
+                                        }
+                                    }
+                                }
+                                Some(AssetState::Resident) | Some(AssetState::DiskOnly) => {
+                                    *self.$field.gpu_mut(handle).expect("存活") = None;
+                                }
+                                _ => {}
+                            }
+                        }
                     )*
                 }
 
@@ -182,71 +288,203 @@ macro_rules! asset_types {
                         &mut self.$field
                     }
 
-                    /// 按需确保该类型资源已上传（渲染器绘制前的兜底）；
-                    /// 句柄无效返回 `None`。
+                    /// 取条目 CPU 数据：内联直接返回；文件条目从内存层按定位信息取。
+                    ///
+                    /// 文件条目数据不在内存层（被卸载）时返回 `None`，调用方应先
+                    /// `ensure_*_loaded`；downcast 失败视为解析器 bug（panic 暴露）。
+                    pub fn [<get_ $field>](&self, handle: Handle<$ty>) -> Option<&$ty> {
+                        match self.$field.data_source(handle)? {
+                            DataSource::Inline(data) => Some(data),
+                            DataSource::File { source, extra } => {
+                                let parsed = self.memory.get(source)?;
+                                let parsed = parsed
+                                    .downcast_ref::<<$loader as AssetLoader<$ty>>::Parsed>()
+                                    .expect("内存层解析结果类型与加载器 Parsed 不匹配（解析器 bug）");
+                                let extra = extra
+                                    .downcast_ref::<<$loader as AssetLoader<$ty>>::Extra>()
+                                    .expect("extra 类型与加载器 Extra 不匹配（解析器 bug）");
+                                self.[<$field _loader>].entry(parsed, extra)
+                            }
+                        }
+                    }
+
+                    /// 从合并资源空间按 `GamePath` 加载：解析一次，文件结果进内存层，
+                    /// 每个条目注册为 `File` 来源的句柄并返回。
+                    pub fn [<load_ $field>](
+                        &mut self,
+                        path: &GamePath,
+                    ) -> anyhow::Result<Vec<Handle<$ty>>> {
+                        let parsed: <$loader as AssetLoader<$ty>>::Parsed =
+                            <$loader as AssetLoader<$ty>>::load(
+                                &self.[<$field _loader>],
+                                self.space(),
+                                path,
+                            )?;
+                        let entries: Vec<($ty, <$loader as AssetLoader<$ty>>::Extra)> =
+                            self.[<$field _loader>].entries(&parsed);
+                        self.memory.insert(path.clone(), Box::new(parsed));
+                        Ok(entries
+                            .into_iter()
+                            // 数据已在内存层（文件结果），注册只记来源与定位。
+                            .map(|(_data, extra)| {
+                                self.$field
+                                    .register_file(path.clone(), Box::new(extra))
+                            })
+                            .collect())
+                    }
+
+                    /// 确保条目 CPU 数据在内存：内联常驻；文件条目数据不在内存层时
+                    /// 重新解析（`ensure_gpu` 会递归调用这里，形成"显存→内存→磁盘"）。
+                    pub fn [<ensure_ $field _loaded>](
+                        &mut self,
+                        handle: Handle<$ty>,
+                    ) -> Option<()> {
+                        match self.$field.data_source(handle)? {
+                            DataSource::Inline(_) => Some(()),
+                            DataSource::File { source, .. } => {
+                                if self.memory.get(source).is_none() {
+                                    let parsed: <$loader as AssetLoader<$ty>>::Parsed =
+                                        <$loader as AssetLoader<$ty>>::load(
+                                            &self.[<$field _loader>],
+                                            self.space(),
+                                            source,
+                                        )
+                                        .ok()?;
+                                    self.memory.insert(source.clone(), Box::new(parsed));
+                                }
+                                self.$field.set_state(handle, AssetState::Resident);
+                                Some(())
+                            }
+                        }
+                    }
+
+                    /// 内存卸载（按文件）：释放内存层文件结果，该文件所有条目置
+                    /// `DiskOnly`，GPU 一并回收（上传无源）。句柄仍有效，可重载。
+                    pub fn [<unload_ $field _memory>](&mut self, source: &GamePath) {
+                        self.memory.remove(source);
+                        let handles: Vec<_> = self.$field.iter().collect();
+                        for handle in handles {
+                            if matches!(self.$field.data_source(handle),
+                                Some(DataSource::File { source: s, .. }) if s == source)
+                            {
+                                *self.$field.gpu_mut(handle).expect("存活") = None;
+                                self.$field.set_state(handle, AssetState::DiskOnly);
+                            }
+                        }
+                    }
+
+                    /// 按需确保该类型资源已上传（渲染器绘制前的兜底）：数据不在内存
+                    /// 先递归 `ensure_*_loaded` 回磁盘，再上传并置 `Pinned`。
                     pub fn [<ensure_ $field _gpu>](
                         &mut self,
                         handle: Handle<$ty>,
                     ) -> Option<&$gpu> {
+                        // 先确保内存数据（可能回磁盘重载），再取设备引用。
+                        self.[<ensure_ $field _loaded>](handle)?;
                         let (device, queue) = (self.device.as_ref()?, self.queue.as_ref()?);
-                        self.$field.ensure_gpu(
-                            device,
-                            queue,
-                            handle,
-                            &mut self.[<$field _uploader>],
-                        )
+                        if self.$field.gpu(handle).is_none() {
+                            let data = match self.$field.data_source(handle) {
+                                Some(DataSource::Inline(data)) => Some(data),
+                                Some(DataSource::File { source, extra }) => {
+                                    let parsed = self.memory.get(source)
+                                        .expect("File 条目的 source 应在内存层（先 ensure_loaded）");
+                                    let parsed = parsed
+                                        .downcast_ref::<<$loader as AssetLoader<$ty>>::Parsed>()
+                                        .expect("内存层解析结果类型与加载器 Parsed 不匹配（解析器 bug）");
+                                    let extra = extra
+                                        .downcast_ref::<<$loader as AssetLoader<$ty>>::Extra>()
+                                        .expect("extra 类型与加载器 Extra 不匹配（解析器 bug）");
+                                    self.[<$field _loader>].entry(parsed, extra)
+                                }
+                                None => None,
+                            };
+                            let data = data?;
+                            let gpu = self.[<$field _uploader>].upload(device, queue, data);
+                            *self.$field.gpu_mut(handle).expect("存活") = Some(gpu);
+                        }
+                        self.$field.pin(handle);
+                        self.$field.gpu(handle)
                     }
 
-                    /// 预上传并驻留该类型资源（预分配语义）；无 GPU 构造
-                    /// 只标记驻留状态。
+                    /// 预上传并驻留该类型资源（预分配语义）；无 GPU 构造只标记驻留状态。
                     pub fn [<pin_ $field>](&mut self, handle: Handle<$ty>) -> bool {
-                        match (&self.device, &self.queue) {
-                            (Some(device), Some(queue)) => self.$field.pin_upload(
-                                device,
-                                queue,
-                                handle,
-                                &mut self.[<$field _uploader>],
-                            ),
-                            _ => self.$field.pin(handle),
+                        if self.$field.state(handle).is_none() {
+                            return false;
                         }
+                        if self.[<ensure_ $field _loaded>](handle).is_none() {
+                            return false;
+                        }
+                        if let (Some(device), Some(queue)) = (&self.device, &self.queue) {
+                            if self.$field.gpu(handle).is_none() {
+                                let data = match self.$field.data_source(handle) {
+                                    Some(DataSource::Inline(data)) => Some(data),
+                                    Some(DataSource::File { source, extra }) => {
+                                        let parsed = self.memory.get(source)
+                                            .expect("File 条目的 source 应在内存层（先 ensure_loaded）");
+                                        let parsed = parsed
+                                            .downcast_ref::<<$loader as AssetLoader<$ty>>::Parsed>()
+                                            .expect("内存层解析结果类型与加载器 Parsed 不匹配（解析器 bug）");
+                                        let extra = extra
+                                            .downcast_ref::<<$loader as AssetLoader<$ty>>::Extra>()
+                                            .expect("extra 类型与加载器 Extra 不匹配（解析器 bug）");
+                                        self.[<$field _loader>].entry(parsed, extra)
+                                    }
+                                    None => None,
+                                };
+                                if let Some(data) = data {
+                                    let gpu = self.[<$field _uploader>]
+                                        .upload(device, queue, data);
+                                    *self.$field.gpu_mut(handle).expect("存活") = Some(gpu);
+                                }
+                            }
+                        }
+                        self.$field.pin(handle)
                     }
                 )*
             }
         }
     };
+
 }
 
 asset_types! {
-    meshes: Mesh => MeshGpu, MeshUploader,
-    textures: Texture => TextureGpu, TextureUploader,
-    levels: LevelData => (), NoGpuUploader,
+    meshes: Mesh => MeshGpu, MeshUploader, GlbLoader,
+    textures: Texture => TextureGpu, TextureUploader, GlbLoader,
 }
 
 /// 资产管理器实现网格数据源：场景碰撞/调试按句柄取 CPU 网格。
 impl MeshSource for AssetManager {
     fn mesh(&self, handle: Handle<Mesh>) -> Option<&Mesh> {
-        self.meshes().get(handle)
+        self.get_meshes(handle)
+    }
+}
+
+impl AssetManager {
+    /// 把文件解析结果放入内存层（`GamePath` → 文件级数据，供 File 条目定位）。
+    ///
+    /// 加载器（如 [`GlbLoader`]）与 `load_scene` 共用：先注册 File 条目，
+    /// 再把解析结果整体放入内存层。
+    pub fn memory_insert(&mut self, source: GamePath, parsed: Box<dyn Any + Send + Sync>) {
+        self.memory.insert(source, parsed);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::core::asset::AssetState;
 
-    /// 纯 CPU 资源（NoGpuUploader）：注册/查询/移除正常，不涉及 GPU。
+    /// 网格内联注册（程序生成资产路径）：data_source 与移除正常。
     #[test]
-    fn pure_cpu_asset_registers_and_queries() {
-        let mut assets = AssetManager::without_gpu();
-        let handle = assets
-            .levels_mut()
-            .register(LevelData { name: "level-0".into() });
-        assert_eq!(
-            assets.levels().get(handle).map(|l| l.name.as_str()),
-            Some("level-0")
-        );
-        assert_eq!(assets.levels().state(handle), Some(AssetState::Resident));
-        assert!(assets.levels_mut().remove(handle).is_some());
-        assert!(assets.levels().get(handle).is_none());
+    fn inline_mesh_registers_and_removes() {
+        let space = MergedResourceSpace::new(std::env::temp_dir());
+        let mut assets = AssetManager::without_gpu(space);
+        let handle = assets.meshes_mut().register(Mesh::cube());
+        assert!(matches!(
+            assets.meshes().data_source(handle),
+            Some(DataSource::Inline(_))
+        ));
+        assert_eq!(assets.meshes().state(handle), Some(AssetState::Resident));
+        assert!(assets.meshes_mut().remove(handle).is_some());
+        assert!(assets.meshes().data_source(handle).is_none());
     }
 }

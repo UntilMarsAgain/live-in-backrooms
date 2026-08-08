@@ -25,7 +25,7 @@ pub mod scene;
 pub use core::aabb::Aabb;
 #[allow(unused_imports)]
 pub use core::asset::{
-    AssetRegistry, AssetState, GpuUploader, Handle, LevelData, MeshSource, NoGpuUploader,
+    AssetRegistry, AssetState, GpuUploader, Handle, MeshSource, NoGpuUploader,
 };
 #[allow(unused_imports)]
 pub use core::camera::Camera;

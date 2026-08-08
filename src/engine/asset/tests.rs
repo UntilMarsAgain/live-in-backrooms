@@ -80,15 +80,20 @@ fn load_triangle_glb() {
     let bin = triangle_bin();
     assert_eq!(bin.len(), 138);
     let bytes = glb_bytes(TRIANGLE_JSON, &bin);
-    let path = std::env::temp_dir().join("live-in-backrooms-test-triangle.glb");
-    std::fs::write(&path, &bytes).expect("写测试文件");
+    let dir = std::env::temp_dir().join("lib-test-triangle");
+    let ns = dir.join("test");
+    std::fs::create_dir_all(&ns).expect("创建测试目录");
+    std::fs::write(ns.join("triangle.glb"), &bytes).expect("写测试文件");
 
-    let mut assets = AssetManager::without_gpu();
+    let space = crate::engine::MergedResourceSpace::new(dir);
+    let path: crate::engine::GamePath = "test:triangle.glb".parse().expect("合法路径");
+    let mut assets = AssetManager::without_gpu(space);
     let scene = load_scene(&path, &mut assets).expect("应能加载测试三角形");
 
     // 网格：3 个顶点、3 个索引，属性值原样转换。
     assert_eq!(assets.meshes().len(), 1);
-    let mesh = assets.meshes().iter().next().expect("注册了 1 个网格").1;
+    let handle = assets.meshes().iter().next().expect("注册了 1 个网格");
+    let mesh = assets.get_meshes(handle).expect("数据在内存层");
     assert_eq!(mesh.vertices().len(), 3);
     assert_eq!(mesh.indices(), &[0, 1, 2]);
     assert_eq!(mesh.vertices()[0].position, [-0.5, -0.5, 0.0]);
@@ -117,13 +122,14 @@ fn load_triangle_glb() {
 
 #[test]
 fn load_repo_test_glb() {
-    let path = Path::new("test/test.glb");
-    if !path.is_file() {
+    let space = crate::engine::MergedResourceSpace::new("game-data/vanilla/".into());
+    let path: crate::engine::GamePath = "test:test.glb".parse().expect("合法路径");
+    if !space.exists(&path) {
         eprintln!("跳过：test/test.glb 未准备（测试数据不入库）");
         return;
     }
-    let mut assets = AssetManager::without_gpu();
-    let scene = load_scene(path, &mut assets).expect("test/test.glb 应能加载");
+    let mut assets = AssetManager::without_gpu(space);
+    let scene = load_scene(&path, &mut assets).expect("test/test.glb 应能加载");
     assert!(!assets.meshes().is_empty());
     assert!(!assets.textures().is_empty(), "PBR 样例应带基础色贴图");
     assert!(scene.object_count() > 0);
