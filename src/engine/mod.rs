@@ -34,11 +34,15 @@ pub use core::camera::CameraAction;
 #[allow(unused_imports)]
 pub use core::environment::Environment;
 #[allow(unused_imports)]
+pub use core::game_path::GamePath;
+#[allow(unused_imports)]
 pub use core::light::Light;
 #[allow(unused_imports)]
 pub use core::material::Material;
 #[allow(unused_imports)]
 pub use core::mesh::{Mesh, Vertex};
+#[allow(unused_imports)]
+pub use core::resource::MergedResourceSpace;
 #[allow(unused_imports)]
 pub use core::texture::Texture;
 #[allow(unused_imports)]
