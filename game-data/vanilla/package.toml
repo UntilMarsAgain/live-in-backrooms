@@ -1,7 +1,3 @@
-name = "vanilla"
-description = "The vanilla Live in Backrooms."
-version = "0.1.0" # 这是指package本身的版本，对于vanilla，它始终和游戏版本相同
-
-# 依赖解析方式同Cargo
-# 对于游戏版本的锁定，可直接在dependencies表中要求特定版本的vanilla包。
-[dependencies]
+id = "vanilla"
+name = "原版内容"
+version = "0.1.0"

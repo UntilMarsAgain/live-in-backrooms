@@ -14,7 +14,7 @@ use winit::window::Window;
 use crate::engine::asset;
 use crate::engine::{
     AssetManager, Camera, CameraAction, DisplayHandle, Environment, FreeCameraController, GamePath,
-    Handle, InputController, MergedResourceSpace, Mesh, Renderer, Scene, Texture,
+    Handle, InputController, MergedResourceSpace, Mesh, PackConfig, Renderer, Scene, Texture,
 };
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
@@ -42,10 +42,15 @@ impl App {
             FreeCameraController::new(show_light_debug.clone(), show_collision_debug.clone()),
         );
         let renderer = Renderer::new(&window, display)?;
+        // 启动主流程：扫描有效包 → 生成/更新 packs.toml 顺序（环 → 报错），
+        // 再按 order 校验依赖与冲突（不满足 → 报错退出）。
+        let (pack_config, packages) = PackConfig::discover_and_update("game-data")?;
+        pack_config.validate(&packages)?;
+        eprintln!("资源包加载顺序：{}", pack_config.order().join(" → "));
         let assets = AssetManager::new(
             std::sync::Arc::new(renderer.device()),
             std::sync::Arc::new(renderer.queue().clone()),
-            MergedResourceSpace::new("game-data/vanilla/".into()),
+            MergedResourceSpace::from_pack_roots(pack_config.pack_roots("game-data")),
         );
         let mut app = Self {
             window,

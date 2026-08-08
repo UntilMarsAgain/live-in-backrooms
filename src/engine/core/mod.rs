@@ -5,11 +5,13 @@
 pub mod aabb;
 pub mod asset;
 pub mod camera;
+pub mod config;
 pub mod environment;
 pub mod game_path;
 pub mod light;
 pub mod material;
 pub mod mesh;
+pub mod pack;
 pub mod resource;
 pub mod texture;
 pub mod transform;

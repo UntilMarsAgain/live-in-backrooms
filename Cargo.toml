@@ -14,6 +14,7 @@ mikktspace = { version = "0.3.0", default-features = false, features = ["glam"] 
 paste = "1.0.15"
 pollster = "1.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
+semver = "1.0.28"
 toml = "1.1.4"
 wgpu = "30.0.0"
 winit = "0.30.13"

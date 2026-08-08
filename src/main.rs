@@ -40,7 +40,14 @@ impl ApplicationHandler for WindowedApp {
         if self.app.is_none() {
             let window = Self::create_window(event_loop);
             let display = Box::new(event_loop.owned_display_handle());
-            self.app = Some(App::new(window, display).expect("failed to initialize app"));
+            match App::new(window, display) {
+                Ok(app) => self.app = Some(app),
+                Err(e) => {
+                    // 启动期错误（资源包依赖/冲突/环等）：打印后退出，不 panic。
+                    eprintln!("应用启动失败：{e:#}");
+                    event_loop.exit();
+                }
+            }
         }
     }
 

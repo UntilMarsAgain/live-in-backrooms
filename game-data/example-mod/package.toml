@@ -1,0 +1,6 @@
+id = "example-mod"
+name = "示例模组（测试资源包系统）"
+version = "0.1.0"
+
+[dependencies]
+vanilla = "=0.1.0"

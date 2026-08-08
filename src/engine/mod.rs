@@ -32,6 +32,8 @@ pub use core::camera::Camera;
 #[allow(unused_imports)]
 pub use core::camera::CameraAction;
 #[allow(unused_imports)]
+pub use core::config::PackConfig;
+#[allow(unused_imports)]
 pub use core::environment::Environment;
 #[allow(unused_imports)]
 pub use core::game_path::GamePath;
@@ -41,6 +43,8 @@ pub use core::light::Light;
 pub use core::material::Material;
 #[allow(unused_imports)]
 pub use core::mesh::{Mesh, Vertex};
+#[allow(unused_imports)]
+pub use core::pack::Package;
 #[allow(unused_imports)]
 pub use core::resource::MergedResourceSpace;
 #[allow(unused_imports)]
