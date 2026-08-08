@@ -24,6 +24,8 @@ pub mod scene;
 #[allow(unused_imports)]
 pub use core::aabb::Aabb;
 #[allow(unused_imports)]
+pub use core::asset::{AssetManager, AssetRegistry, AssetState, Handle, MeshGpu, TextureGpu};
+#[allow(unused_imports)]
 pub use core::camera::Camera;
 #[allow(unused_imports)]
 pub use core::camera::CameraAction;
@@ -34,9 +36,9 @@ pub use core::light::Light;
 #[allow(unused_imports)]
 pub use core::material::Material;
 #[allow(unused_imports)]
-pub use core::mesh::{Mesh, MeshKey, MeshLibrary, Vertex};
+pub use core::mesh::{Mesh, Vertex};
 #[allow(unused_imports)]
-pub use core::texture::{Texture, TextureKey, TextureLibrary};
+pub use core::texture::Texture;
 #[allow(unused_imports)]
 pub use core::transform::Transform;
 #[allow(unused_imports)]

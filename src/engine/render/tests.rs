@@ -165,6 +165,7 @@ fn environment_headless_smoke() {
         label: Some("smoke encoder"),
     });
     {
+        // 只清屏不绘制：pass 存活到块尾以正确结束渲染通道。
         let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("smoke pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
@@ -540,7 +541,8 @@ fn blit_tone_maps_hdr_radiance() {
         label: Some("blit test clear encoder"),
     });
     {
-        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+        // 只清屏不绘制：pass 存活到块尾以正确结束渲染通道。
+        let _pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("blit test clear pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view: &hdr_view,
@@ -609,6 +611,81 @@ fn blit_tone_maps_hdr_radiance() {
         max > 180,
         "白色 HDR（radiance=1）经 blit 应映射为高亮，实际 {max}"
     );
+}
+
+/// 资产管理器 GPU 同步：pin 后 `sync_gpu` 上传（`gpu()` 有值），
+/// unpin 后回收（`gpu()` 为 None），CPU 数据保留。
+#[test]
+fn asset_manager_sync_gpu_uploads_and_reclaims() {
+    let Some((device, queue, _)) = headless_device() else {
+        return;
+    };
+    let device = std::sync::Arc::new(device);
+    let queue = std::sync::Arc::new(queue);
+    let mut assets = crate::engine::core::asset::AssetManager::new(device, queue);
+    let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
+
+    // 未 pin：sync 后不应有 GPU 资源。
+    assets.sync_gpu();
+    assert!(assets.meshes().gpu(mesh).is_none());
+
+    // pin + sync：上传。
+    assert!(assets.meshes_mut().pin(mesh));
+    assets.sync_gpu();
+    assert!(assets.meshes().gpu(mesh).is_some());
+
+    // unpin + sync：GPU 回收，CPU 数据保留。
+    assert!(assets.meshes_mut().unpin(mesh));
+    assets.sync_gpu();
+    assert!(assets.meshes().gpu(mesh).is_none());
+    assert!(assets.meshes().get(mesh).is_some());
+}
+
+/// 按需上传：有效句柄未 pin/未同步时，`ensure_mesh_gpu` 现场上传并置驻留；
+/// 已移除的无效句柄返回 `None`（渲染器据此报错）。
+#[test]
+fn asset_manager_ensure_gpu_uploads_on_demand() {
+    let Some((device, queue, _)) = headless_device() else {
+        return;
+    };
+    let device = std::sync::Arc::new(device);
+    let queue = std::sync::Arc::new(queue);
+    let mut assets = crate::engine::core::asset::AssetManager::new(device, queue);
+    let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
+
+    // 注册后既未 pin 也未 sync：ensure 应现场上传，且此后 gpu() 有值（不回收）。
+    assert!(
+        assets.ensure_mesh_gpu(mesh).is_some(),
+        "有效句柄应按需上传"
+    );
+    assert!(assets.meshes().gpu(mesh).is_some());
+    // 上传后状态应为 Pinned：sync_gpu 不会把它回收。
+    assets.sync_gpu();
+    assert!(assets.meshes().gpu(mesh).is_some());
+
+    // remove 后句柄无效：ensure 返回 None。
+    assert!(assets.meshes_mut().remove(mesh).is_some());
+    assert!(assets.ensure_mesh_gpu(mesh).is_none());
+}
+
+/// 预分配语义：`pin_mesh` 与按需上传同一条路径——注册后不 sync 也立即上传。
+#[test]
+fn asset_manager_pin_upload_preallocates() {
+    let Some((device, queue, _)) = headless_device() else {
+        return;
+    };
+    let device = std::sync::Arc::new(device);
+    let queue = std::sync::Arc::new(queue);
+    let mut assets = crate::engine::core::asset::AssetManager::new(device, queue);
+    let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
+
+    // pin 即上传：无需等 sync_gpu。
+    assert!(assets.pin_mesh(mesh));
+    assert!(assets.meshes().gpu(mesh).is_some());
+
+    // 重复 pin 幂等，不重复上传。
+    assert!(assets.pin_mesh(mesh));
+    assert!(assets.meshes().gpu(mesh).is_some());
 }
 
 /// 把天空盒渲染到 HDR 目标，再过 blit 色调映射写 4×4 离屏 Rgba8UnormSrgb，

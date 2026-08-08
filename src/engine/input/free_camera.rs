@@ -11,8 +11,8 @@ use winit::window::{CursorGrabMode, Window};
 
 use super::InputController;
 use crate::engine::core::aabb::Aabb;
+use crate::engine::core::asset::AssetManager;
 use crate::engine::core::camera::{Camera, CameraAction};
-use crate::engine::core::mesh::MeshLibrary;
 use crate::engine::core::transform::Transform;
 use crate::engine::scene::Scene;
 
@@ -191,7 +191,7 @@ impl InputController<Camera> for FreeCameraController {
         target: &Camera,
         dt: f32,
         scene: &Scene,
-        meshes: &MeshLibrary,
+        assets: &AssetManager,
     ) -> CameraAction {
         // 1. 鼠标旋转（向下拖动鼠标 → 俯视）。
         let yaw_delta = self.look_delta.0 * self.sensitivity;
@@ -240,7 +240,7 @@ impl InputController<Camera> for FreeCameraController {
             let probe_center = target.position() + translate + step;
             let transform = Transform::new(probe_center, Quat::IDENTITY, Vec3::ONE);
             if scene
-                .collides_with(meshes, &transform, self.collider, &[])
+                .collides_with(assets, &transform, self.collider, &[])
                 .is_none()
             {
                 translate += step;
@@ -267,6 +267,7 @@ impl Default for FreeCameraController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::core::asset::AssetManager;
     use crate::engine::{Mesh, SceneObject, SceneObjectKind};
 
     /// 默认碰撞盒：半尺寸 (0.3, 0.9, 0.3)，以相机位置为中心。
@@ -278,17 +279,17 @@ mod tests {
 
     /// 场景：把若干边长 1 的立方体（`Mesh::cube`）摆在 `centers` 处作为障碍，
     /// 障碍 AABB 即 [center-0.5, center+0.5]³。
-    fn obstacle_scene(centers: &[Vec3]) -> (Scene, MeshLibrary) {
+    fn obstacle_scene(centers: &[Vec3]) -> (Scene, AssetManager) {
         let mut scene = Scene::new();
-        let mut meshes = MeshLibrary::new();
+        let mut assets = AssetManager::without_gpu();
         for center in centers {
-            let key = meshes.register(Mesh::cube());
+            let key = assets.meshes_mut().register(Mesh::cube());
             scene.add_object(SceneObject::new(
                 SceneObjectKind::Mesh(key),
                 Transform::new(*center, Quat::IDENTITY, Vec3::ONE),
             ));
         }
-        (scene, meshes)
+        (scene, assets)
     }
 
     fn camera() -> Camera {
@@ -301,8 +302,8 @@ mod tests {
         let mut c = controller();
         let cam = camera();
         // yaw=0 时 W = 朝 +X；墙在 (1,0,0)，中心距 1 < 0.5+0.3。
-        let (scene, meshes) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
-        let action = c.update(&cam, 0.1, &scene, &meshes);
+        let (scene, assets) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
+        let action = c.update(&cam, 0.1, &scene, &assets);
         assert_eq!(action.translate, Vec3::ZERO, "撞墙应被挡在原地");
         assert_eq!(cam.position(), Vec3::ZERO, "控制器不应修改目标");
     }
@@ -312,8 +313,8 @@ mod tests {
     fn forward_movement_free_when_no_obstacle() {
         let mut c = controller();
         let cam = camera();
-        let (scene, meshes) = obstacle_scene(&[]);
-        let action = c.update(&cam, 0.1, &scene, &meshes);
+        let (scene, assets) = obstacle_scene(&[]);
+        let action = c.update(&cam, 0.1, &scene, &assets);
         assert_eq!(action.translate, Vec3::new(0.5, 0.0, 0.0));
     }
 
@@ -325,8 +326,8 @@ mod tests {
         let cam = camera();
         // W+D：归一化后 (0.707, 0, 0.707)，speed 5 × dt 0.1 = 0.354/轴。
         // X 轴被墙 (1,0,0) 挡下，Z 轴照常移动。
-        let (scene, meshes) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
-        let action = c.update(&cam, 0.1, &scene, &meshes);
+        let (scene, assets) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
+        let action = c.update(&cam, 0.1, &scene, &assets);
         assert!(action.translate.x.abs() < 1e-6, "X 应被挡：{:?}", action);
         assert!(
             (action.translate.z - std::f32::consts::FRAC_1_SQRT_2 * 0.5).abs() < 1e-6,
@@ -340,8 +341,8 @@ mod tests {
     fn collision_does_not_change_speed() {
         let mut c = controller();
         let cam = camera();
-        let (scene, meshes) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
-        c.update(&cam, 0.1, &scene, &meshes);
+        let (scene, assets) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
+        c.update(&cam, 0.1, &scene, &assets);
         assert_eq!(c.speed, 5.0);
     }
 }

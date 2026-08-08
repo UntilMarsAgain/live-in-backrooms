@@ -2,7 +2,7 @@
 
 use super::*;
 
-use crate::engine::core::mesh::MeshLibrary;
+use crate::engine::core::asset::AssetManager;
 
 /// 一个带位置/法线/UV/顶点色和索引的三角形 glTF（TRIANGLES 模式）。
 const TRIANGLE_JSON: &str = r#"{
@@ -83,13 +83,12 @@ fn load_triangle_glb() {
     let path = std::env::temp_dir().join("live-in-backrooms-test-triangle.glb");
     std::fs::write(&path, &bytes).expect("写测试文件");
 
-    let mut library = MeshLibrary::new();
-    let mut textures = TextureLibrary::new();
-    let scene = load_scene(&path, &mut library, &mut textures).expect("应能加载测试三角形");
+    let mut assets = AssetManager::without_gpu();
+    let scene = load_scene(&path, &mut assets).expect("应能加载测试三角形");
 
     // 网格：3 个顶点、3 个索引，属性值原样转换。
-    assert_eq!(library.len(), 1);
-    let mesh = &library.meshes()[0];
+    assert_eq!(assets.meshes().len(), 1);
+    let mesh = assets.meshes().iter().next().expect("注册了 1 个网格").1;
     assert_eq!(mesh.vertices().len(), 3);
     assert_eq!(mesh.indices(), &[0, 1, 2]);
     assert_eq!(mesh.vertices()[0].position, [-0.5, -0.5, 0.0]);
@@ -123,16 +122,15 @@ fn load_repo_test_glb() {
         eprintln!("跳过：test/test.glb 未准备（测试数据不入库）");
         return;
     }
-    let mut library = MeshLibrary::new();
-    let mut textures = TextureLibrary::new();
-    let scene = load_scene(path, &mut library, &mut textures).expect("test/test.glb 应能加载");
-    assert!(!library.is_empty());
-    assert!(!textures.is_empty(), "PBR 样例应带基础色贴图");
+    let mut assets = AssetManager::without_gpu();
+    let scene = load_scene(path, &mut assets).expect("test/test.glb 应能加载");
+    assert!(!assets.meshes().is_empty());
+    assert!(!assets.textures().is_empty(), "PBR 样例应带基础色贴图");
     assert!(scene.object_count() > 0);
     // PBR 材质数据应完整：至少一个网格物体带金属度/粗糙度贴图和法线贴图。
     let pbr_material = scene.objects().find_map(|(_, object)| {
         let mat = &object.material;
-        (object.mesh_key().is_some()
+        (object.mesh_handle().is_some()
             && mat.metallic_roughness_texture.is_some()
             && mat.normal_texture.is_some())
         .then_some(mat)

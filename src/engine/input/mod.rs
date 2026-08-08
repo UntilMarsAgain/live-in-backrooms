@@ -13,7 +13,7 @@ mod free_camera;
 
 pub use free_camera::FreeCameraController;
 
-use crate::engine::core::mesh::MeshLibrary;
+use crate::engine::core::asset::AssetManager;
 use crate::engine::scene::Scene;
 use winit::event::{DeviceEvent, WindowEvent};
 use winit::window::Window;
@@ -33,5 +33,11 @@ pub trait InputController<T> {
     ///
     /// 控制器调用 [`Scene`] 的碰撞 API（如 `collides_with`）构造相机 AABB
     /// 并剔除穿墙分量；调用方（App）把返回的操作交给场景应用。
-    fn update(&mut self, target: &T, dt: f32, scene: &Scene, meshes: &MeshLibrary) -> Self::Action;
+    fn update(
+        &mut self,
+        target: &T,
+        dt: f32,
+        scene: &Scene,
+        assets: &AssetManager,
+    ) -> Self::Action;
 }

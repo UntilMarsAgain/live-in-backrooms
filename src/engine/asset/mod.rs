@@ -3,12 +3,12 @@
 //! 目前只处理“模型”部分：
 //! - 节点层级与局部变换 → [`Scene`]（每个 glTF 节点一个容器物体，网格 primitive
 //!   作为其子物体，保证“父节点动、子节点跟着动”的层级关系）；
-//! - 每个 primitive → [`Mesh`] 注册进 [`MeshLibrary`]（按网格索引去重，多节点
+//! - 每个 primitive → [`Mesh`] 注册进统一 [`AssetManager`]（按网格索引去重，多节点
 //!   共享同一网格时不会重复上传）；
 //! - 顶点属性按 glTF 2.0 语义读取：POSITION（必需）、NORMAL、TEXCOORD_0、
 //!   COLOR_0，各种存储格式（f32 / 归一化整数）统一转换成运行时的 f32 布局。
 //! - 材质基础色（`baseColorFactor` + `baseColorTexture`）读取，贴图注册进
-//!   [`TextureLibrary`]；金属度/粗糙度、法线、自发光等 PBR 通道暂不读取。
+//!   [`AssetManager`]；金属度/粗糙度、法线、自发光等 PBR 通道暂不读取。
 //!
 //! 相机、动画、蒙皮暂不读取。
 
@@ -20,25 +20,24 @@ use glam::{Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use gltf::scene::Transform as GltfTransform;
 
+use super::core::asset::{AssetManager, Handle};
 use super::core::material::Material;
-use super::core::mesh::{Mesh, MeshKey, MeshLibrary, Vertex};
-use super::core::texture::{Texture, TextureKey, TextureLibrary};
+use super::core::mesh::{Mesh, Vertex};
+use super::core::texture::Texture;
 use super::core::transform::Transform;
 use super::scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};
 
-/// 从 glTF 文件加载场景：网格资产注册进 `mesh_library`，返回带层级的 `Scene`。
+/// 从 glTF 文件加载场景：网格/贴图资产注册进 `assets`，返回带层级的 `Scene`。
 pub fn load_scene(
     path: &Path,
-    mesh_library: &mut MeshLibrary,
-    texture_library: &mut TextureLibrary,
+    assets: &mut AssetManager,
 ) -> Result<Scene> {
     let (document, buffers, images) = gltf::import(path)?;
     let scene = document.default_scene().context("glTF 文件没有默认场景")?;
 
     let buffer_slices: Vec<&[u8]> = buffers.iter().map(|b| b.0.as_slice()).collect();
     let mut loader = Loader {
-        mesh_library,
-        texture_library,
+        assets,
         buffers: &buffer_slices,
         images: &images,
         mesh_keys: HashMap::new(),
@@ -54,14 +53,13 @@ pub fn load_scene(
 
 /// 加载过程中的临时状态。
 struct Loader<'a> {
-    mesh_library: &'a mut MeshLibrary,
-    texture_library: &'a mut TextureLibrary,
+    assets: &'a mut AssetManager,
     buffers: &'a [&'a [u8]],
     images: &'a [gltf::image::Data],
-    /// glTF 网格索引 → 已注册的 MeshKey 列表（每个 primitive 一个）。
-    mesh_keys: HashMap<usize, Vec<MeshKey>>,
-    /// glTF 图片索引 → 已注册的 TextureKey（按图去重）。
-    texture_keys: HashMap<usize, TextureKey>,
+    /// glTF 网格索引 → 已注册的句柄列表（每个 primitive 一个）。
+    mesh_keys: HashMap<usize, Vec<Handle<Mesh>>>,
+    /// glTF 图片索引 → 已注册的句柄（按图去重）。
+    texture_keys: HashMap<usize, Handle<Texture>>,
 }
 
 impl Loader<'_> {
@@ -131,8 +129,8 @@ impl Loader<'_> {
     }
 
     /// 注册一个 glTF 网格（按网格索引去重），返回每个 primitive 对应的
-    /// (MeshKey, Material) 列表。
-    fn register_mesh(&mut self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(MeshKey, Material)>> {
+    /// (句柄, Material) 列表。
+    fn register_mesh(&mut self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(Handle<Mesh>, Material)>> {
         if self.mesh_keys.contains_key(&mesh.index()) {
             // 材质属于 primitive，不随网格去重缓存，需要重新读取。
             return self.materials_for(mesh);
@@ -143,13 +141,16 @@ impl Loader<'_> {
             meshes.push(self.mesh_from_primitive(&primitive)?);
             materials.push(self.material_from_primitive(&primitive)?);
         }
-        let keys = self.mesh_library.register_many(meshes);
+        let keys: Vec<_> = meshes
+            .into_iter()
+            .map(|mesh| self.assets.meshes_mut().register(mesh))
+            .collect();
         self.mesh_keys.insert(mesh.index(), keys.clone());
         Ok(keys.into_iter().zip(materials).collect())
     }
 
-    /// 重新读取一个网格所有 primitive 的材质（去重缓存只存了 MeshKey）。
-    fn materials_for(&mut self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(MeshKey, Material)>> {
+    /// 重新读取一个网格所有 primitive 的材质（去重缓存只存了句柄）。
+    fn materials_for(&mut self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(Handle<Mesh>, Material)>> {
         // 走与 register_mesh 相同的路径需要 &mut self（贴图注册），这里直接重新构造。
         let keys = self
             .mesh_keys
@@ -191,7 +192,7 @@ impl Loader<'_> {
     }
 
     /// 注册 glTF 图片（按图片索引去重）。
-    fn register_texture(&mut self, image_index: usize) -> Result<TextureKey> {
+    fn register_texture(&mut self, image_index: usize) -> Result<Handle<Texture>> {
         if let Some(key) = self.texture_keys.get(&image_index) {
             return Ok(*key);
         }
@@ -200,7 +201,7 @@ impl Loader<'_> {
             .get(image_index)
             .with_context(|| format!("图片索引 {image_index} 不存在"))?;
         let texture = gltf_image_to_texture(image)?;
-        let key = self.texture_library.register_many([texture])[0];
+        let key = self.assets.textures_mut().register(texture);
         self.texture_keys.insert(image_index, key);
         Ok(key)
     }

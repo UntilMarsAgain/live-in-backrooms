@@ -8,6 +8,7 @@ use wgpu::{
 };
 
 use crate::engine::core::camera::{Camera, CameraUniform};
+use crate::engine::core::asset::AssetManager;
 use crate::engine::render::init::{create_depth_texture, create_hdr_texture};
 use crate::engine::render::uniform::{
     LIGHT_CAPACITY, LightCountUniform, ObjectData, collect_lights,
@@ -48,6 +49,7 @@ impl Renderer {
         &mut self,
         camera: &Camera,
         scene: &Scene,
+        assets: &mut AssetManager,
         show_light_debug: bool,
         show_collision_debug: bool,
     ) {
@@ -158,34 +160,35 @@ impl Renderer {
                 pass.set_bind_group(1, &self.environment.skybox_bind_group, &[]);
                 pass.draw(0..3, 0..1);
 
-                if let Some(mesh_buffer) = &self.mesh_buffer {
-                    pass.set_pipeline(&self.pipeline);
-                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                    // 物体数据 storage 数组：整组绑定一次，逐物体不再切换。
-                    pass.set_bind_group(1, &self.object_bind_group, &[]);
-                    pass.set_bind_group(2, &self.light_bind_group, &[]);
-                    pass.set_bind_group(4, &self.environment.mesh_bind_group, &[]);
-                    pass.set_vertex_buffer(0, mesh_buffer.vertex_buffer.slice(..));
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                // 物体数据 storage 数组：整组绑定一次，逐物体不再切换。
+                pass.set_bind_group(1, &self.object_bind_group, &[]);
+                pass.set_bind_group(2, &self.light_bind_group, &[]);
+                pass.set_bind_group(4, &self.environment.mesh_bind_group, &[]);
+
+                // 每个物体：句柄 → 资产管理器取独立 GPU 缓冲（每网格一份），
+                // 用实例区间 i..i+1 编码物体索引（instance_index = i）。
+                // 有效句柄未上传时**立即上传**（渲染违例，不能静默跳过）；
+                // 句柄彻底无效（已卸载/不存在）属于运行错误，终端报错后跳过。
+                // 非网格节点（分组、未来的灯光/相机等）同样跳过。
+                for (i, (_, object)) in scene.objects().enumerate() {
+                    let Some(handle) = object.mesh_handle() else {
+                        continue;
+                    };
+                    let Some(mesh_gpu) = assets.ensure_mesh_gpu(handle) else {
+                        eprintln!(
+                            "渲染违例：场景引用了无效的网格句柄 {handle:?}，跳过绘制"
+                        );
+                        continue;
+                    };
+                    pass.set_vertex_buffer(0, mesh_gpu.vertex_buffer.slice(..));
                     pass.set_index_buffer(
-                        mesh_buffer.index_buffer.slice(..),
+                        mesh_gpu.index_buffer.slice(..),
                         wgpu::IndexFormat::Uint32,
                     );
-
-                    // 每个物体：用实例区间 i..i+1 编码物体索引（instance_index = i，
-                    // 顶点着色器据此取 object_data[i]），按句柄直取网格区间；
-                    // 非网格节点（分组、未来的灯光/相机等）跳过。
-                    for (i, (_, object)) in scene.objects().enumerate() {
-                        let Some(mesh_key) = object.mesh_key() else {
-                            continue;
-                        };
-                        let range = mesh_buffer.mesh_ranges[mesh_key.index()];
-                        pass.set_bind_group(3, &self.material_bind_groups[i], &[]);
-                        pass.draw_indexed(
-                            range.index_offset..range.index_offset + range.index_count,
-                            0,
-                            i as u32..i as u32 + 1,
-                        );
-                    }
+                    pass.set_bind_group(3, &self.material_bind_groups[i], &[]);
+                    pass.draw_indexed(0..mesh_gpu.index_count, 0, i as u32..i as u32 + 1);
                 }
 
                 // 调试线框：顶点已上传，这里只按开关绘制

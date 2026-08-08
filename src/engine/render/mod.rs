@@ -62,8 +62,6 @@ pub struct Renderer {
     /// 纹理（材质贴图）绑定组相关。
     texture_bind_group_layout: wgpu::BindGroupLayout,
     texture_sampler: wgpu::Sampler,
-    /// 按 [`TextureKey`](super::core::texture::TextureKey) 稠密编号索引的纹理视图。
-    texture_views: Vec<wgpu::TextureView>,
     /// 默认 1×1 白纹理视图（基础色/金属度粗糙度贴图兜底）。
     default_white_view: wgpu::TextureView,
     /// 默认 1×1 中性法线纹理视图。
@@ -72,8 +70,6 @@ pub struct Renderer {
     default_material_bind_group: wgpu::BindGroup,
     /// 每个物体的材质绑定组（load_scene 时按 objects() 顺序构建）。
     material_bind_groups: Vec<wgpu::BindGroup>,
-    /// 已上传的纹理库版本。
-    uploaded_texture_version: u64,
     /// 网格渲染管线。
     pipeline: wgpu::RenderPipeline,
     /// 深度缓冲（纹理 + 视图），随窗口尺寸重建。
@@ -87,10 +83,6 @@ pub struct Renderer {
     blit_resources: BlitResources,
     /// blit 绑定组：引用 HDR 视图与环境参数 uniform，resize 时重建。
     blit_bind_group: wgpu::BindGroup,
-    /// 全局网格缓冲（永久驻留，所有注册网格合并），由 upload_meshes 维护。
-    mesh_buffer: Option<MeshGpu>,
-    /// 已上传的网格库版本，避免重复上传。
-    mesh_uploaded_version: u64,
     /// 环境贴图（天空盒 + IBL）。始终存在：未加载时为 1×1 黑环境。
     environment: EnvironmentGpu,
     /// 环境子系统资源（布局、计算管线、天空盒管线等）。
@@ -99,19 +91,4 @@ pub struct Renderer {
     light_gizmos: LineGizmos,
     /// 碰撞箱调试可视化（世界 AABB 线框；顶点在 load_scene 时上传一次）。
     collision_gizmos: LineGizmos,
-}
-
-/// 资产库中单个网格在合并缓冲里的区间。
-#[derive(Debug, Clone, Copy)]
-struct MeshRange {
-    index_offset: u32,
-    index_count: u32,
-}
-
-/// 全局网格的 GPU 表示：合并后的顶点/索引缓冲，以及每个网格的区间。
-/// 区间按 [`MeshKey`](super::core::mesh::MeshKey) 的稠密编号索引（句柄即下标）。
-struct MeshGpu {
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    mesh_ranges: Vec<MeshRange>,
 }

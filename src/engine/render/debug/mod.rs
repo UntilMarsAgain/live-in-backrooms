@@ -17,8 +17,8 @@ use wgpu::{
 };
 
 use crate::engine::core::aabb::Aabb;
+use crate::engine::core::asset::AssetManager;
 use crate::engine::core::light::LightKind;
-use crate::engine::core::mesh::MeshLibrary;
 use crate::engine::scene::{Scene, SceneObjectKind};
 
 /// 调试线条顶点：位置 + 颜色（与 debug.wgsl 顶点输入一一对应）。
@@ -98,11 +98,11 @@ pub(super) fn build_light_gizmos(scene: &Scene) -> Vec<DebugVertex> {
 /// （12 条边 = 24 个顶点）。
 ///
 /// 固定橙色线框；空包围盒（无网格数据）的节点自动跳过。
-pub(super) fn build_collision_gizmos(scene: &Scene, meshes: &MeshLibrary) -> Vec<DebugVertex> {
+pub(super) fn build_collision_gizmos(scene: &Scene, assets: &AssetManager) -> Vec<DebugVertex> {
     let color = Vec3::new(1.0, 0.55, 0.1);
     let mut vertices = Vec::new();
     for (key, _) in scene.objects() {
-        if let Some(aabb) = scene.object_aabb_world(meshes, key) {
+        if let Some(aabb) = scene.object_aabb_world(assets, key) {
             push_aabb(&mut vertices, &aabb, color);
         }
     }
@@ -423,14 +423,14 @@ mod tests {
     #[test]
     fn collision_gizmos_wire_a_single_cube() {
         let mut scene = Scene::new();
-        let mut meshes = MeshLibrary::new();
-        let key = meshes.register(crate::engine::Mesh::cube());
+        let mut assets = AssetManager::without_gpu();
+        let key = assets.meshes_mut().register(crate::engine::Mesh::cube());
         scene.add_object(SceneObject::new(
             SceneObjectKind::Mesh(key),
             Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE),
         ));
 
-        let vertices = build_collision_gizmos(&scene, &meshes);
+        let vertices = build_collision_gizmos(&scene, &assets);
         assert_eq!(vertices.len(), 24, "12 条边 × 2 顶点");
 
         // 所有端点都应落在立方体角点集合（±0.5）上。
@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn collision_gizmos_skip_non_mesh_nodes() {
         let mut scene = Scene::new();
-        let meshes = MeshLibrary::new();
+        let assets = AssetManager::without_gpu();
         scene.add_object(SceneObject::new(
             SceneObjectKind::Empty,
             Transform::IDENTITY,
@@ -468,6 +468,6 @@ mod tests {
         let cam = scene.add_camera(Camera::new(Vec3::ZERO, 0.0, 0.0, 1.0, 1.0, 0.1, 100.0));
         assert!(scene.set_main_camera(cam));
 
-        assert!(build_collision_gizmos(&scene, &meshes).is_empty());
+        assert!(build_collision_gizmos(&scene, &assets).is_empty());
     }
 }

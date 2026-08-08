@@ -14,8 +14,8 @@ use winit::window::Window;
 
 use crate::engine::asset;
 use crate::engine::{
-    Camera, CameraAction, DisplayHandle, Environment, FreeCameraController, InputController, Mesh,
-    MeshKey, MeshLibrary, Renderer, Scene, Texture, TextureKey, TextureLibrary,
+    AssetManager, Camera, CameraAction, DisplayHandle, Environment, FreeCameraController, Handle,
+    InputController, Mesh, Renderer, Scene, Texture,
 };
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
@@ -24,10 +24,8 @@ pub struct App {
     renderer: Renderer,
     controller: Box<dyn InputController<Camera, Action = CameraAction>>,
     last_frame: Instant,
-    /// 全局网格资产库（永久驻留，跨场景共享）。
-    mesh_library: MeshLibrary,
-    /// 全局纹理资产库（永久驻留，跨场景共享）。
-    texture_library: TextureLibrary,
+    /// 统一资产管理器：网格/贴图等资源的句柄与 CPU/GPU 双持有。
+    assets: AssetManager,
     scene: Scene,
     /// 灯光调试可视化开关（控制器按 L 翻转，渲染时读取）。
     show_light_debug: Arc<AtomicBool>,
@@ -45,13 +43,16 @@ impl App {
             FreeCameraController::new(show_light_debug.clone(), show_collision_debug.clone()),
         );
         let renderer = Renderer::new(&window, display)?;
+        let assets = AssetManager::new(
+            std::sync::Arc::new(renderer.device()),
+            std::sync::Arc::new(renderer.queue().clone()),
+        );
         let mut app = Self {
             window,
             renderer,
             controller,
             last_frame: Instant::now(),
-            mesh_library: MeshLibrary::new(),
-            texture_library: TextureLibrary::new(),
+            assets,
             scene: Scene::default(),
             show_light_debug,
             show_collision_debug,
@@ -84,7 +85,7 @@ impl App {
         }
         let test_glb = Path::new("test/test.glb");
         if test_glb.is_file() {
-            match asset::load_scene(test_glb, &mut self.mesh_library, &mut self.texture_library) {
+            match asset::load_scene(test_glb, &mut self.assets) {
                 Ok(gltf_scene) => {
                     // 把测试模型放大 5 倍（等比），并挪到演示物体右前方，
                     // 避免和原点处的三角形重叠。
@@ -94,8 +95,6 @@ impl App {
                             object.transform.position += glam::Vec3::new(1.8, 0.0, -1.2);
                         }
                     }
-                    self.renderer.upload_meshes(&self.mesh_library);
-                    self.renderer.upload_textures(&self.texture_library);
                 }
                 Err(e) => eprintln!("加载 {} 失败：{e}", test_glb.display()),
             }
@@ -129,10 +128,8 @@ impl App {
     /// 尝试从 glTF 文件加载场景；成功返回 `true`，失败打印原因并返回 `false`。
     #[allow(dead_code)] // 预留：BACKROOMS_GLTF / game-data 场景加载路径，demo 阶段未启用
     fn try_load_gltf(&mut self, path: &Path, environment: Option<&Arc<Environment>>) -> bool {
-        match asset::load_scene(path, &mut self.mesh_library, &mut self.texture_library) {
+        match asset::load_scene(path, &mut self.assets) {
             Ok(scene) => {
-                self.renderer.upload_meshes(&self.mesh_library);
-                self.renderer.upload_textures(&self.texture_library);
                 let scene = match environment {
                     Some(env) => scene.with_environment(env.clone()),
                     None => scene,
@@ -148,17 +145,19 @@ impl App {
     }
 
     /// 批量注册网格：追加进全局资产库并整体重传 GPU 合并缓冲，返回句柄列表。
-    pub fn register_meshes(&mut self, meshes: Vec<Mesh>) -> Vec<MeshKey> {
-        let keys = self.mesh_library.register_many(meshes);
-        self.renderer.upload_meshes(&self.mesh_library);
-        keys
+    pub fn register_meshes(&mut self, meshes: Vec<Mesh>) -> Vec<Handle<Mesh>> {
+        meshes
+            .into_iter()
+            .map(|mesh| self.assets.meshes_mut().register(mesh))
+            .collect()
     }
 
     /// 批量注册贴图：追加进全局纹理库并增量上传 GPU 纹理，返回句柄列表。
-    pub fn register_textures(&mut self, textures: Vec<Texture>) -> Vec<TextureKey> {
-        let keys = self.texture_library.register_many(textures);
-        self.renderer.upload_textures(&self.texture_library);
-        keys
+    pub fn register_textures(&mut self, textures: Vec<Texture>) -> Vec<Handle<Texture>> {
+        textures
+            .into_iter()
+            .map(|texture| self.assets.textures_mut().register(texture))
+            .collect()
     }
 
     /// App 级别的场景切换 API：渲染器（GPU 数据）与后续游戏逻辑统一从这里换场景。
@@ -178,8 +177,22 @@ impl App {
             }
             None => self.renderer.reset_environment(),
         }
-        self.renderer.load_scene(&scene, &self.mesh_library);
+        // 收集场景引用的资产并 pin（预上传，预分配语义；不 pin 也有渲染兜底）。
+        self.pin_scene_assets(&scene);
+        self.renderer.load_scene(&scene, &self.assets);
         self.scene = scene;
+    }
+
+    /// 场景引用的所有网格/贴图句柄标记为 GPU 驻留（pin）。
+    fn pin_scene_assets(&mut self, scene: &Scene) {
+        for (_, object) in scene.objects() {
+            if let Some(handle) = object.mesh_handle() {
+                self.assets.pin_mesh(handle);
+            }
+            for handle in object.material.texture_handles() {
+                self.assets.pin_texture(handle);
+            }
+        }
     }
 
     /// 场景没有主相机时补一个默认相机（与早期硬编码相机相同的位置/朝向）。
@@ -223,6 +236,7 @@ impl App {
                     self.renderer.render(
                         camera,
                         &self.scene,
+                        &mut self.assets,
                         self.show_light_debug.load(Ordering::Relaxed),
                         self.show_collision_debug.load(Ordering::Relaxed),
                     );
@@ -245,12 +259,15 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32().min(0.25);
         self.last_frame = now;
 
+        // 资产 GPU 同步：pinned 且未上传的上传，非 pinned 的回收。
+        self.assets.sync_gpu();
+
         // 控制器只读相机 + 查询场景碰撞，输出一帧操作；操作由场景统一应用
         // （不可变借用先结束，再可变借用应用，无冲突）。
         let action = match self.scene.main_camera_ref() {
             Some(camera) => self
                 .controller
-                .update(camera, dt, &self.scene, &self.mesh_library),
+                .update(camera, dt, &self.scene, &self.assets),
             None => CameraAction::default(),
         };
         self.scene.apply_main_camera_action(action);

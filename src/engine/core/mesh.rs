@@ -3,9 +3,8 @@
 //! 目前只保存静态几何数据，GPU 缓冲区的创建在 `render` 模块完成。
 //! 顶点属性对齐 glTF 2.0 的常用语义：POSITION / NORMAL / TEXCOORD_0 / COLOR_0。
 //!
-//! [`MeshLibrary`] 是全局网格资产库：只追加、永久持有、跨场景共享。
-//! 句柄是库里的稠密编号（不删除因此稳定），GPU 侧把全部网格合并成
-//! 一份顶点/索引缓冲永久驻留，新增网格时整体重传。
+//! 网格的注册与生命周期管理统一走 [`super::asset::AssetManager`]
+//! （稳定句柄 + CPU/GPU 双持有 + 驻留状态机），本模块只定义数据本身。
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
@@ -238,70 +237,6 @@ impl Mesh {
         );
 
         Self::new(vertices, indices)
-    }
-}
-
-/// 网格句柄：在 [`MeshLibrary`] 中的稠密编号。
-///
-/// 库只追加不删除，因此编号稳定、不会复用；句柄即索引，渲染时一跳直达。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MeshKey(usize);
-
-impl MeshKey {
-    pub fn index(self) -> usize {
-        self.0
-    }
-}
-
-/// 全局网格资产库：只追加、永久持有。
-#[derive(Debug, Default)]
-pub struct MeshLibrary {
-    meshes: Vec<Mesh>,
-    /// 版本号：每次注册新网格 +1，供 GPU 侧判断是否需要重传。
-    version: u64,
-}
-
-impl MeshLibrary {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 注册单个网格（内部走批量路径）。
-    pub fn register(&mut self, mesh: Mesh) -> MeshKey {
-        self.register_many([mesh])[0]
-    }
-
-    /// 批量注册：一次调用追加多个网格并返回各自的句柄。
-    pub fn register_many(&mut self, meshes: impl IntoIterator<Item = Mesh>) -> Vec<MeshKey> {
-        let start = self.meshes.len();
-        self.meshes.extend(meshes);
-        let keys: Vec<_> = (start..self.meshes.len()).map(MeshKey).collect();
-        if !keys.is_empty() {
-            self.version += 1;
-        }
-        keys
-    }
-
-    pub fn mesh(&self, key: MeshKey) -> Option<&Mesh> {
-        self.meshes.get(key.0)
-    }
-
-    pub fn len(&self) -> usize {
-        self.meshes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.meshes.is_empty()
-    }
-
-    /// 全部资产（追加顺序，句柄编号即下标）。
-    pub fn meshes(&self) -> &[Mesh] {
-        &self.meshes
-    }
-
-    /// 当前版本号：新增资产后 +1。
-    pub fn version(&self) -> u64 {
-        self.version
     }
 }
 

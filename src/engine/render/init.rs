@@ -484,12 +484,10 @@ impl Renderer {
             light_bind_group,
             texture_bind_group_layout,
             texture_sampler,
-            texture_views: Vec::new(),
             default_white_view,
             default_normal_view,
             default_material_bind_group,
             material_bind_groups: Vec::new(),
-            uploaded_texture_version: 0,
             pipeline,
             depth_texture,
             depth_view,
@@ -497,12 +495,21 @@ impl Renderer {
             hdr_view,
             blit_resources,
             blit_bind_group,
-            mesh_buffer: None,
-            mesh_uploaded_version: 0,
             environment: environment_resources.default_environment.clone(),
             environment_resources,
             light_gizmos,
             collision_gizmos,
         })
+    }
+
+    /// 底层设备克隆（供 [`AssetManager`](crate::engine::core::asset::AssetManager)
+    /// 等资源系统创建 GPU 资源用；wgpu 的 Device 是内部引用计数，clone 廉价）。
+    pub fn device(&self) -> wgpu::Device {
+        self.device.clone()
+    }
+
+    /// 底层命令队列（资源上传、逐帧 uniform 写入共用）。
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 }

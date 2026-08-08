@@ -3,19 +3,20 @@
 use glam::{Quat, Vec3};
 
 use super::{Scene, SceneObject, SceneObjectKind};
+use crate::engine::core::asset::Handle;
 use crate::engine::core::camera::Camera;
 use crate::engine::core::light::Light;
 use crate::engine::core::material::Material;
-use crate::engine::core::mesh::MeshKey;
-use crate::engine::core::texture::TextureKey;
+use crate::engine::core::mesh::Mesh;
+use crate::engine::core::texture::Texture;
 use crate::engine::core::transform::Transform;
 
 impl Scene {
     pub fn demo(
-        triangle: MeshKey,
-        quad: MeshKey,
-        cube: MeshKey,
-        cube_texture: Option<TextureKey>,
+        triangle: Handle<Mesh>,
+        quad: Handle<Mesh>,
+        cube: Handle<Mesh>,
+        cube_texture: Option<Handle<Texture>>,
     ) -> Self {
         let mut scene = Self::new();
         // 方向光：从右上前方照向场景。

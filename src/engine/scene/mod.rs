@@ -13,7 +13,7 @@
 //! - 成环在库层就被禁止（`append`/`checked_append` 拒绝自挂与挂祖先），
 //!   [`Scene::reparent`] 也会预检查后代关系，因此遍历不需要环保护。
 //!
-//! 网格资产由 `MeshLibrary` 永久持有，不属于某个场景；场景对象用
+//! 网格资产由统一 `AssetManager` 持有，不属于某个场景；场景对象用
 //! [`SceneObjectKind`] 区分类型（网格 / 空分组节点 / 灯光 / 相机）。
 //! 关卡环境（天空盒 + IBL）跟随场景：加载场景时由 App 层一并上传，
 //! 模组作者按"一个关卡 = 场景 + 环境"来组织资产。
@@ -26,11 +26,12 @@ use glam::{Mat4, Vec3};
 use indextree::{Arena, NodeId};
 
 use super::core::aabb::Aabb;
+use super::core::asset::{AssetManager, Handle};
 use super::core::camera::{Camera, CameraAction};
 use super::core::environment::Environment;
 use super::core::light::Light;
 use super::core::material::Material;
-use super::core::mesh::{MeshKey, MeshLibrary};
+use super::core::mesh::Mesh;
 use super::core::transform::Transform;
 
 /// 场景节点句柄：indextree 的节点 ID（带代际，删除后不失效复用）。
@@ -44,8 +45,8 @@ pub type ObjectKey = NodeId;
 pub enum SceneObjectKind {
     /// 纯分组节点：只承载子节点，本身不可见。
     Empty,
-    /// 引用全局资产库里的网格。
-    Mesh(MeshKey),
+    /// 引用统一资产管理器里的网格（[`Handle<Mesh>`]）。
+    Mesh(Handle<Mesh>),
     /// 灯光：位置/朝向由节点变换决定（见 [`Light`] 的约定）。
     Light(Light),
     /// 相机：位置与朝向由 `Camera` 内部状态决定，节点 Transform 暂不参与合成
@@ -82,16 +83,16 @@ impl SceneObject {
         self
     }
 
-    /// 若该对象是网格，返回其 `MeshKey`；否则返回 `None`。
-    pub fn mesh_key(&self) -> Option<MeshKey> {
+    /// 若该对象是网格，返回其句柄；否则返回 `None`。
+    pub fn mesh_handle(&self) -> Option<Handle<Mesh>> {
         match self.kind {
-            SceneObjectKind::Mesh(key) => Some(key),
+            SceneObjectKind::Mesh(handle) => Some(handle),
             SceneObjectKind::Empty | SceneObjectKind::Light(_) | SceneObjectKind::Camera(_) => None,
         }
     }
 }
 
-/// 场景：层级化的物体树（网格资产在全局 `MeshLibrary` 中）。
+/// 场景：层级化的物体树（网格资产在统一 `AssetManager` 中）。
 #[derive(Debug, Clone)]
 pub struct Scene {
     tree: Arena<SceneObject>,
@@ -426,16 +427,16 @@ impl Scene {
 
     // ---- AABB 碰撞查询 ----
     //
-    // 网格数据在全局 `MeshLibrary` 中、场景不持有，因此查询需要调用方传入资产库
+    // 网格数据在统一 `AssetManager` 中、场景不持有，因此查询需要调用方传入资产管理器
     // （依赖方向 scene → core，不引入 asset 层）。世界 AABB = 网格局部 bounds
     // 经该节点世界矩阵变换后的包围盒（旋转会使其变大，属 AABB 的正常行为）。
     //
     // 现阶段查询为 O(物体数)：场景规模小足够；Level 0 区块落地时再上空间分区。
 
     /// 节点在世界空间中的 AABB；句柄失效、非网格节点或空包围盒时返回 `None`。
-    pub fn object_aabb_world(&self, meshes: &MeshLibrary, key: ObjectKey) -> Option<Aabb> {
-        let mesh_key = self.object(key)?.mesh_key()?;
-        let local = meshes.mesh(mesh_key)?.bounds();
+    pub fn object_aabb_world(&self, assets: &AssetManager, key: ObjectKey) -> Option<Aabb> {
+        let handle = self.object(key)?.mesh_handle()?;
+        let local = assets.meshes().get(handle)?.bounds();
         if local.is_empty() {
             return None;
         }
@@ -444,16 +445,16 @@ impl Scene {
     }
 
     /// 世界点是否落在 `key` 所指物体的世界 AABB 内（含边界）。
-    pub fn point_inside(&self, meshes: &MeshLibrary, key: ObjectKey, point: Vec3) -> bool {
-        self.object_aabb_world(meshes, key)
+    pub fn point_inside(&self, assets: &AssetManager, key: ObjectKey, point: Vec3) -> bool {
+        self.object_aabb_world(assets, key)
             .is_some_and(|aabb| aabb.contains(point))
     }
 
     /// 两个已存在物体是否碰撞（世界 AABB 相交）。
-    pub fn objects_collide(&self, meshes: &MeshLibrary, a: ObjectKey, b: ObjectKey) -> bool {
+    pub fn objects_collide(&self, assets: &AssetManager, a: ObjectKey, b: ObjectKey) -> bool {
         let (Some(aa), Some(bb)) = (
-            self.object_aabb_world(meshes, a),
-            self.object_aabb_world(meshes, b),
+            self.object_aabb_world(assets, a),
+            self.object_aabb_world(assets, b),
         ) else {
             return false;
         };
@@ -468,7 +469,7 @@ impl Scene {
     /// 手持物）；传入空切片表示测试全部网格节点。
     pub fn collides_with(
         &self,
-        meshes: &MeshLibrary,
+        assets: &AssetManager,
         transform: &Transform,
         local: Aabb,
         exclude: &[ObjectKey],
@@ -476,7 +477,7 @@ impl Scene {
         let probe = local.transformed(transform);
         self.objects()
             .filter(|(key, _)| !exclude.contains(key))
-            .filter_map(|(key, _)| self.object_aabb_world(meshes, key).map(|aabb| (key, aabb)))
+            .filter_map(|(key, _)| self.object_aabb_world(assets, key).map(|aabb| (key, aabb)))
             .find(|(_, aabb)| aabb.intersects(&probe))
             .map(|(key, _)| key)
     }
