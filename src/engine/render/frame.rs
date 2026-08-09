@@ -7,14 +7,14 @@ use wgpu::{
     RenderPassDescriptor, StoreOp, TextureViewDescriptor,
 };
 
-use crate::engine::core::camera::{Camera, CameraUniform};
 use crate::engine::core::asset::AssetManager;
+use crate::engine::core::camera::{Camera, CameraUniform};
 use crate::engine::render::asset::GpuManager;
 use crate::engine::render::init::{create_depth_texture, create_hdr_texture};
 use crate::engine::render::uniform::{
-    LIGHT_CAPACITY, LightCountUniform, ObjectData, collect_lights,
+    collect_lights, LightCountUniform, ObjectData, LIGHT_CAPACITY,
 };
-use crate::engine::render::{CLEAR_COLOR, Renderer};
+use crate::engine::render::{Renderer, CLEAR_COLOR};
 use crate::engine::scene::Scene;
 
 impl Renderer {
@@ -179,9 +179,7 @@ impl Renderer {
                         continue;
                     };
                     let Some(mesh_gpu) = gpu.mesh_gpu(handle, assets) else {
-                        eprintln!(
-                            "渲染违例：场景引用了无效的网格句柄 {handle:?}，跳过绘制"
-                        );
+                        eprintln!("渲染违例：场景引用了无效的网格句柄 {handle:?}，跳过绘制");
                         continue;
                     };
                     pass.set_vertex_buffer(0, mesh_gpu.vertex_buffer.slice(..));

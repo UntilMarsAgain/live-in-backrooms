@@ -1,9 +1,9 @@
 //! 场景模块测试：层级变换、合并、灯光缓存与主相机生命周期。
 
 use super::*;
-use crate::engine::Mesh;
 use crate::engine::AssetManager;
 use crate::engine::MergedResourceSpace;
+use crate::engine::Mesh;
 use crate::engine::MeshView;
 use glam::{Quat, Vec3};
 
@@ -249,7 +249,10 @@ fn objects_collide_uses_world_aabb() {
         scene.objects_collide(&MeshView::new(&assets), a, b),
         "中心距 0.5 < 1 应相交"
     );
-    assert!(!scene.objects_collide(&MeshView::new(&assets), a, c), "中心距 2 > 1 应分离");
+    assert!(
+        !scene.objects_collide(&MeshView::new(&assets), a, c),
+        "中心距 2 > 1 应分离"
+    );
     // 已删除的句柄不参与碰撞。
     scene.remove_object(c);
     assert!(!scene.objects_collide(&MeshView::new(&assets), a, c));
@@ -273,7 +276,10 @@ fn collides_with_external_probe() {
 
     // 远离时无碰撞。
     let away = Transform::new(Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE);
-    assert_eq!(scene.collides_with(&MeshView::new(&assets), &away, player_box, &[]), None);
+    assert_eq!(
+        scene.collides_with(&MeshView::new(&assets), &away, player_box, &[]),
+        None
+    );
 
     // 旋转 45° 后包围盒变大：probe 的 x 半宽从 0.3 增到 0.3√2 ≈ 0.424，
     // 中心距 0.9 < 0.5 + 0.424 所以相交；不旋转时 0.9 会分离（0.6 > 0.5）。

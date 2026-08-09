@@ -13,11 +13,10 @@ fn decodes_repo_hdr_if_present() {
     assert!(env.width > 0 && env.height > 0);
     assert_eq!(env.rgb.len(), (env.width * env.height) as usize);
     // HDRI 不该全黑：至少有一个非零像素。
-    assert!(
-        env.rgb
-            .iter()
-            .any(|p| p[0] > 0.0 || p[1] > 0.0 || p[2] > 0.0)
-    );
+    assert!(env
+        .rgb
+        .iter()
+        .any(|p| p[0] > 0.0 || p[1] > 0.0 || p[2] > 0.0));
 }
 
 /// CPU 转换：2×1 红绿图 → 立方体贴图，所有面都应有非零数据。

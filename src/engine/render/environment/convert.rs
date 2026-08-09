@@ -6,8 +6,8 @@
 use wgpu::{BindGroupDescriptor, BindGroupEntry, CommandEncoderDescriptor, TextureViewDescriptor};
 
 use super::{
-    BRDF_LUT_SIZE, ENV_CUBEMAP_SIZE, EnvironmentGpu, EnvironmentResources, IRRADIANCE_SAMPLES,
-    IRRADIANCE_SIZE, PREFILTER_MIP_COUNT, PREFILTER_SAMPLES, PREFILTERED_SIZE,
+    EnvironmentGpu, EnvironmentResources, BRDF_LUT_SIZE, ENV_CUBEMAP_SIZE, IRRADIANCE_SAMPLES,
+    IRRADIANCE_SIZE, PREFILTERED_SIZE, PREFILTER_MIP_COUNT, PREFILTER_SAMPLES,
 };
 use crate::engine::core::environment::Environment;
 use crate::engine::render::uniform::{EnvParams, PrefilterParams};

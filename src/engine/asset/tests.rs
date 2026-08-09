@@ -131,7 +131,10 @@ fn load_repo_test_glb() {
     let mut assets = AssetManager::new(space);
     let scene = assets.load_scene(&path).expect("test/test.glb 应能加载");
     assert!(assets.iter_of::<Mesh>().next().is_some());
-    assert!(assets.iter_of::<Texture>().next().is_some(), "PBR 样例应带基础色贴图");
+    assert!(
+        assets.iter_of::<Texture>().next().is_some(),
+        "PBR 样例应带基础色贴图"
+    );
     assert!(scene.object_count() > 0);
     // PBR 材质数据应完整：至少一个网格物体带金属度/粗糙度贴图和法线贴图。
     let pbr_material = scene.objects().find_map(|(_, object)| {
@@ -171,16 +174,22 @@ fn load_file_dedupes_same_path() {
     let path: crate::engine::GamePath = "test:tri.glb".parse().expect("合法路径");
     let mut assets = AssetManager::new(space);
 
-    assets.load_file(GlbFileLoader, path.clone()).expect("首次加载");
+    assets
+        .load_file(GlbFileLoader, path.clone())
+        .expect("首次加载");
     let first = assets.loaded_handles_of::<Mesh>(&path);
-    assets.load_file(GlbFileLoader, path.clone()).expect("再次加载");
+    assets
+        .load_file(GlbFileLoader, path.clone())
+        .expect("再次加载");
     let second = assets.loaded_handles_of::<Mesh>(&path);
     assert_eq!(first, second, "同路径应复用句柄");
     assert_eq!(assets.iter_of::<Mesh>().count(), 1, "不应产生重复条目");
 
     // 逐出（DiskOnly）后再加载：句柄仍有效，依旧复用、不重复注册。
     assets.unload_memory(&path);
-    assets.load_file(GlbFileLoader, path.clone()).expect("逐出后加载");
+    assets
+        .load_file(GlbFileLoader, path.clone())
+        .expect("逐出后加载");
     let third = assets.loaded_handles_of::<Mesh>(&path);
     assert_eq!(first, third, "DiskOnly 的已注册句柄也应复用");
     assert_eq!(assets.iter_of::<Mesh>().count(), 1);

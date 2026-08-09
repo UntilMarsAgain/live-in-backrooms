@@ -22,8 +22,8 @@ mod scene;
 mod tests;
 pub(crate) mod uniform;
 
-pub use asset::{GpuManager, MeshGpu, TextureGpu};
 use self::blit::BlitResources;
+pub use asset::{GpuManager, MeshGpu, TextureGpu};
 use wgpu::Color;
 
 use self::debug::LineGizmos;

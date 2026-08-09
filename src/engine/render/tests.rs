@@ -661,7 +661,10 @@ fn gpu_manager_mesh_gpu_uploads_on_demand() {
     let mesh = assets.register(crate::engine::Mesh::cube());
 
     // 注册后既未 pin 也未 sync：ensure 应现场上传，且此后不回收。
-    assert!(gpu.mesh_gpu(mesh, &mut assets).is_some(), "有效句柄应按需上传");
+    assert!(
+        gpu.mesh_gpu(mesh, &mut assets).is_some(),
+        "有效句柄应按需上传"
+    );
     assert!(gpu.mesh_gpu_resident(mesh).is_some());
     // 上传即刷新最近取用：sync 不会回收它。
     gpu.sync(&mut assets);

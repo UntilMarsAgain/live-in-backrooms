@@ -72,9 +72,27 @@ mod tests {
             ignore_stale_window: false,
         };
         // 窗口 10：now=20 时，last_used>=10 保留。
-        assert!(policy.should_keep(&GcInfo { last_used: 20, pins: 0 }, 20));
-        assert!(policy.should_keep(&GcInfo { last_used: 10, pins: 0 }, 20));
-        assert!(!policy.should_keep(&GcInfo { last_used: 9, pins: 0 }, 20));
+        assert!(policy.should_keep(
+            &GcInfo {
+                last_used: 20,
+                pins: 0
+            },
+            20
+        ));
+        assert!(policy.should_keep(
+            &GcInfo {
+                last_used: 10,
+                pins: 0
+            },
+            20
+        ));
+        assert!(!policy.should_keep(
+            &GcInfo {
+                last_used: 9,
+                pins: 0
+            },
+            20
+        ));
     }
 
     #[test]
@@ -84,14 +102,26 @@ mod tests {
             evict_pinned: false,
             ignore_stale_window: false,
         };
-        assert!(protect.should_keep(&GcInfo { last_used: 1, pins: 2 }, 100));
+        assert!(protect.should_keep(
+            &GcInfo {
+                last_used: 1,
+                pins: 2
+            },
+            100
+        ));
 
         let force = GcPolicy {
             stale_window: 0,
             evict_pinned: true,
             ignore_stale_window: false,
         };
-        assert!(!force.should_keep(&GcInfo { last_used: 1, pins: 2 }, 100));
+        assert!(!force.should_keep(
+            &GcInfo {
+                last_used: 1,
+                pins: 2
+            },
+            100
+        ));
     }
 
     #[test]
@@ -102,8 +132,20 @@ mod tests {
             ignore_stale_window: true,
         };
         // 刚取用过的未 pin 条目也被释放；pin 的保留。
-        assert!(!sweep.should_keep(&GcInfo { last_used: 99, pins: 0 }, 100));
-        assert!(sweep.should_keep(&GcInfo { last_used: 1, pins: 1 }, 100));
+        assert!(!sweep.should_keep(
+            &GcInfo {
+                last_used: 99,
+                pins: 0
+            },
+            100
+        ));
+        assert!(sweep.should_keep(
+            &GcInfo {
+                last_used: 1,
+                pins: 1
+            },
+            100
+        ));
 
         // 配合 evict_pinned：连 pinned 一起清空。
         let full_sweep = GcPolicy {
@@ -111,6 +153,12 @@ mod tests {
             evict_pinned: true,
             ignore_stale_window: true,
         };
-        assert!(!full_sweep.should_keep(&GcInfo { last_used: 99, pins: 3 }, 100));
+        assert!(!full_sweep.should_keep(
+            &GcInfo {
+                last_used: 99,
+                pins: 3
+            },
+            100
+        ));
     }
 }

@@ -7,10 +7,10 @@ use wgpu::{BindGroupDescriptor, BindGroupEntry, BufferDescriptor, BufferUsages};
 use crate::engine::asset::MeshView;
 use crate::engine::core::asset::AssetManager;
 use crate::engine::core::environment::Environment;
-use crate::engine::render::debug;
 use crate::engine::render::asset::GpuManager;
+use crate::engine::render::debug;
 use crate::engine::render::uniform::{
-    AGX_DEFAULT_EV_MAX, AGX_DEFAULT_EV_MIN, AGX_MIDDLE_GRAY_LOG2, ObjectData,
+    ObjectData, AGX_DEFAULT_EV_MAX, AGX_DEFAULT_EV_MIN, AGX_MIDDLE_GRAY_LOG2,
 };
 use crate::engine::render::Renderer;
 use crate::engine::scene::Scene;
