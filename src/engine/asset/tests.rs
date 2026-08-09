@@ -156,3 +156,29 @@ fn compute_tangents_basic() {
     let tangents = compute_tangents(&positions, &normals, &uvs, &[0, 1, 2]);
     assert_eq!(tangents[0], [1.0, 0.0, 0.0, 1.0]);
 }
+
+/// 去重：同一 GamePath 再次 `load_meshes` 返回已有句柄，不重复解析/注册。
+#[test]
+fn load_meshes_dedupes_same_path() {
+    let bin = triangle_bin();
+    let bytes = glb_bytes(TRIANGLE_JSON, &bin);
+    let dir = std::env::temp_dir().join("lib-test-dedup");
+    let ns = dir.join("test");
+    std::fs::create_dir_all(&ns).expect("创建测试目录");
+    std::fs::write(ns.join("tri.glb"), &bytes).expect("写测试文件");
+
+    let space = crate::engine::MergedResourceSpace::new(dir);
+    let path: crate::engine::GamePath = "test:tri.glb".parse().expect("合法路径");
+    let mut assets = AssetManager::new(space);
+
+    let first = load_meshes(&mut assets, &path).expect("首次加载");
+    let second = load_meshes(&mut assets, &path).expect("再次加载");
+    assert_eq!(first, second, "同路径应复用句柄");
+    assert_eq!(assets.iter_of::<Mesh>().count(), 1, "不应产生重复条目");
+
+    // 逐出（DiskOnly）后再加载：句柄仍有效，依旧复用、不重复注册。
+    assets.unload_memory(&path);
+    let third = load_meshes(&mut assets, &path).expect("逐出后加载");
+    assert_eq!(first, third, "DiskOnly 的已注册句柄也应复用");
+    assert_eq!(assets.iter_of::<Mesh>().count(), 1);
+}

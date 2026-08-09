@@ -162,6 +162,11 @@ pub struct AssetManager {
     /// 每文件的条目引用计数（**跨类型合计**）：计数归零（所有条目都被 `remove`）
     /// 时才释放重载器（关联计数）。
     file_refs: HashMap<GamePath, u32>,
+    /// 反向索引：来源文件 → 该文件注册过的条目句柄（index, generation）。
+    ///
+    /// 用于"同一 GamePath 已加载则不重复注册"（去重），`remove` 时同步删除；
+    /// 键是**规范化后**的 GamePath（`a//b` 与 `a/b` 是同一个键）。
+    file_entries: HashMap<GamePath, Vec<(u32, u32)>>,
     slots: Vec<Option<Slot>>,
     /// 空闲槽索引栈（复用被卸载的槽位）。
     free: Vec<u32>,
@@ -173,10 +178,11 @@ impl std::fmt::Debug for AssetManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "AssetManager {{ slots: {}, reloaders: {}, file_refs: {} }}",
+            "AssetManager {{ slots: {}, reloaders: {}, file_refs: {}, file_entries: {} }}",
             self.slots.len(),
             self.reloaders.len(),
             self.file_refs.len(),
+            self.file_entries.len(),
         )
     }
 }
@@ -187,6 +193,7 @@ impl AssetManager {
             space,
             reloaders: HashMap::new(),
             file_refs: HashMap::new(),
+            file_entries: HashMap::new(),
             slots: Vec::new(),
             free: Vec::new(),
             version: 0,
@@ -211,14 +218,20 @@ impl AssetManager {
         data: T,
     ) -> Handle<T> {
         *self.file_refs.entry(source.clone()).or_insert(0) += 1;
-        self.register_with_source(
+        let handle = self.register_with_source(
             TypeId::of::<T>(),
             EntryData::File {
-                source,
+                source: source.clone(),
                 extra,
                 data: Some(Box::new(data)),
             },
-        )
+        );
+        // 反向索引：路径 → 句柄（去重用）。
+        self.file_entries
+            .entry(source)
+            .or_default()
+            .push((handle.index, handle.generation));
+        handle
     }
 
     /// 注册一个文件的"重载器"（每个来源一次）：内存层缺失时用它重新解析。
@@ -390,8 +403,16 @@ impl AssetManager {
             slot.generation += 1;
             slot.data.take()
         };
-        // B1.2：该文件最后一条存活条目被移除 → 释放解析结果与重载器。
+        // 反向索引同步删除 + B1.2 引用计数。
         if let Some(EntryData::File { source, .. }) = &data {
+            if let Some(handles) = self.file_entries.get_mut(source) {
+                handles.retain(|&(index, generation)| {
+                    !(index == handle.index && generation == handle.generation)
+                });
+                if handles.is_empty() {
+                    self.file_entries.remove(source);
+                }
+            }
             if let Some(count) = self.file_refs.get_mut(source) {
                 *count -= 1;
                 if *count == 0 {
@@ -441,6 +462,29 @@ impl AssetManager {
             })
     }
 
+    /// 某来源文件已注册的 `T` 类型句柄（去重用；没有则返回空）。
+    ///
+    /// `load_entries`/`load_scene` 在注册前先查它：同路径同类型已加载就直接
+    /// 复用句柄，不再解析、不再产生重复条目。
+    pub fn loaded_handles_of<T: Any>(&self, source: &GamePath) -> Vec<Handle<T>> {
+        let target = TypeId::of::<T>();
+        self.file_entries
+            .get(source)
+            .into_iter()
+            .flatten()
+            .filter_map(|&(index, generation)| {
+                let slot = self.slots.get(index as usize)?.as_ref()?;
+                // 只看"是否已注册过该类型"：DiskOnly（数据已逐出）也算，避免
+                // 逐出后重复注册；世代匹配保证不是已移除的旧句柄。
+                (slot.generation == generation && slot.type_id == target).then(|| Handle {
+                        index,
+                        generation,
+                        _marker: PhantomData,
+                    })
+            })
+            .collect()
+    }
+
     /// 内存卸载（按文件）：命中 File 条目的数据丢弃（置 `DiskOnly`），
     /// 来源 + 定位保留，下次 `get` 经重载器完整重解析。
     pub fn unload_memory(&mut self, source: &GamePath) {
@@ -487,6 +531,7 @@ impl AssetManager {
             }
         }
         self.reloaders.retain(|source, _| in_use.contains(source));
+        self.file_entries.retain(|source, _| in_use.contains(source));
         self.file_refs.retain(|source, _| in_use.contains(source));
     }
 
@@ -625,6 +670,28 @@ mod tests {
         assert!(assets.remove(b).is_some());
         assert!(assets.file_refs.is_empty());
         assert!(assets.reloaders.is_empty());
+    }
+
+    /// 反向索引：路径 → 句柄；remove 时同步删除；规范化路径是同一个键。
+    #[test]
+    fn file_entries_index_tracks_and_sync_removes() {
+        let mut assets = manager();
+        let path: GamePath = "test:a//b.glb".parse().unwrap(); // 规范化 → a/b.glb
+        assert_eq!(path.path(), "a/b.glb");
+        let a = assets.register_file::<u32>(path.clone(), Box::new(0u32), 7u32);
+        let b = assets.register_file::<u32>(path.clone(), Box::new(1u32), 8u32);
+
+        let handles = assets.loaded_handles_of::<u32>(&path);
+        assert_eq!(handles.len(), 2);
+        assert!(handles.contains(&a));
+        assert!(handles.contains(&b));
+
+        // remove 同步删除索引条目。
+        assets.remove(a);
+        assert_eq!(assets.loaded_handles_of::<u32>(&path), vec![b]);
+        assets.remove(b);
+        assert!(assets.loaded_handles_of::<u32>(&path).is_empty());
+        assert!(assets.file_entries.is_empty());
     }
 
     /// 文件条目：数据本体在槽位（单一存储点），来源可见。

@@ -89,6 +89,11 @@ where
     T: Any + Send + Sync + 'static,
     L: AssetLoader<T> + Clone + Send + Sync + 'static,
 {
+    // 去重：同路径同类型已加载 → 直接复用句柄，不再解析。
+    let existing = manager.loaded_handles_of::<T>(path);
+    if !existing.is_empty() {
+        return Ok(existing);
+    }
     // 1. 完整解析一次，条目数据拷贝进槽位（解析结果随即丢弃——单一存储点）。
     let parsed = loader.load(manager.space(), path)?;
     let entries = loader.entries(&parsed);
@@ -151,23 +156,36 @@ pub fn load_scene(
         path.clone(),
         file_reloader::<Mesh, GlbLoader>(GlbLoader, path.clone()),
     );
-    let mesh_handles: Vec<Handle<Mesh>> = glb
-        .meshes
-        .iter()
-        .enumerate()
-        .map(|(i, mesh)| {
-            // 单一存储点：数据拷贝进槽位，解析结果 glb 随后丢弃。
-            assets.register_file::<Mesh>(path.clone(), Box::new(i as u32), mesh.clone())
-        })
-        .collect();
-    let texture_handles: Vec<Handle<Texture>> = glb
-        .textures
-        .iter()
-        .enumerate()
-        .map(|(i, texture)| {
-            assets.register_file::<Texture>(path.clone(), Box::new(i as u32), texture.clone())
-        })
-        .collect();
+    let mesh_handles: Vec<Handle<Mesh>> = {
+        let existing = assets.loaded_handles_of::<Mesh>(path);
+        if !existing.is_empty() {
+            existing
+        } else {
+            glb.meshes
+                .iter()
+                .enumerate()
+                .map(|(i, mesh)| {
+                    // 单一存储点：数据拷贝进槽位，解析结果 glb 随后丢弃。
+                    assets.register_file::<Mesh>(path.clone(), Box::new(i as u32), mesh.clone())
+                })
+                .collect()
+        }
+    };
+    let texture_handles: Vec<Handle<Texture>> = {
+        let existing = assets.loaded_handles_of::<Texture>(path);
+        if !existing.is_empty() {
+            existing
+        } else {
+            glb.textures
+                .iter()
+                .enumerate()
+                .map(|(i, texture)| {
+                    assets
+                        .register_file::<Texture>(path.clone(), Box::new(i as u32), texture.clone())
+                })
+                .collect()
+        }
+    };
 
     // 2. document 网格 → primitive 句柄列表（mesh_handles 是全局 primitive 顺序）。
     let mut mesh_keys: HashMap<usize, Vec<Handle<Mesh>>> = HashMap::new();

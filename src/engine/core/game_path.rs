@@ -27,7 +27,7 @@ pub struct GamePath {
 impl GamePath {
     pub fn new(namespace: impl Into<String>, path: impl Into<String>) -> Result<Self> {
         let namespace = namespace.into();
-        let path = path.into();
+        let path = normalize_path(&path.into());
         validate_namespace(&namespace)?;
         validate_path(&path)?;
         Ok(Self { namespace, path })
@@ -49,6 +49,35 @@ impl GamePath {
     pub fn resolve(&self, root: &Path) -> PathBuf {
         root.join(&self.namespace).join(&self.path)
     }
+}
+
+/// 路径规范化：把"不同写法但指向同一文件"的地址折叠成唯一形式。
+///
+/// 当前规则（path 段已不允许 `.`/`..`、不允许反斜杠，因此只剩这两类）：
+/// - 折叠连续 `/`：`a//b` → `a/b`；
+/// - 去掉尾部 `/`：`a/b/` → `a/b`。
+///
+/// 大小写**不**折叠（Linux 文件系统区分大小写；折叠会把不同文件合并）。
+/// 规范化在构造时完成，因此 `==`/`Hash` 会把等价写法视为同一路径——
+/// 资产去重索引（GamePath → 句柄）天然把它们当成同一个文件。
+fn normalize_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_slash = false;
+    for c in s.chars() {
+        if c == '/' {
+            if !prev_slash {
+                out.push(c);
+            }
+            prev_slash = true;
+        } else {
+            out.push(c);
+            prev_slash = false;
+        }
+    }
+    while out.ends_with('/') {
+        out.pop();
+    }
+    out
 }
 
 impl FromStr for GamePath {
@@ -132,6 +161,23 @@ mod tests {
         assert_eq!(p.namespace(), "vanilla");
         assert_eq!(p.path(), "models/tiles/corridor.glb");
         assert_eq!(p.to_string(), "vanilla:models/tiles/corridor.glb");
+    }
+
+    /// 规范化：连续斜杠与尾部斜杠折叠成同一路径（等价写法 = 同一个 GamePath）。
+    #[test]
+    fn normalize_equivalent_addresses() {
+        let a: GamePath = "vanilla:a//b/c.glb".parse().unwrap();
+        let b: GamePath = "vanilla:a/b/c.glb".parse().unwrap();
+        assert_eq!(a, b, "a//b 与 a/b 应等价");
+        assert_eq!(a.path(), "a/b/c.glb");
+
+        let c: GamePath = "vanilla:a/b/c.glb/".parse().unwrap();
+        assert_eq!(c, b, "尾部斜杠应折叠");
+        assert_eq!(c.path(), "a/b/c.glb");
+
+        // 规范化后仍拒绝空路径 / 绝对路径。
+        assert!("vanilla://".parse::<GamePath>().is_err());
+        assert!("vanilla://a".parse::<GamePath>().is_err());
     }
 
     /// resolve：包根 + namespace + path。
