@@ -1,23 +1,19 @@
-//! 统一资产管理：唯一稳定句柄 + CPU/GPU 双持有 + 驻留状态机。
+//! 统一资产管理（类型无关）：唯一稳定句柄 + 类型擦除存储 + 磁盘/内存驻留状态机。
 //!
-//! 游戏逻辑侧只碰 [`Handle<T>`]：注册、查询、`pin`/`unpin`、卸载；
-//! GPU 表示类型与上传器实现（`MeshGpu`/`MeshUploader` 等）在
-//! [`crate::engine::render::asset`] 层，本模块只保留抽象：句柄、注册表、
-//! 状态机与上传接口。渲染器等 GPU 使用方在上传/回收后按句柄取数据。
+//! - [`Handle<T>`]：带世代的稳定句柄，`T` 是**编译期标记**（不同资源不同类型，
+//!   不能混用）；槽位存储本身是类型擦除的；
+//! - [`AssetManager`]：类型无关的存储与生命周期管理——注册/移除/驻留状态/
+//!   内存层。数据以 `Box<dyn Any>` 存储，**解读留给外部**（资产层的 typed 助手
+//!   负责把句柄解读成 `&Mesh`/`&Texture` 等）；
+//! - [`MemoryLayer`]：按文件缓存解析结果（类型擦除，供该文件所有条目共享）。
 //!
-//! 资源类型由渲染层的 [`asset_types!`] 宏注册：每类一个 [`AssetRegistry`]，
-//! GPU 表示类型作为第二泛型参数（纯数据资源用 `()`，无显存阶段）。
-//! 句柄带世代编号：卸载后旧句柄失效（不会误用已复用的槽位），且
-//! `Handle<Mesh>` 与 `Handle<Texture>` 在编译期就不允许混用。
-//!
-//! 渲染器/游戏逻辑已接入；`AssetRegistry` 的部分查询方法在批量 pin、调试
-//! 工具等场景使用，未全部覆盖前保留 allow。
+//! 职责边界：本模块只管理"内存"（槽位、内存层、状态机），不解读数据；
+//! 文件解析/条目解读在 [`crate::engine::asset`]，显存驻留在渲染层 `GpuManager`。
 #![allow(dead_code)]
 
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::any::Any;
-
-use wgpu::{Device, Queue};
 
 use super::game_path::GamePath;
 use super::mesh::Mesh;
@@ -67,38 +63,40 @@ impl<T> Handle<T> {
     }
 }
 
-/// 资源驻留状态：内存（CPU 数据）与显存（GPU 表示）的生命周期。
+/// 资源驻留状态：CPU 数据在不在内存、是否要求显存驻留。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetState {
     /// 已移除：句柄失效，数据与来源均不保留。
     Unloaded,
     /// 数据不在内存，但来源（`GamePath`）保留，可经 `ensure_loaded` 从磁盘重载。
     DiskOnly,
-    /// CPU 数据驻留内存（内联数据或内存层文件结果）；GPU 表示可存在、可回收。
+    /// CPU 数据驻留内存（内联数据或内存层文件结果）。
     Resident,
-    /// 要求 GPU 驻留：上传后禁止回收。
+    /// 要求显存驻留：GPU 层上传后禁止回收。
     Pinned,
 }
 
-/// 条目的 CPU 数据来源。
+/// 条目数据（类型擦除）：内联数据或文件条目。
 ///
-/// - [`DataSource::Inline`]：程序生成/直接给的（`Mesh::cube`），数据随注册表持有；
-/// - [`DataSource::File`]：来自文件解析结果（内存层），`extra` 是解析器自定义的
-///   定位信息（如 glb 的 primitive 索引、音频的音轨名）——具体类型只有解析器
-///   知道，取回时按 [`AssetLoader::Extra`] downcast。
-pub enum DataSource<T> {
-    Inline(T),
+/// **单一存储点**：无论内联还是文件条目，数据本体都在槽位里（解析结果拷贝
+/// 出来后原解析结果即丢弃）；文件条目额外记录来源与定位，供缺失时重读。
+pub enum EntryData {
+    /// 内存来源：数据本体在槽位里（注册时所有权移入）。
+    Inline(Box<dyn Any + Send + Sync>),
+    /// GamePath 来源：数据本体也在槽位里（解析结果拷贝出来），
+    /// 额外记录来源 + 定位，`data = None` 表示已逐出（DiskOnly）。
     File {
         source: GamePath,
         extra: Box<dyn Any + Send + Sync>,
+        /// 条目自己的数据（重读时经重载器重新解析填入）。
+        data: Option<Box<dyn Any + Send + Sync>>,
     },
 }
 
-// `extra` 是类型擦除的 `Box<dyn Any>`，无法 derive Debug；手动实现只打印来源。
-impl<T: std::fmt::Debug> std::fmt::Debug for DataSource<T> {
+impl std::fmt::Debug for EntryData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Inline(data) => write!(f, "Inline({data:?})"),
+            Self::Inline(_) => write!(f, "Inline(<erased>)"),
             Self::File { source, .. } => write!(f, "File({source})"),
         }
     }
@@ -107,98 +105,142 @@ impl<T: std::fmt::Debug> std::fmt::Debug for DataSource<T> {
 /// 资源加载器：把游戏路径解析为若干 CPU 数据条目。
 ///
 /// 解析粒度为**文件**（一个文件可能产出多条，如 glb 的多个网格）；`Extra` 是
-/// 条目在解析结果中的定位信息（类型由解析器自定，通过 `Box<dyn Any>` 存储），
-/// `Parsed` 是文件级解析结果（内存层按 `GamePath` 缓存一份，供所有条目共享）。
+/// 条目在解析结果中的定位信息（类型由解析器自定），`Parsed` 是文件级解析结果
+/// （内存层按 `GamePath` 缓存一份，供所有条目共享）。
+///
+/// 本 trait 是**外部解读**的接口：资产层实现它，把类型无关的存储解读成 typed 数据。
 pub trait AssetLoader<T> {
-    /// 条目定位信息类型（如 glb 的 primitive 索引、音频的音轨名）。
+    /// 条目定位信息类型（如 glb 的 primitive 索引）。
     type Extra: Any + Send + Sync + PartialEq;
     /// 文件解析结果类型（内存层以 `Box<dyn Any>` 存储，重载时整份复用）。
     type Parsed: Any + Send + Sync;
 
     /// 解析文件（从合并资源空间读取），返回文件级解析结果。
-    fn load(&self, space: &MergedResourceSpace, path: &GamePath)
-        -> anyhow::Result<Self::Parsed>;
+    fn load(&self, space: &MergedResourceSpace, path: &GamePath) -> anyhow::Result<Self::Parsed>;
 
     /// 从解析结果产出条目（注册时调用：每条目一个 `(数据, 定位信息)`）。
     fn entries(&self, parsed: &Self::Parsed) -> Vec<(T, Self::Extra)>;
 
     /// 按定位信息从解析结果取回条目数据（重载/访问时调用）。
-    ///
-    /// 返回引用绑定 `parsed`（内存层数据），而非 `self`——这样调用方拿到的
-    /// 数据引用只借内存层，可以与上传器等其他字段的可变借用共存。
     fn entry<'a>(&self, parsed: &'a Self::Parsed, extra: &Self::Extra) -> Option<&'a T>;
-}
-
-/// 上传器：把一类资源的 CPU 数据转换为 GPU 表示。
-///
-/// 实现可以携带状态（设备能力分支、调试计数等），由渲染层的资产管理器
-/// 持有并在同步/按需上传时传入注册表。纯数据资源（GPU 类型 `()`）用
-/// [`NoGpuUploader`] 空实现。
-pub trait GpuUploader<T, G> {
-    fn upload(&mut self, device: &Device, queue: &Queue, data: &T) -> G;
 }
 
 /// 网格数据源：场景碰撞/调试按句柄取 CPU 网格数据。
 ///
-/// 由持有资源的资产管理器实现，隔离 core 与 GPU 实现层（scene 只依赖
-/// core，不反向依赖 render）。
+/// 由资产层的解读视图（`MeshView`）实现——`scene` 只依赖 core，不反向依赖资产层。
 pub trait MeshSource {
     fn mesh(&self, handle: Handle<Mesh>) -> Option<&Mesh>;
 }
 
-/// 注册表槽位：世代 + 状态 + CPU 数据 + GPU 表示。
+/// 注册表槽位：世代 + 状态 + 类型标记 + 数据。
 #[derive(Debug)]
-struct Slot<T, G> {
+struct Slot {
     generation: u32,
     state: AssetState,
+    /// 注册时的类型标记（`T`），迭代按类型过滤用。
+    type_id: TypeId,
     /// `None` = 已移除（世代保留，槽位可复用）。
-    data: Option<DataSource<T>>,
-    gpu: Option<G>,
+    data: Option<EntryData>,
 }
 
-/// 单类资源注册表：世代句柄 + 槽位复用 + 版本号。
-#[derive(Debug)]
-pub struct AssetRegistry<T, G> {
-    slots: Vec<Option<Slot<T, G>>>,
+/// 类型无关的资产管理器：内存（槽位 + 内存层）与驻留状态机。
+///
+/// 所有带句柄的方法都以 `Handle<T>` 为参数——`T` 只用于编译期区分与
+/// `TypeId` 标记；存储本身不关心 `T` 是什么。
+pub struct AssetManager {
+    space: MergedResourceSpace,
+    /// 每文件的"重载器"：条目数据缺失（DiskOnly）时**完整重新解析**该文件，
+    /// 按 `extra` 取回对应条目数据。由资产层在加载时配置（解读外部）。
+    reloaders: HashMap<
+        GamePath,
+        Box<
+            dyn Fn(&MergedResourceSpace, &dyn Any) -> anyhow::Result<Box<dyn Any + Send + Sync>>
+                + Send
+                + Sync,
+        >,
+    >,
+    /// 每文件的条目引用计数（**跨类型合计**）：计数归零（所有条目都被 `remove`）
+    /// 时才释放重载器（关联计数）。
+    file_refs: HashMap<GamePath, u32>,
+    slots: Vec<Option<Slot>>,
     /// 空闲槽索引栈（复用被卸载的槽位）。
     free: Vec<u32>,
-    /// 变更版本：新增/卸载 +1，驱动 GPU 侧增量同步。
+    /// 变更版本：新增/卸载 +1。
     version: u64,
 }
 
-impl<T, G> AssetRegistry<T, G> {
-    pub fn new() -> Self {
+impl std::fmt::Debug for AssetManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AssetManager {{ slots: {}, reloaders: {}, file_refs: {} }}",
+            self.slots.len(),
+            self.reloaders.len(),
+            self.file_refs.len(),
+        )
+    }
+}
+
+impl AssetManager {
+    pub fn new(space: MergedResourceSpace) -> Self {
         Self {
+            space,
+            reloaders: HashMap::new(),
+            file_refs: HashMap::new(),
             slots: Vec::new(),
             free: Vec::new(),
             version: 0,
         }
     }
 
-    /// 注册一份 CPU 数据，返回稳定句柄（世代防复用误用）。
-    pub fn register(&mut self, data: T) -> Handle<T> {
-        self.register_with_source(DataSource::Inline(data))
+    /// 合并资源空间（`GamePath` → 文件流）。
+    pub fn space(&self) -> &MergedResourceSpace {
+        &self.space
     }
 
-    /// 注册一个来自文件解析结果的条目（`source` 为文件路径，`extra` 为
-    /// 条目定位信息）。数据本体在内存层的文件结果中，注册表只记来源。
-    pub fn register_file(
+    /// 注册一份内联数据，返回带类型标记的句柄。
+    pub fn register<T: Any + Send + Sync>(&mut self, data: T) -> Handle<T> {
+        self.register_with_source(TypeId::of::<T>(), EntryData::Inline(Box::new(data)))
+    }
+
+    /// 注册一个文件条目：数据**拷贝进槽位**（单一存储点），来源 + 定位供重读。
+    pub fn register_file<T: Any + Send + Sync>(
         &mut self,
         source: GamePath,
         extra: Box<dyn Any + Send + Sync>,
+        data: T,
     ) -> Handle<T> {
-        self.register_with_source(DataSource::File { source, extra })
+        *self.file_refs.entry(source.clone()).or_insert(0) += 1;
+        self.register_with_source(
+            TypeId::of::<T>(),
+            EntryData::File {
+                source,
+                extra,
+                data: Some(Box::new(data)),
+            },
+        )
     }
 
-    fn register_with_source(&mut self, data: DataSource<T>) -> Handle<T> {
+    /// 注册一个文件的"重载器"（每个来源一次）：内存层缺失时用它重新解析。
+    pub fn set_file_reloader(
+        &mut self,
+        source: GamePath,
+        reload: impl Fn(&MergedResourceSpace, &dyn Any) -> anyhow::Result<Box<dyn Any + Send + Sync>>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        self.reloaders.insert(source, Box::new(reload));
+    }
+
+    fn register_with_source<T>(&mut self, type_id: TypeId, data: EntryData) -> Handle<T> {
         let handle = if let Some(index) = self.free.pop() {
             let slot = self.slots[index as usize]
                 .as_mut()
                 .expect("free 列表必然指向存活槽位");
-            // remove 时世代已递增，复用直接用当前世代（旧句柄已失效）。
             slot.state = AssetState::Resident;
+            slot.type_id = type_id;
             slot.data = Some(data);
-            slot.gpu = None;
             Handle {
                 index,
                 generation: slot.generation,
@@ -209,8 +251,8 @@ impl<T, G> AssetRegistry<T, G> {
             self.slots.push(Some(Slot {
                 generation: 1,
                 state: AssetState::Resident,
+                type_id,
                 data: Some(data),
-                gpu: None,
             }));
             Handle {
                 index,
@@ -222,28 +264,98 @@ impl<T, G> AssetRegistry<T, G> {
         handle
     }
 
-    /// 句柄是否仍指向存活资源（世代匹配）。
-    pub fn is_valid(&self, handle: Handle<T>) -> bool {
-        self.slot(handle).is_some()
+    /// 取数据（downcast 到 `T`）：内联直接返回；文件条目直接取槽位里的数据，
+    /// 数据已被逐出（DiskOnly）时经重载器**完整重解析**该文件并按 `extra` 取回。
+    ///
+    /// 句柄类型与注册类型一致（register 时由 `T` 决定），downcast 失败只可能是
+    /// 程序 bug——debug 构建直接暴露，release 退化为 `None`。
+    pub fn get<T: Any>(&mut self, handle: Handle<T>) -> Option<&T> {
+        self.ensure_entry_data(handle)?;
+        self.get_cached(handle)
     }
 
-    /// 条目的数据来源（内联数据或文件引用）；句柄失效返回 `None`。
-    pub fn data_source(&self, handle: Handle<T>) -> Option<&DataSource<T>> {
+    /// 只读取用（不触发重载）：数据须已在内存（碰撞/调试等只读路径用）。
+    pub fn get_cached<T: Any>(&self, handle: Handle<T>) -> Option<&T> {
+        let slot = self.slot(handle)?;
+        match slot.data.as_ref()? {
+            EntryData::Inline(boxed) => {
+                let out = boxed.downcast_ref::<T>();
+                debug_assert!(out.is_some(), "句柄类型与槽位数据不符（程序 bug）");
+                out
+            }
+            EntryData::File {
+                data: Some(boxed), ..
+            } => {
+                let out = boxed.downcast_ref::<T>();
+                debug_assert!(out.is_some(), "句柄类型与槽位数据不符（程序 bug）");
+                out
+            }
+            EntryData::File { data: None, .. } => None,
+        }
+    }
+
+    /// 条目的数据来源（外部据此解读文件条目）。
+    pub fn data_source<T>(&self, handle: Handle<T>) -> Option<&EntryData> {
         self.slot(handle)?.data.as_ref()
     }
 
-    /// GPU 表示访问（渲染器用）；未上传或句柄失效返回 `None`。
-    pub fn gpu(&self, handle: Handle<T>) -> Option<&G> {
-        self.slot(handle)?.gpu.as_ref()
+    /// 句柄的文件来源（File 条目返回 `GamePath`；内联条目返回 `None`）。
+    pub fn source_of<T>(&self, handle: Handle<T>) -> Option<&GamePath> {
+        match self.data_source(handle)? {
+            EntryData::Inline(_) => None,
+            EntryData::File { source, .. } => Some(source),
+        }
+    }
+
+    /// 确保条目数据在槽位：DiskOnly 的文件条目经重载器**完整重解析**后取回。
+    fn ensure_entry_data<T>(&mut self, handle: Handle<T>) -> Option<()> {
+        // 1. 取来源（复制，结束槽位借用）。
+        let source = match self.data_source(handle)? {
+            EntryData::Inline(_) => return Some(()),
+            EntryData::File { data: Some(_), .. } => return Some(()),
+            EntryData::File { source, .. } => source.clone(),
+        };
+        // 2. 取重载器（move 出来）。
+        let reload = self.reloaders.remove(&source)?;
+        // 3. 读定位信息（不可变借用槽位），调用重载器（只需 &self.space）。
+        let extra_any: &dyn Any = {
+            let entry = self.data_source(handle)?;
+            let EntryData::File { extra, .. } = entry else {
+                return Some(());
+            };
+            &**extra
+        };
+        let parsed = (reload)(&self.space, extra_any).ok()?;
+        // 4. 放回重载器 + 把数据写进槽位。
+        self.reloaders.insert(source, reload);
+        self.set_file_data(handle, parsed);
+        Some(())
+    }
+
+    fn set_file_data<T>(&mut self, handle: Handle<T>, data: Box<dyn Any + Send + Sync>) {
+        if let Some(slot) = self.slot_mut(handle) {
+            if let Some(EntryData::File {
+                data: slot_data, ..
+            }) = &mut slot.data
+            {
+                *slot_data = Some(data);
+                slot.state = AssetState::Resident;
+            }
+        }
+    }
+
+    /// 句柄是否仍指向存活资源（世代匹配）。
+    pub fn is_valid<T>(&self, handle: Handle<T>) -> bool {
+        self.slot(handle).is_some()
     }
 
     /// 当前驻留状态。
-    pub fn state(&self, handle: Handle<T>) -> Option<AssetState> {
+    pub fn state<T>(&self, handle: Handle<T>) -> Option<AssetState> {
         self.slot(handle).map(|s| s.state)
     }
 
-    /// 设置驻留状态（AssetManager 在内存加载/卸载时调用）。
-    pub fn set_state(&mut self, handle: Handle<T>, state: AssetState) -> bool {
+    /// 设置驻留状态（资产层在内存加载/卸载时调用）。
+    pub fn set_state<T>(&mut self, handle: Handle<T>, state: AssetState) -> bool {
         let Some(slot) = self.slot_mut(handle) else {
             return false;
         };
@@ -251,8 +363,8 @@ impl<T, G> AssetRegistry<T, G> {
         true
     }
 
-    /// 标记 GPU 驻留（不立即上传；上传由 `sync_gpu` 或 [`Self::pin_upload`]）。
-    pub fn pin(&mut self, handle: Handle<T>) -> bool {
+    /// 标记要求显存驻留（不立即上传；上传由渲染层 `GpuManager` 完成）。
+    pub fn pin<T>(&mut self, handle: Handle<T>) -> bool {
         let Some(slot) = self.slot_mut(handle) else {
             return false;
         };
@@ -260,8 +372,8 @@ impl<T, G> AssetRegistry<T, G> {
         true
     }
 
-    /// 允许 GPU 回收：`sync_gpu` 时释放 GPU 表示（CPU 数据保留）。
-    pub fn unpin(&mut self, handle: Handle<T>) -> bool {
+    /// 允许显存回收（软释放）：`GpuManager::gc` 时释放对应显存表示。
+    pub fn unpin<T>(&mut self, handle: Handle<T>) -> bool {
         let Some(slot) = self.slot_mut(handle) else {
             return false;
         };
@@ -269,13 +381,25 @@ impl<T, G> AssetRegistry<T, G> {
         true
     }
 
-    /// 卸载：释放 CPU 数据（DataSource）与 GPU 表示，句柄从此失效。
-    pub fn remove(&mut self, handle: Handle<T>) -> Option<DataSource<T>> {
-        let slot = self.slot_mut(handle)?;
-        let data = slot.data.take();
-        slot.gpu = None; // drop GPU 资源，wgpu 延迟到队列空闲回收
-        slot.state = AssetState::Unloaded;
-        slot.generation += 1; // 旧句柄从此失效（世代不匹配）
+    /// 卸载：释放条目数据（EntryData），句柄从此失效。
+    pub fn remove<T>(&mut self, handle: Handle<T>) -> Option<EntryData> {
+        // 先取出数据并结束槽位借用，再处理引用计数（需要 &mut 其他字段）。
+        let data = {
+            let slot = self.slot_mut(handle)?;
+            slot.state = AssetState::Unloaded;
+            slot.generation += 1;
+            slot.data.take()
+        };
+        // B1.2：该文件最后一条存活条目被移除 → 释放解析结果与重载器。
+        if let Some(EntryData::File { source, .. }) = &data {
+            if let Some(count) = self.file_refs.get_mut(source) {
+                *count -= 1;
+                if *count == 0 {
+                    self.file_refs.remove(source);
+                    self.reloaders.remove(source);
+                }
+            }
+        }
         self.free.push(handle.index);
         self.version += 1;
         data
@@ -298,124 +422,172 @@ impl<T, G> AssetRegistry<T, G> {
         self.len() == 0
     }
 
-    /// 遍历所有存活资源句柄（供 AssetManager 同步 GPU / 收集清单用）。
-    pub fn iter(&self) -> impl Iterator<Item = Handle<T>> + '_ {
-        self.slots.iter().enumerate().filter_map(|(index, slot)| {
-            let slot = slot.as_ref()?;
-            if slot.data.is_none() {
-                return None;
-            }
-            Some(
-                Handle {
+    /// 按类型遍历存活句柄（TypeId 过滤；`T` 必须与注册时的类型一致）。
+    pub fn iter_of<T: Any>(&self) -> impl Iterator<Item = Handle<T>> + '_ {
+        let target = TypeId::of::<T>();
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, slot)| {
+                let slot = slot.as_ref()?;
+                if slot.data.is_none() || slot.type_id != target {
+                    return None;
+                }
+                Some(Handle {
                     index: index as u32,
                     generation: slot.generation,
                     _marker: PhantomData,
-                },
-            )
-        })
+                })
+            })
     }
 
-    /// GPU 表示的可变访问（AssetManager 上传/回收时写入）。
-    pub fn gpu_mut(&mut self, handle: Handle<T>) -> Option<&mut Option<G>> {
-        self.slot_mut(handle).map(|slot| &mut slot.gpu)
+    /// 内存卸载（按文件）：命中 File 条目的数据丢弃（置 `DiskOnly`），
+    /// 来源 + 定位保留，下次 `get` 经重载器完整重解析。
+    pub fn unload_memory(&mut self, source: &GamePath) {
+        let indices: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let slot = slot.as_ref()?;
+                matches!(slot.data.as_ref(), Some(EntryData::File { source: s, .. }) if s == source)
+                    .then_some(index)
+            })
+            .collect();
+        for index in indices {
+            if let Some(slot) = self.slots[index].as_mut() {
+                if let Some(EntryData::File { data, .. }) = &mut slot.data {
+                    if data.take().is_some() {
+                        slot.state = AssetState::DiskOnly;
+                    }
+                }
+            }
+        }
     }
 
-    fn slot(&self, handle: Handle<T>) -> Option<&Slot<T, G>> {
+    /// 内存垃圾回收：释放非 `Pinned` 文件条目的数据（→ `DiskOnly`，下次取用
+    /// 自动重读），并清理失效来源的重载器/计数。
+    ///
+    /// 调用时机由物理刻决定（目前由调用方按需触发）。
+    #[allow(dead_code)] // 公共 GC API：物理刻接入前由调用方按需触发
+    pub fn gc(&mut self) {
+        for slot in self.slots.iter_mut().flatten() {
+            if slot.state != AssetState::Pinned {
+                if let Some(EntryData::File { data, .. }) = &mut slot.data {
+                    if data.take().is_some() {
+                        slot.state = AssetState::DiskOnly;
+                    }
+                }
+            }
+        }
+        let mut in_use = std::collections::HashSet::new();
+        for slot in self.slots.iter().flatten() {
+            if let Some(EntryData::File { source, .. }) = &slot.data {
+                in_use.insert(source.clone());
+            }
+        }
+        self.reloaders.retain(|source, _| in_use.contains(source));
+        self.file_refs.retain(|source, _| in_use.contains(source));
+    }
+
+    fn slot<T>(&self, handle: Handle<T>) -> Option<&Slot> {
         let slot = self.slots.get(handle.index as usize)?.as_ref()?;
         (slot.generation == handle.generation).then_some(slot)
     }
 
-    fn slot_mut(&mut self, handle: Handle<T>) -> Option<&mut Slot<T, G>> {
+    fn slot_mut<T>(&mut self, handle: Handle<T>) -> Option<&mut Slot> {
         let slot = self.slots.get_mut(handle.index as usize)?.as_mut()?;
         (slot.generation == handle.generation).then_some(slot)
     }
 }
 
-impl<T, G> Default for AssetRegistry<T, G> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// 纯 CPU 资源（GPU 类型 `()`）的占位上传器：`upload` 是空操作。
-///
-/// rustc 会把空函数调用内联掉，无性能损失；GPU 上传器实现（`MeshUploader`
-/// 等）在渲染层（[`crate::engine::render::asset`]）。
-#[derive(Debug, Default)]
-pub struct NoGpuUploader;
-
-impl<T> GpuUploader<T, ()> for NoGpuUploader {
-    fn upload(&mut self, _device: &Device, _queue: &Queue, _data: &T) {}
-}
-
-/// 声明资产管理器的资源类型集合。
-///
-/// 每个条目：`字段名: CPU类型 => GPU类型, 上传器类型`。纯数据资源
-/// （关卡、AI 等）用 `()` 作 GPU 类型、上传器给一个空函数占位
-/// （[`NoGpuUploader`]）；状态机没有显存阶段。新增资源类型 = 加一行。
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::core::resource::MergedResourceSpace;
     use crate::engine::core::texture::Texture;
+
+    fn manager() -> AssetManager {
+        AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()))
+    }
+
+    /// 测试用文件重载器：模拟"完整重解析"，按 extra 返回对应数据。
+    fn u32_reloader(
+        _space: &MergedResourceSpace,
+        extra: &dyn Any,
+    ) -> anyhow::Result<Box<dyn Any + Send + Sync>> {
+        let index = extra
+            .downcast_ref::<u32>()
+            .ok_or_else(|| anyhow::anyhow!("extra 类型不符"))?;
+        Ok(Box::new(10 + *index))
+    }
 
     #[test]
     fn register_and_get_roundtrip() {
-        let mut meshes: AssetRegistry<Mesh, ()> = AssetRegistry::new();
-        let handle = meshes.register(Mesh::triangle());
-        assert!(meshes.is_valid(handle));
-        assert!(matches!(meshes.data_source(handle), Some(DataSource::Inline(_))));
-        assert_eq!(meshes.state(handle), Some(AssetState::Resident));
+        let mut assets = manager();
+        let handle = assets.register(Mesh::triangle());
+        assert!(assets.is_valid(handle));
+        assert!(matches!(
+            assets.data_source(handle),
+            Some(EntryData::Inline(_))
+        ));
+        assert_eq!(assets.state(handle), Some(AssetState::Resident));
+        assert!(
+            assets.get::<Mesh>(handle).is_some(),
+            "内联数据应能 downcast 取回"
+        );
     }
 
     /// 世代句柄：卸载后旧句柄失效；复用槽位不会误用旧句柄。
     #[test]
     fn removed_handle_stays_invalid_across_slot_reuse() {
-        let mut textures: AssetRegistry<Texture, ()> = AssetRegistry::new();
-        let a = textures.register(Texture::white());
-        let removed = textures.remove(a);
+        let mut assets = manager();
+        let a = assets.register(Texture::white());
+        let removed = assets.remove(a);
         assert!(removed.is_some());
-        assert!(!textures.is_valid(a));
-        assert!(textures.data_source(a).is_none());
+        assert!(!assets.is_valid(a));
+        assert!(assets.data_source(a).is_none());
 
         // 复用同一槽位注册新资源：旧句柄世代不匹配，仍无效。
-        let b = textures.register(Texture::checkerboard(2, 1));
+        let b = assets.register(Texture::checkerboard(2, 1));
         assert_eq!(b.index(), a.index(), "应复用空闲槽位");
         assert_ne!(b.generation(), a.generation(), "世代应递增");
-        assert!(!textures.is_valid(a));
-        assert!(textures.is_valid(b));
-        assert!(textures.data_source(a).is_none());
-        assert!(textures.data_source(b).is_some());
+        assert!(!assets.is_valid(a));
+        assert!(assets.is_valid(b));
     }
 
     /// pin/unpin 切换驻留状态；对失效句柄操作返回 false。
     #[test]
     fn pin_unpin_transitions_state() {
-        let mut meshes: AssetRegistry<Mesh, ()> = AssetRegistry::new();
-        let handle = meshes.register(Mesh::quad());
-        assert!(meshes.pin(handle));
-        assert_eq!(meshes.state(handle), Some(AssetState::Pinned));
-        assert!(meshes.unpin(handle));
-        assert_eq!(meshes.state(handle), Some(AssetState::Resident));
+        let mut assets = manager();
+        let handle = assets.register(Mesh::quad());
+        assert!(assets.pin(handle));
+        assert_eq!(assets.state(handle), Some(AssetState::Pinned));
+        assert!(assets.unpin(handle));
+        assert_eq!(assets.state(handle), Some(AssetState::Resident));
 
         let stale = Handle::<Mesh> {
             index: 999,
             generation: 1,
             _marker: PhantomData,
         };
-        assert!(!meshes.pin(stale));
-        assert!(!meshes.unpin(stale));
+        assert!(!assets.pin(stale));
+        assert!(!assets.unpin(stale));
     }
 
-    /// 迭代器遍历全部存活资源。
+    /// 按类型遍历：只产出该类型的存活句柄。
     #[test]
-    fn iter_yields_all_live_assets() {
-        let mut textures: AssetRegistry<Texture, ()> = AssetRegistry::new();
-        let a = textures.register(Texture::white());
-        let b = textures.register(Texture::checkerboard(2, 1));
-        let keys: Vec<_> = textures.iter().collect();
-        assert_eq!(keys.len(), 2);
-        assert!(keys.contains(&a));
-        assert!(keys.contains(&b));
+    fn iter_of_filters_by_type() {
+        let mut assets = manager();
+        let tex_a = assets.register(Texture::white());
+        let tex_b = assets.register(Texture::checkerboard(2, 1));
+        let _mesh = assets.register(Mesh::cube());
+
+        let tex_handles: Vec<_> = assets.iter_of::<Texture>().collect();
+        assert_eq!(tex_handles.len(), 2);
+        assert!(tex_handles.contains(&tex_a));
+        assert!(tex_handles.contains(&tex_b));
+        assert_eq!(assets.iter_of::<Mesh>().count(), 1);
     }
 
     /// 资源类型参数在编译期隔离：Handle<Mesh> 不能传给纹理注册表。
@@ -435,4 +607,73 @@ mod tests {
         let _ = (mesh, texture);
     }
 
+    /// B1.2 关联计数：重载器只在最后一条存活条目被 remove 时释放。
+    #[test]
+    fn file_reloader_freed_when_last_entry_removed() {
+        let mut assets = manager();
+        let path: GamePath = "test:file.glb".parse().expect("合法路径");
+        assets.set_file_reloader(path.clone(), u32_reloader);
+        let a = assets.register_file::<u32>(path.clone(), Box::new(0u32), 7u32);
+        let b = assets.register_file::<u32>(path.clone(), Box::new(1u32), 8u32);
+        assert_eq!(assets.file_refs.get(&path), Some(&2));
+
+        // 只移除一条：引用计数仍 >0，重载器保留。
+        assert!(assets.remove(a).is_some());
+        assert!(!assets.reloaders.is_empty());
+
+        // 最后一条被移除：重载器释放（无需 gc）。
+        assert!(assets.remove(b).is_some());
+        assert!(assets.file_refs.is_empty());
+        assert!(assets.reloaders.is_empty());
+    }
+
+    /// 文件条目：数据本体在槽位（单一存储点），来源可见。
+    #[test]
+    fn file_entry_holds_own_data_and_source_visible() {
+        let mut assets = manager();
+        let path: GamePath = "test:file.glb".parse().expect("合法路径");
+        let handle = assets.register_file::<u32>(path.clone(), Box::new(1u32), 8u32);
+        assert_eq!(assets.get(handle), Some(&8u32), "文件条目数据在槽位");
+        assert_eq!(assets.source_of(handle), Some(&path));
+        assert!(matches!(
+            assets.data_source(handle),
+            Some(EntryData::File { source, .. }) if source == &path
+        ));
+    }
+
+    /// 文件条目封装：内存层缺失时 `get` 自动经重载器重读（无需外部 ensure）。
+    #[test]
+    fn file_entry_get_auto_reloads_from_disk() {
+        let mut assets = manager();
+        let path: GamePath = "test:data.bin".parse().expect("合法路径");
+        assets.set_file_reloader(path.clone(), u32_reloader);
+
+        // 数据在槽位：get 直接返回。
+        let handle = assets.register_file::<u32>(path.clone(), Box::new(2u32), 99u32);
+        assert_eq!(assets.get(handle), Some(&99u32));
+
+        // 卸载后数据丢弃 → get 经重载器完整重解析（按 extra 取回）。
+        assets.unload_memory(&path);
+        assert_eq!(assets.state(handle), Some(AssetState::DiskOnly));
+        assert!(assets.get_cached(handle).is_none());
+        assert_eq!(assets.get(handle), Some(&12u32), "重读后返回新数据");
+        assert_eq!(assets.state(handle), Some(AssetState::Resident));
+    }
+
+    /// gc：释放非 Pinned 文件条目的数据（→ DiskOnly），Pinned 保留。
+    #[test]
+    fn gc_evicts_unpinned_file_data() {
+        let mut assets = manager();
+        let path: GamePath = "test:data.bin".parse().expect("合法路径");
+        assets.set_file_reloader(path.clone(), u32_reloader);
+        let pinned = assets.register_file::<u32>(path.clone(), Box::new(0u32), 1u32);
+        let loose = assets.register_file::<u32>(path.clone(), Box::new(1u32), 2u32);
+        assets.pin(pinned);
+
+        assets.gc();
+        // Pinned 保留数据；非 Pinned 逐出，但 get 能重读。
+        assert!(assets.get_cached(pinned).is_some());
+        assert!(assets.get_cached(loose).is_none());
+        assert_eq!(assets.get(loose), Some(&11u32));
+    }
 }

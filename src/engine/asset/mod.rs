@@ -1,16 +1,21 @@
-//! 资产加载模块：把 glTF 2.0 文件转换成运行时的网格资产与场景。
+//! 资产加载与解读模块：把 glTF 2.0 文件转换成运行时的网格资产与场景。
 //!
 //! 目前只处理“模型”部分：
 //! - 节点层级与局部变换 → [`Scene`]（每个 glTF 节点一个容器物体，网格 primitive
 //!   作为其子物体，保证“父节点动、子节点跟着动”的层级关系）；
-//! - 每个 primitive → [`Mesh`] 注册进统一
-//!   [`AssetManager`](crate::engine::render::AssetManager)（按网格索引去重，多节点
-//!   共享同一网格时不会重复上传）；
+//! - 每个 primitive → [`Mesh`] 注册进类型无关的
+//!   [`AssetManager`](crate::engine::core::asset::AssetManager)
+//!   （按网格索引去重，多节点共享同一网格）；
 //! - 顶点属性按 glTF 2.0 语义读取：POSITION（必需）、NORMAL、TEXCOORD_0、
 //!   COLOR_0，各种存储格式（f32 / 归一化整数）统一转换成运行时的 f32 布局。
 //! - 材质基础色（`baseColorFactor` + `baseColorTexture`）读取，贴图注册进
-//!   [`AssetManager`](crate::engine::render::AssetManager)；金属度/粗糙度、
+//!   [`AssetManager`]；金属度/粗糙度、
 //!   法线、自发光等 PBR 通道暂不读取。
+//!
+//! 本模块还提供 **typed 解读助手**：`AssetManager` 只存不解释，这里把句柄
+//! 解读成 `&Mesh`/`&Texture`（`get_mesh`/`get_texture`），并负责磁盘加载与
+//! 重载（`load_meshes` + 注册重载器，`get<T>` 缺失时自动回磁盘）。`MeshView` 把管理器包装成
+//! [`MeshSource`] 供碰撞/调试使用。
 //!
 //! 相机、动画、蒙皮暂不读取。
 
@@ -21,15 +26,111 @@ use glam::{Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use gltf::scene::Transform as GltfTransform;
 
-use crate::engine::core::asset::{AssetLoader, Handle};
+use crate::engine::core::asset::{AssetLoader, AssetManager, Handle, MeshSource};
 use crate::engine::core::game_path::GamePath;
 use crate::engine::core::resource::MergedResourceSpace;
-use crate::engine::render::AssetManager;
+use std::any::Any;
 use super::core::material::Material;
 use super::core::mesh::{Mesh, Vertex};
 use super::core::texture::Texture;
 use super::core::transform::Transform;
 use super::scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};
+
+/// 取网格 CPU 数据（只读，不触发重载；文件条目经注册的解读器取回）。
+pub fn get_mesh<'a>(manager: &'a AssetManager, handle: Handle<Mesh>) -> Option<&'a Mesh> {
+    manager.get_cached(handle)
+}
+
+/// 取贴图 CPU 数据（同上）。
+pub fn get_texture<'a>(manager: &'a AssetManager, handle: Handle<Texture>) -> Option<&'a Texture> {
+    manager.get_cached(handle)
+}
+
+/// 文件重载器（泛型）：条目数据缺失时**完整重解析**文件，按 `extra` 取回对应条目。
+fn file_reloader<T, L>(
+    loader: L,
+    path: GamePath,
+) -> Box<
+    dyn Fn(&MergedResourceSpace, &dyn Any) -> anyhow::Result<Box<dyn Any + Send + Sync>>
+        + Send
+        + Sync,
+>
+where
+    T: Any + Send + Sync + 'static,
+    L: AssetLoader<T> + Clone + Send + Sync + 'static,
+{
+    Box::new(move |space: &MergedResourceSpace, extra: &dyn Any| {
+        let parsed = <L as AssetLoader<T>>::load(&loader, space, &path)?;
+        let entries = <L as AssetLoader<T>>::entries(&loader, &parsed);
+        let extra = extra
+            .downcast_ref::<L::Extra>()
+            .ok_or_else(|| anyhow::anyhow!("重载定位信息类型不符"))?;
+        entries
+            .into_iter()
+            .find(|(_data, e)| e == extra)
+            .map(|(data, _)| Box::new(data) as Box<dyn Any + Send + Sync>)
+            .ok_or_else(|| anyhow::anyhow!("重载时找不到对应条目"))
+    })
+}
+
+/// **一次加载、多次注册（B1.1）**：按 `GamePath` 加载，解析一次并缓存进
+/// 共享存储，然后把该文件的全部条目注册为 `T` 类型句柄。
+///
+/// - 同文件已被加载过（mesh/texture 各自调用本函数）时复用缓存，不重复解析；
+/// - 自动配置解读器与重载器，`get<T>` 取用/重载无需额外设置；
+/// - 文件解析结果的生命周期由引用计数管理（B1.2）：最后一条条目被
+///   `remove` 时整份释放。
+pub fn load_entries<T, L>(
+    manager: &mut AssetManager,
+    loader: &L,
+    path: &GamePath,
+) -> Result<Vec<Handle<T>>>
+where
+    T: Any + Send + Sync + 'static,
+    L: AssetLoader<T> + Clone + Send + Sync + 'static,
+{
+    // 1. 完整解析一次，条目数据拷贝进槽位（解析结果随即丢弃——单一存储点）。
+    let parsed = loader.load(manager.space(), path)?;
+    let entries = loader.entries(&parsed);
+    // 2. 配置文件重载器（数据逐出后重读用）。
+    manager.set_file_reloader(
+        path.clone(),
+        file_reloader::<T, L>(loader.clone(), path.clone()),
+    );
+    // 3. 注册全部条目：数据移入槽位。
+    Ok(entries
+        .into_iter()
+        .map(|(data, extra)| manager.register_file::<T>(path.clone(), Box::new(extra), data))
+        .collect())
+}
+
+/// 从磁盘加载网格（`load_entries` 的便捷封装）。
+pub fn load_meshes(manager: &mut AssetManager, path: &GamePath) -> Result<Vec<Handle<Mesh>>> {
+    load_entries::<Mesh, GlbLoader>(manager, &GlbLoader, path)
+}
+
+/// 从磁盘加载贴图（同上）。
+pub fn load_textures(manager: &mut AssetManager, path: &GamePath) -> Result<Vec<Handle<Texture>>> {
+    load_entries::<Texture, GlbLoader>(manager, &GlbLoader, path)
+}
+
+/// 碰撞数据源视图：把类型无关的 [`AssetManager`] 包装成 [`MeshSource`]
+/// （解读需要加载器，故在资产层实现）。
+pub struct MeshView<'a> {
+    manager: &'a AssetManager,
+}
+
+impl<'a> MeshView<'a> {
+    pub fn new(manager: &'a AssetManager) -> Self {
+        Self { manager }
+    }
+}
+
+impl MeshSource for MeshView<'_> {
+    fn mesh(&self, handle: Handle<Mesh>) -> Option<&Mesh> {
+        get_mesh(self.manager, handle)
+    }
+}
 
 /// 从 glTF 文件加载场景（按游戏路径从合并资源空间读取）：
 /// 网格/贴图资产注册进 `assets`，返回带层级的 `Scene`。
@@ -46,23 +147,27 @@ pub fn load_scene(
 
     // 1. 解析结果进内存层 + 注册 File 条目（mesh / texture 各按数组索引，
     //    与 [`GlbLoader`] 的 entries 顺序一致，可重载）。
+    assets.set_file_reloader(
+        path.clone(),
+        file_reloader::<Mesh, GlbLoader>(GlbLoader, path.clone()),
+    );
     let mesh_handles: Vec<Handle<Mesh>> = glb
         .meshes
         .iter()
         .enumerate()
-        .map(|(i, _)| assets.meshes_mut().register_file(path.clone(), Box::new(i as u32)))
+        .map(|(i, mesh)| {
+            // 单一存储点：数据拷贝进槽位，解析结果 glb 随后丢弃。
+            assets.register_file::<Mesh>(path.clone(), Box::new(i as u32), mesh.clone())
+        })
         .collect();
     let texture_handles: Vec<Handle<Texture>> = glb
         .textures
         .iter()
         .enumerate()
-        .map(|(i, _)| {
-            assets
-                .textures_mut()
-                .register_file(path.clone(), Box::new(i as u32))
+        .map(|(i, texture)| {
+            assets.register_file::<Texture>(path.clone(), Box::new(i as u32), texture.clone())
         })
         .collect();
-    assets.memory_insert(path.clone(), Box::new(glb));
 
     // 2. document 网格 → primitive 句柄列表（mesh_handles 是全局 primitive 顺序）。
     let mut mesh_keys: HashMap<usize, Vec<Handle<Mesh>>> = HashMap::new();
@@ -302,7 +407,7 @@ fn parse_glb(
 ///
 /// 实现 [`AssetLoader`] 的两个实例（mesh 与 texture）：文件解析一次、
 /// 结果进内存层，两类条目分别按各自数组索引定位。
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct GlbLoader;
 
 impl AssetLoader<Mesh> for GlbLoader {

@@ -24,9 +24,7 @@ pub mod scene;
 #[allow(unused_imports)]
 pub use core::aabb::Aabb;
 #[allow(unused_imports)]
-pub use core::asset::{
-    AssetRegistry, AssetState, GpuUploader, Handle, MeshSource, NoGpuUploader,
-};
+pub use core::asset::{AssetManager, AssetState, Handle, MeshSource};
 #[allow(unused_imports)]
 pub use core::camera::Camera;
 #[allow(unused_imports)]
@@ -52,8 +50,10 @@ pub use core::texture::Texture;
 #[allow(unused_imports)]
 pub use core::transform::Transform;
 #[allow(unused_imports)]
+pub use asset::MeshView;
+#[allow(unused_imports)]
 pub use input::{FreeCameraController, InputController};
 #[allow(unused_imports)]
-pub use render::{AssetManager, DisplayHandle, MeshGpu, Renderer, TextureGpu};
+pub use render::{DisplayHandle, GpuManager, MeshGpu, Renderer, TextureGpu};
 #[allow(unused_imports)]
 pub use scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};

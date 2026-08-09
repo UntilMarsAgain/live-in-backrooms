@@ -87,13 +87,13 @@ fn load_triangle_glb() {
 
     let space = crate::engine::MergedResourceSpace::new(dir);
     let path: crate::engine::GamePath = "test:triangle.glb".parse().expect("合法路径");
-    let mut assets = AssetManager::without_gpu(space);
+    let mut assets = AssetManager::new(space);
     let scene = load_scene(&path, &mut assets).expect("应能加载测试三角形");
 
     // 网格：3 个顶点、3 个索引，属性值原样转换。
-    assert_eq!(assets.meshes().len(), 1);
-    let handle = assets.meshes().iter().next().expect("注册了 1 个网格");
-    let mesh = assets.get_meshes(handle).expect("数据在内存层");
+    assert_eq!(assets.iter_of::<Mesh>().count(), 1);
+    let handle = assets.iter_of::<Mesh>().next().expect("注册了 1 个网格");
+    let mesh = crate::engine::asset::get_mesh(&assets, handle).expect("数据在内存层");
     assert_eq!(mesh.vertices().len(), 3);
     assert_eq!(mesh.indices(), &[0, 1, 2]);
     assert_eq!(mesh.vertices()[0].position, [-0.5, -0.5, 0.0]);
@@ -128,10 +128,10 @@ fn load_repo_test_glb() {
         eprintln!("跳过：test/test.glb 未准备（测试数据不入库）");
         return;
     }
-    let mut assets = AssetManager::without_gpu(space);
+    let mut assets = AssetManager::new(space);
     let scene = load_scene(&path, &mut assets).expect("test/test.glb 应能加载");
-    assert!(!assets.meshes().is_empty());
-    assert!(!assets.textures().is_empty(), "PBR 样例应带基础色贴图");
+    assert!(assets.iter_of::<Mesh>().next().is_some());
+    assert!(assets.iter_of::<Texture>().next().is_some(), "PBR 样例应带基础色贴图");
     assert!(scene.object_count() > 0);
     // PBR 材质数据应完整：至少一个网格物体带金属度/粗糙度贴图和法线贴图。
     let pbr_material = scene.objects().find_map(|(_, object)| {

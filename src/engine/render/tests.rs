@@ -1,7 +1,8 @@
 //! 渲染模块测试：naga WGSL 校验 + 无头 GPU 冒烟 + 端到端像素验证。
 //!
-//! GPU 相关测试在 llvmpipe 软件渲染上并行跑会段错误，统一用
-//! `cargo test -- --test-threads=1`；无 GPU 环境自动跳过并打印原因。
+//! GPU 相关测试统一用 `gpu_` 前缀命名：默认全量跑；
+//! 无 GPU 的机器用 `cargo test -- --skip gpu_` 跳过它们
+//! （软件渲染 llvmpipe/lavapipe 并行跑多个 GPU 测试会段错误，建议单线程）。
 
 use super::blit::BlitResources;
 use super::environment::create_cube_texture;
@@ -90,7 +91,7 @@ fn headless_device() -> Option<(wgpu::Device, wgpu::Queue, bool)> {
 /// 无窗口冒烟测试：不创建 surface，直接请求适配器/设备，验证环境资源创建、
 /// 计算转换与天空盒渲染不触发 wgpu 校验错误；无 GPU 环境（如 CI）则跳过。
 #[test]
-fn environment_headless_smoke() {
+fn gpu_environment_headless_smoke() {
     let Some((device, queue, float32_filterable)) = headless_device() else {
         return;
     };
@@ -201,7 +202,7 @@ fn environment_headless_smoke() {
 
 /// 无窗口冒烟测试：灯光调试线框管线的创建与绘制不触发 wgpu 校验错误。
 #[test]
-fn light_debug_gizmos_headless_smoke() {
+fn gpu_light_debug_gizmos_headless_smoke() {
     let Some((device, queue, _)) = headless_device() else {
         return;
     };
@@ -320,7 +321,7 @@ fn light_debug_gizmos_headless_smoke() {
 /// 采样验证：已知全红立方体贴图经天空盒管线渲染到离屏，读回应偏红。
 /// （绕开 copy_texture_to_buffer 拷数组纹理的路径，直接验证"上传→采样"。）
 #[test]
-fn skybox_sampling_verifies_texture_content() {
+fn gpu_skybox_sampling_verifies_texture_content() {
     let Some((device, queue, float32_filterable)) = headless_device() else {
         return;
     };
@@ -451,7 +452,7 @@ fn skybox_sampling_verifies_texture_content() {
 /// 防回归：预过滤参数缓冲若在循环里复用同一块（`queue.write_buffer` 先于
 /// `submit()` 执行），除顶层外的 mip 全部提前 return，预过滤图基本全黑。
 #[test]
-fn specular_ibl_gpu_outputs_nonblack() {
+fn gpu_specular_ibl_outputs_nonblack() {
     let Some((device, queue, float32_filterable)) = headless_device() else {
         return;
     };
@@ -517,7 +518,7 @@ fn specular_ibl_gpu_outputs_nonblack() {
 /// 无窗口验证：HDR 中间目标清成白色（radiance=1）后经 blit 色调映射，
 /// 写 Rgba8UnormSrgb 应仍是高亮——证明"HDR 值 → 可显示"的最后一环工作。
 #[test]
-fn blit_tone_maps_hdr_radiance() {
+fn gpu_blit_tone_maps_hdr_radiance() {
     let Some((device, queue, _)) = headless_device() else {
         return;
     };
@@ -613,79 +614,93 @@ fn blit_tone_maps_hdr_radiance() {
     );
 }
 
-/// 资产管理器 GPU 同步：pin 后 `sync_gpu` 上传（`gpu()` 有值），
-/// unpin 后回收（`gpu()` 为 None），CPU 数据保留。
+/// GpuManager：pin 后 `sync` 上传；unpin 是软释放（sync 不回收），
+/// `gc` 才真正回收，CPU 数据保留。
 #[test]
-fn asset_manager_sync_gpu_uploads_and_reclaims() {
+fn gpu_manager_sync_uploads_and_gc_reclaims() {
     let Some((device, queue, _)) = headless_device() else {
         return;
     };
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
-    let mut assets = crate::engine::render::AssetManager::new(device, queue, crate::engine::core::resource::MergedResourceSpace::new(std::env::temp_dir()));
-    let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
+    let mut assets = crate::engine::core::asset::AssetManager::new(
+        crate::engine::core::resource::MergedResourceSpace::new(std::env::temp_dir()),
+    );
+    let mut gpu = crate::engine::render::asset::GpuManager::new(device, queue);
+    let mesh = assets.register(crate::engine::Mesh::cube());
 
-    // 未 pin：sync 后不应有 GPU 资源。
-    assets.sync_gpu();
-    assert!(assets.meshes().gpu(mesh).is_none());
+    // 未 pin：sync 后不应有显存资源。
+    gpu.sync(&mut assets);
+    assert!(gpu.mesh_gpu_resident(mesh).is_none());
 
     // pin + sync：上传。
-    assert!(assets.meshes_mut().pin(mesh));
-    assets.sync_gpu();
-    assert!(assets.meshes().gpu(mesh).is_some());
+    assert!(assets.pin(mesh));
+    gpu.sync(&mut assets);
+    assert!(gpu.mesh_gpu_resident(mesh).is_some());
 
-    // unpin + sync：GPU 回收，CPU 数据保留。
-    assert!(assets.meshes_mut().unpin(mesh));
-    assets.sync_gpu();
-    assert!(assets.meshes().gpu(mesh).is_none());
-    assert!(assets.get_meshes(mesh).is_some());
+    // unpin + sync：软释放，不立即回收。
+    assert!(assets.unpin(mesh));
+    gpu.sync(&mut assets);
+    assert!(
+        gpu.mesh_gpu_resident(mesh).is_some(),
+        "unpin 后 sync 不应回收（软释放）"
+    );
+    // gc：真正回收，CPU 数据保留。
+    gpu.gc(&assets);
+    assert!(gpu.mesh_gpu_resident(mesh).is_none());
+    assert!(crate::engine::asset::get_mesh(&assets, mesh).is_some());
 }
 
-/// 按需上传：有效句柄未 pin/未同步时，`ensure_meshes_gpu` 现场上传并置驻留；
+/// 自愈取用：有效句柄未 pin/未同步时，`mesh_gpu` 现场上传并置驻留；
 /// 已移除的无效句柄返回 `None`（渲染器据此报错）。
 #[test]
-fn asset_manager_ensure_gpu_uploads_on_demand() {
+fn gpu_manager_mesh_gpu_uploads_on_demand() {
     let Some((device, queue, _)) = headless_device() else {
         return;
     };
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
-    let mut assets = crate::engine::render::AssetManager::new(device, queue, crate::engine::core::resource::MergedResourceSpace::new(std::env::temp_dir()));
-    let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
-
-    // 注册后既未 pin 也未 sync：ensure 应现场上传，且此后 gpu() 有值（不回收）。
-    assert!(
-        assets.ensure_meshes_gpu(mesh).is_some(),
-        "有效句柄应按需上传"
+    let mut assets = crate::engine::core::asset::AssetManager::new(
+        crate::engine::core::resource::MergedResourceSpace::new(std::env::temp_dir()),
     );
-    assert!(assets.meshes().gpu(mesh).is_some());
-    // 上传后状态应为 Pinned：sync_gpu 不会把它回收。
-    assets.sync_gpu();
-    assert!(assets.meshes().gpu(mesh).is_some());
+    let mut gpu = crate::engine::render::asset::GpuManager::new(device, queue);
+    let mesh = assets.register(crate::engine::Mesh::cube());
+
+    // 注册后既未 pin 也未 sync：ensure 应现场上传，且此后不回收。
+    assert!(gpu.mesh_gpu(mesh, &mut assets).is_some(), "有效句柄应按需上传");
+    assert!(gpu.mesh_gpu_resident(mesh).is_some());
+    // 上传后应为 Pinned：sync 不会把它回收。
+    gpu.sync(&mut assets);
+    assert!(gpu.mesh_gpu_resident(mesh).is_some());
 
     // remove 后句柄无效：ensure 返回 None。
-    assert!(assets.meshes_mut().remove(mesh).is_some());
-    assert!(assets.ensure_meshes_gpu(mesh).is_none());
+    assert!(assets.remove(mesh).is_some());
+    assert!(gpu.mesh_gpu(mesh, &mut assets).is_none());
 }
 
-/// 预分配语义：`pin_mesh` 与按需上传同一条路径——注册后不 sync 也立即上传。
+/// 预分配语义：`pin_mesh` 标记驻留（CPU 侧），`sync` 后上传；重复 pin 幂等。
 #[test]
-fn asset_manager_pin_upload_preallocates() {
+fn gpu_manager_pin_then_sync_preallocates() {
     let Some((device, queue, _)) = headless_device() else {
         return;
     };
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
-    let mut assets = crate::engine::render::AssetManager::new(device, queue, crate::engine::core::resource::MergedResourceSpace::new(std::env::temp_dir()));
-    let mesh = assets.meshes_mut().register(crate::engine::Mesh::cube());
+    let mut assets = crate::engine::core::asset::AssetManager::new(
+        crate::engine::core::resource::MergedResourceSpace::new(std::env::temp_dir()),
+    );
+    let mut gpu = crate::engine::render::asset::GpuManager::new(device, queue);
+    let mesh = assets.register(crate::engine::Mesh::cube());
 
-    // pin 即上传：无需等 sync_gpu。
-    assert!(assets.pin_meshes(mesh));
-    assert!(assets.meshes().gpu(mesh).is_some());
+    // pin 标记驻留，sync 上传。
+    assert!(assets.pin(mesh));
+    gpu.sync(&mut assets);
+    assert!(gpu.mesh_gpu_resident(mesh).is_some());
 
     // 重复 pin 幂等，不重复上传。
-    assert!(assets.pin_meshes(mesh));
-    assert!(assets.meshes().gpu(mesh).is_some());
+    assert!(assets.pin(mesh));
+    gpu.sync(&mut assets);
+    assert!(gpu.mesh_gpu_resident(mesh).is_some());
 }
 
 /// 把天空盒渲染到 HDR 目标，再过 blit 色调映射写 4×4 离屏 Rgba8UnormSrgb，

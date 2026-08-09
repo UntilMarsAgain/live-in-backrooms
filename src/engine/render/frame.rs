@@ -8,7 +8,8 @@ use wgpu::{
 };
 
 use crate::engine::core::camera::{Camera, CameraUniform};
-use crate::engine::render::AssetManager;
+use crate::engine::core::asset::AssetManager;
+use crate::engine::render::asset::GpuManager;
 use crate::engine::render::init::{create_depth_texture, create_hdr_texture};
 use crate::engine::render::uniform::{
     LIGHT_CAPACITY, LightCountUniform, ObjectData, collect_lights,
@@ -49,6 +50,7 @@ impl Renderer {
         &mut self,
         camera: &Camera,
         scene: &Scene,
+        gpu: &mut GpuManager,
         assets: &mut AssetManager,
         show_light_debug: bool,
         show_collision_debug: bool,
@@ -176,7 +178,7 @@ impl Renderer {
                     let Some(handle) = object.mesh_handle() else {
                         continue;
                     };
-                    let Some(mesh_gpu) = assets.ensure_meshes_gpu(handle) else {
+                    let Some(mesh_gpu) = gpu.mesh_gpu(handle, assets) else {
                         eprintln!(
                             "渲染违例：场景引用了无效的网格句柄 {handle:?}，跳过绘制"
                         );

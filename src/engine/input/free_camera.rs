@@ -269,6 +269,7 @@ mod tests {
     use super::*;
     use crate::engine::AssetManager;
     use crate::engine::MergedResourceSpace;
+    use crate::engine::MeshView;
     use crate::engine::{Mesh, SceneObject, SceneObjectKind};
 
     /// 默认碰撞盒：半尺寸 (0.3, 0.9, 0.3)，以相机位置为中心。
@@ -282,9 +283,9 @@ mod tests {
     /// 障碍 AABB 即 [center-0.5, center+0.5]³。
     fn obstacle_scene(centers: &[Vec3]) -> (Scene, AssetManager) {
         let mut scene = Scene::new();
-        let mut assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
+        let mut assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
         for center in centers {
-            let key = assets.meshes_mut().register(Mesh::cube());
+            let key = assets.register(Mesh::cube());
             scene.add_object(SceneObject::new(
                 SceneObjectKind::Mesh(key),
                 Transform::new(*center, Quat::IDENTITY, Vec3::ONE),
@@ -304,7 +305,7 @@ mod tests {
         let cam = camera();
         // yaw=0 时 W = 朝 +X；墙在 (1,0,0)，中心距 1 < 0.5+0.3。
         let (scene, assets) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
-        let action = c.update(&cam, 0.1, &scene, &assets);
+        let action = c.update(&cam, 0.1, &scene, &MeshView::new(&assets));
         assert_eq!(action.translate, Vec3::ZERO, "撞墙应被挡在原地");
         assert_eq!(cam.position(), Vec3::ZERO, "控制器不应修改目标");
     }
@@ -315,7 +316,7 @@ mod tests {
         let mut c = controller();
         let cam = camera();
         let (scene, assets) = obstacle_scene(&[]);
-        let action = c.update(&cam, 0.1, &scene, &assets);
+        let action = c.update(&cam, 0.1, &scene, &MeshView::new(&assets));
         assert_eq!(action.translate, Vec3::new(0.5, 0.0, 0.0));
     }
 
@@ -328,7 +329,7 @@ mod tests {
         // W+D：归一化后 (0.707, 0, 0.707)，speed 5 × dt 0.1 = 0.354/轴。
         // X 轴被墙 (1,0,0) 挡下，Z 轴照常移动。
         let (scene, assets) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
-        let action = c.update(&cam, 0.1, &scene, &assets);
+        let action = c.update(&cam, 0.1, &scene, &MeshView::new(&assets));
         assert!(action.translate.x.abs() < 1e-6, "X 应被挡：{:?}", action);
         assert!(
             (action.translate.z - std::f32::consts::FRAC_1_SQRT_2 * 0.5).abs() < 1e-6,
@@ -343,7 +344,7 @@ mod tests {
         let mut c = controller();
         let cam = camera();
         let (scene, assets) = obstacle_scene(&[Vec3::new(1.0, 0.0, 0.0)]);
-        c.update(&cam, 0.1, &scene, &assets);
+        c.update(&cam, 0.1, &scene, &MeshView::new(&assets));
         assert_eq!(c.speed, 5.0);
     }
 }

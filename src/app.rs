@@ -14,7 +14,8 @@ use winit::window::Window;
 use crate::engine::asset;
 use crate::engine::{
     AssetManager, Camera, CameraAction, DisplayHandle, Environment, FreeCameraController, GamePath,
-    Handle, InputController, MergedResourceSpace, Mesh, PackConfig, Renderer, Scene, Texture,
+    GpuManager, Handle, InputController, MergedResourceSpace, Mesh, MeshView, PackConfig, Renderer,
+    Scene, Texture,
 };
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
@@ -23,8 +24,10 @@ pub struct App {
     renderer: Renderer,
     controller: Box<dyn InputController<Camera, Action = CameraAction>>,
     last_frame: Instant,
-    /// 统一资产管理器：网格/贴图等资源的句柄与 CPU/GPU 双持有。
+    /// CPU 资产管理器：内存副本、磁盘读取与内存卸载（无 GPU 依赖）。
     assets: AssetManager,
+    /// GPU 资产管理器：句柄 → 显存表示的驻留表（上传/回收）。
+    gpu: GpuManager,
     scene: Scene,
     /// 灯光调试可视化开关（控制器按 L 翻转，渲染时读取）。
     show_light_debug: Arc<AtomicBool>,
@@ -47,10 +50,11 @@ impl App {
         let (pack_config, packages) = PackConfig::discover_and_update("game-data")?;
         pack_config.validate(&packages)?;
         eprintln!("资源包加载顺序：{}", pack_config.order().join(" → "));
-        let assets = AssetManager::new(
+        let assets =
+            AssetManager::new(MergedResourceSpace::from_pack_roots(pack_config.pack_roots("game-data")));
+        let gpu = GpuManager::new(
             std::sync::Arc::new(renderer.device()),
             std::sync::Arc::new(renderer.queue().clone()),
-            MergedResourceSpace::from_pack_roots(pack_config.pack_roots("game-data")),
         );
         let mut app = Self {
             window,
@@ -58,6 +62,7 @@ impl App {
             controller,
             last_frame: Instant::now(),
             assets,
+            gpu,
             scene: Scene::default(),
             show_light_debug,
             show_collision_debug,
@@ -170,7 +175,7 @@ impl App {
     pub fn register_meshes(&mut self, meshes: Vec<Mesh>) -> Vec<Handle<Mesh>> {
         meshes
             .into_iter()
-            .map(|mesh| self.assets.meshes_mut().register(mesh))
+            .map(|mesh| self.assets.register(mesh))
             .collect()
     }
 
@@ -178,7 +183,7 @@ impl App {
     pub fn register_textures(&mut self, textures: Vec<Texture>) -> Vec<Handle<Texture>> {
         textures
             .into_iter()
-            .map(|texture| self.assets.textures_mut().register(texture))
+            .map(|texture| self.assets.register(texture))
             .collect()
     }
 
@@ -199,9 +204,11 @@ impl App {
             }
             None => self.renderer.reset_environment(),
         }
-        // 收集场景引用的资产并 pin（预上传，预分配语义；不 pin 也有渲染兜底）。
+        // 收集场景引用的资产并 pin（CPU 侧标记驻留），随后 GPU 层上传，
+        // 再让渲染器构建绑定组（贴图视图需要已上传）。
         self.pin_scene_assets(&scene);
-        self.renderer.load_scene(&scene, &self.assets);
+        self.gpu.sync(&mut self.assets);
+        self.renderer.load_scene(&scene, &mut self.gpu, &mut self.assets);
         self.scene = scene;
     }
 
@@ -209,10 +216,10 @@ impl App {
     fn pin_scene_assets(&mut self, scene: &Scene) {
         for (_, object) in scene.objects() {
             if let Some(handle) = object.mesh_handle() {
-                self.assets.pin_meshes(handle);
+                self.assets.pin(handle);
             }
             for handle in object.material.texture_handles() {
-                self.assets.pin_textures(handle);
+                self.assets.pin(handle);
             }
         }
     }
@@ -258,6 +265,7 @@ impl App {
                     self.renderer.render(
                         camera,
                         &self.scene,
+                        &mut self.gpu,
                         &mut self.assets,
                         self.show_light_debug.load(Ordering::Relaxed),
                         self.show_collision_debug.load(Ordering::Relaxed),
@@ -281,15 +289,14 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32().min(0.25);
         self.last_frame = now;
 
-        // 资产 GPU 同步：pinned 且未上传的上传，非 pinned 的回收。
-        self.assets.sync_gpu();
+        // GPU 驻留调和：pinned 且未上传的上传，非 pinned 的回收。
+        self.gpu.sync(&mut self.assets);
 
         // 控制器只读相机 + 查询场景碰撞，输出一帧操作；操作由场景统一应用
         // （不可变借用先结束，再可变借用应用，无冲突）。
+        let mesh_view = MeshView::new(&self.assets);
         let action = match self.scene.main_camera_ref() {
-            Some(camera) => self
-                .controller
-                .update(camera, dt, &self.scene, &self.assets),
+            Some(camera) => self.controller.update(camera, dt, &self.scene, &mesh_view),
             None => CameraAction::default(),
         };
         self.scene.apply_main_camera_action(action);

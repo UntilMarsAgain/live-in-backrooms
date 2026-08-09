@@ -184,23 +184,23 @@
 
 ## 测试覆盖
 
-- **现状**（64 个测试）：
+- **现状**（78 个测试，其中 8 个 GPU 相关，统一 `gpu_` 前缀命名）：
   - CPU 单测：场景世界矩阵、glTF 加载、环境转换（`to_cubemap` / `irradiance_map`），
     不碰 GPU，任何环境可跑；资产注册表（世代句柄/复用/pin-unpin）、GamePath
     校验、合并资源空间调度器；
   - **WGSL 语法校验**：用 naga 解析并校验 `mesh.wgsl` / `environment.wgsl`，
     语法与绑定组声明错误在 `cargo test` 阶段暴露（`cargo build` 不编译 WGSL）；
   - **无头冒烟测试**：不创建窗口，请求 PRIMARY 后端设备（无 OpenGL），真跑
-    环境资源创建 → 转换 → 天空盒渲染到离屏 → 读回像素验证非黑；无 GPU
-    环境自动跳过并打印原因；
+    环境资源创建 → 转换 → 天空盒渲染到离屏 → 读回像素验证非黑；
   - **端到端像素验证**：真实 `test/test.hdr` 转换后渲染天空盒，断言平均亮度非黑。
   - **镜面 IBL 读回验证**：GPU 路径下读回预过滤 mip 0 与 BRDF LUT，断言非黑
     （防"参数缓冲复用导致预过滤图全黑"这类回归）。
   - **资产 GPU 同步**：pin 上传 / unpin 回收 / 按需上传（`ensure_*_gpu`）/
     无效句柄报错路径，headless 设备实测。
-- **注意事项**：软件渲染器（llvmpipe / lavapipe）并行跑多个 GPU 测试会段错误
-  （线程问题），因此 GPU 相关测试统一用 `cargo test -- --test-threads=1` 跑；
-  单线程下全部通过。
+- **注意事项**：GPU 相关测试默认全量跑（`cargo test`）；
+  无 GPU 的机器用 `cargo test -- --skip gpu_` 跳过它们。
+  软件渲染（llvmpipe/lavapipe）并行跑多个 GPU 测试会段错误，
+  建议这类环境加 `-- --test-threads=1`。
 - **可补**：`collect_lights`（方向推导）、uniform 布局（大小/偏移断言）、
   strip/fan 转换的边界。
 - **后端能力验证**：`examples/vulkan_probe.rs`（强制 Vulkan，A/B/C/D 四项实测），

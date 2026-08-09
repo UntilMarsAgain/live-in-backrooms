@@ -4,6 +4,7 @@ use super::*;
 use crate::engine::Mesh;
 use crate::engine::AssetManager;
 use crate::engine::MergedResourceSpace;
+use crate::engine::MeshView;
 use glam::{Quat, Vec3};
 
 /// 环境强度默认应为 1.0（满环境光），避免手误改成 0 后物体失去环境光。
@@ -210,7 +211,7 @@ fn apply_main_camera_action_moves_and_rotates() {
 
 /// 场景碰撞查询的公共脚手架：一个边长 1 的立方体资产 + 放在原点的实例。
 fn cube_world(assets: &mut AssetManager, scene: &mut Scene, position: Vec3) -> ObjectKey {
-    let key = assets.meshes_mut().register(Mesh::cube());
+    let key = assets.register(Mesh::cube());
     scene.add_object(SceneObject::new(
         SceneObjectKind::Mesh(key),
         Transform::new(position, Quat::IDENTITY, Vec3::ONE),
@@ -220,44 +221,44 @@ fn cube_world(assets: &mut AssetManager, scene: &mut Scene, position: Vec3) -> O
 /// 点包含：立方体中心在盒内，远处点在外，边界算在内。
 #[test]
 fn point_inside_uses_world_aabb() {
-    let mut assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
+    let mut assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
     let mut scene = Scene::new();
     let cube = cube_world(&mut assets, &mut scene, Vec3::new(2.0, 0.0, 0.0));
 
-    assert!(scene.point_inside(&assets, cube, Vec3::new(2.0, 0.0, 0.0)));
-    assert!(scene.point_inside(&assets, cube, Vec3::new(2.5, 0.5, 0.5))); // 边界上
-    assert!(!scene.point_inside(&assets, cube, Vec3::new(3.0, 0.0, 0.0)));
+    assert!(scene.point_inside(&MeshView::new(&assets), cube, Vec3::new(2.0, 0.0, 0.0)));
+    assert!(scene.point_inside(&MeshView::new(&assets), cube, Vec3::new(2.5, 0.5, 0.5))); // 边界上
+    assert!(!scene.point_inside(&MeshView::new(&assets), cube, Vec3::new(3.0, 0.0, 0.0)));
     // 非网格节点没有包围盒，任何点都不在内。
     let empty = scene.add_object(SceneObject::new(
         SceneObjectKind::Empty,
         Transform::IDENTITY,
     ));
-    assert!(!scene.point_inside(&assets, empty, Vec3::ZERO));
+    assert!(!scene.point_inside(&MeshView::new(&assets), empty, Vec3::ZERO));
 }
 
 /// 两物体碰撞：中心距 < 边长和的一半时相交，> 时不相交。
 #[test]
 fn objects_collide_uses_world_aabb() {
-    let mut assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
+    let mut assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
     let mut scene = Scene::new();
     let a = cube_world(&mut assets, &mut scene, Vec3::ZERO);
     let b = cube_world(&mut assets, &mut scene, Vec3::new(0.5, 0.0, 0.0));
     let c = cube_world(&mut assets, &mut scene, Vec3::new(2.0, 0.0, 0.0));
 
     assert!(
-        scene.objects_collide(&assets, a, b),
+        scene.objects_collide(&MeshView::new(&assets), a, b),
         "中心距 0.5 < 1 应相交"
     );
-    assert!(!scene.objects_collide(&assets, a, c), "中心距 2 > 1 应分离");
+    assert!(!scene.objects_collide(&MeshView::new(&assets), a, c), "中心距 2 > 1 应分离");
     // 已删除的句柄不参与碰撞。
     scene.remove_object(c);
-    assert!(!scene.objects_collide(&assets, a, c));
+    assert!(!scene.objects_collide(&MeshView::new(&assets), a, c));
 }
 
 /// 外部物体：给定 transform + half_extents 与世界碰撞，支持旋转与排除。
 #[test]
 fn collides_with_external_probe() {
-    let mut assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
+    let mut assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
     let mut scene = Scene::new();
     let cube = cube_world(&mut assets, &mut scene, Vec3::ZERO);
 
@@ -266,13 +267,13 @@ fn collides_with_external_probe() {
     let player = Transform::new(Vec3::new(0.6, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE);
     let player_box = Aabb::from_half_extents(Vec3::ZERO, Vec3::new(0.3, 0.9, 0.3));
     assert_eq!(
-        scene.collides_with(&assets, &player, player_box, &[]),
+        scene.collides_with(&MeshView::new(&assets), &player, player_box, &[]),
         Some(cube)
     );
 
     // 远离时无碰撞。
     let away = Transform::new(Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE);
-    assert_eq!(scene.collides_with(&assets, &away, player_box, &[]), None);
+    assert_eq!(scene.collides_with(&MeshView::new(&assets), &away, player_box, &[]), None);
 
     // 旋转 45° 后包围盒变大：probe 的 x 半宽从 0.3 增到 0.3√2 ≈ 0.424，
     // 中心距 0.9 < 0.5 + 0.424 所以相交；不旋转时 0.9 会分离（0.6 > 0.5）。
@@ -282,13 +283,13 @@ fn collides_with_external_probe() {
         Vec3::ONE,
     );
     assert_eq!(
-        scene.collides_with(&assets, &rotated, player_box, &[]),
+        scene.collides_with(&MeshView::new(&assets), &rotated, player_box, &[]),
         Some(cube)
     );
 
     // 排除后跳过该物体。
     assert_eq!(
-        scene.collides_with(&assets, &player, player_box, &[cube]),
+        scene.collides_with(&MeshView::new(&assets), &player, player_box, &[cube]),
         None
     );
 }

@@ -10,7 +10,7 @@
 //! - [`Self::resolve`] 从最高优先级包开始遍历，返回**首个命中**的文件。
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 

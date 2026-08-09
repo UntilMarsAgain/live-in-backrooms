@@ -380,6 +380,7 @@ mod tests {
     use super::*;
     use crate::engine::AssetManager;
     use crate::engine::MergedResourceSpace;
+    use crate::engine::MeshView;
     use crate::engine::Camera;
     use crate::engine::core::light::Light;
     use crate::engine::core::transform::Transform;
@@ -425,14 +426,14 @@ mod tests {
     #[test]
     fn collision_gizmos_wire_a_single_cube() {
         let mut scene = Scene::new();
-        let mut assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
-        let key = assets.meshes_mut().register(crate::engine::Mesh::cube());
+        let mut assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
+        let key = assets.register(crate::engine::Mesh::cube());
         scene.add_object(SceneObject::new(
             SceneObjectKind::Mesh(key),
             Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE),
         ));
 
-        let vertices = build_collision_gizmos(&scene, &assets);
+        let vertices = build_collision_gizmos(&scene, &MeshView::new(&assets));
         assert_eq!(vertices.len(), 24, "12 条边 × 2 顶点");
 
         // 所有端点都应落在立方体角点集合（±0.5）上。
@@ -458,7 +459,7 @@ mod tests {
     #[test]
     fn collision_gizmos_skip_non_mesh_nodes() {
         let mut scene = Scene::new();
-        let assets = AssetManager::without_gpu(MergedResourceSpace::new(std::env::temp_dir()));
+        let assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
         scene.add_object(SceneObject::new(
             SceneObjectKind::Empty,
             Transform::IDENTITY,
@@ -470,6 +471,6 @@ mod tests {
         let cam = scene.add_camera(Camera::new(Vec3::ZERO, 0.0, 0.0, 1.0, 1.0, 0.1, 100.0));
         assert!(scene.set_main_camera(cam));
 
-        assert!(build_collision_gizmos(&scene, &assets).is_empty());
+        assert!(build_collision_gizmos(&scene, &MeshView::new(&assets)).is_empty());
     }
 }
