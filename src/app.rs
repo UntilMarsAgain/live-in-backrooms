@@ -11,7 +11,6 @@ use winit::event::{DeviceEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
-use crate::engine::asset;
 use crate::engine::{
     AssetManager, Camera, CameraAction, DisplayHandle, Environment, FreeCameraController, GamePath,
     GpuManager, Handle, InputController, MergedResourceSpace, Mesh, MeshView, PackConfig, Renderer,
@@ -102,8 +101,8 @@ impl App {
             }
         };
         // 场景加载（节点摆放/材质）走 GamePath 一次解析，并进 demo。
-        // "路径 → 句柄"的 File 条目链路（load_meshes/load_textures）由测试覆盖。
-        match asset::load_scene(&test_path, &mut self.assets) {
+        // "路径 → 句柄"的 File 条目链路（load_file/load_file_async）由测试覆盖。
+        match self.assets.load_scene(&test_path) {
             Ok(gltf_scene) => {
                 // 把测试模型放大 5 倍（等比），并挪到演示物体右前方，
                 // 避免和原点处的三角形重叠。
@@ -155,7 +154,7 @@ impl App {
         path: &GamePath,
         environment: Option<&Arc<Environment>>,
     ) -> bool {
-        match asset::load_scene(path, &mut self.assets) {
+        match self.assets.load_scene(path) {
             Ok(scene) => {
                 let scene = match environment {
                     Some(env) => scene.with_environment(env.clone()),

@@ -648,7 +648,7 @@ fn gpu_manager_sync_uploads_and_gc_reclaims() {
     // gc：真正回收，CPU 数据保留。
     gpu.gc(&assets);
     assert!(gpu.mesh_gpu_resident(mesh).is_none());
-    assert!(crate::engine::asset::get_mesh(&assets, mesh).is_some());
+    assert!(assets.get_cached(mesh).is_some());
 }
 
 /// 自愈取用：有效句柄未 pin/未同步时，`mesh_gpu` 现场上传并置驻留；

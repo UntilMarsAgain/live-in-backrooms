@@ -88,12 +88,12 @@ fn load_triangle_glb() {
     let space = crate::engine::MergedResourceSpace::new(dir);
     let path: crate::engine::GamePath = "test:triangle.glb".parse().expect("合法路径");
     let mut assets = AssetManager::new(space);
-    let scene = load_scene(&path, &mut assets).expect("应能加载测试三角形");
+    let scene = assets.load_scene(&path).expect("应能加载测试三角形");
 
     // 网格：3 个顶点、3 个索引，属性值原样转换。
     assert_eq!(assets.iter_of::<Mesh>().count(), 1);
     let handle = assets.iter_of::<Mesh>().next().expect("注册了 1 个网格");
-    let mesh = crate::engine::asset::get_mesh(&assets, handle).expect("数据在内存层");
+    let mesh = assets.get_cached(handle).expect("数据在内存层");
     assert_eq!(mesh.vertices().len(), 3);
     assert_eq!(mesh.indices(), &[0, 1, 2]);
     assert_eq!(mesh.vertices()[0].position, [-0.5, -0.5, 0.0]);
@@ -129,7 +129,7 @@ fn load_repo_test_glb() {
         return;
     }
     let mut assets = AssetManager::new(space);
-    let scene = load_scene(&path, &mut assets).expect("test/test.glb 应能加载");
+    let scene = assets.load_scene(&path).expect("test/test.glb 应能加载");
     assert!(assets.iter_of::<Mesh>().next().is_some());
     assert!(assets.iter_of::<Texture>().next().is_some(), "PBR 样例应带基础色贴图");
     assert!(scene.object_count() > 0);
@@ -157,9 +157,9 @@ fn compute_tangents_basic() {
     assert_eq!(tangents[0], [1.0, 0.0, 0.0, 1.0]);
 }
 
-/// 去重：同一 GamePath 再次 `load_meshes` 返回已有句柄，不重复解析/注册。
+/// 去重：同一 GamePath 再次 `load_file` 返回已有句柄，不重复解析/注册。
 #[test]
-fn load_meshes_dedupes_same_path() {
+fn load_file_dedupes_same_path() {
     let bin = triangle_bin();
     let bytes = glb_bytes(TRIANGLE_JSON, &bin);
     let dir = std::env::temp_dir().join("lib-test-dedup");
@@ -171,14 +171,17 @@ fn load_meshes_dedupes_same_path() {
     let path: crate::engine::GamePath = "test:tri.glb".parse().expect("合法路径");
     let mut assets = AssetManager::new(space);
 
-    let first = load_meshes(&mut assets, &path).expect("首次加载");
-    let second = load_meshes(&mut assets, &path).expect("再次加载");
+    assets.load_file(GlbFileLoader, path.clone()).expect("首次加载");
+    let first = assets.loaded_handles_of::<Mesh>(&path);
+    assets.load_file(GlbFileLoader, path.clone()).expect("再次加载");
+    let second = assets.loaded_handles_of::<Mesh>(&path);
     assert_eq!(first, second, "同路径应复用句柄");
     assert_eq!(assets.iter_of::<Mesh>().count(), 1, "不应产生重复条目");
 
     // 逐出（DiskOnly）后再加载：句柄仍有效，依旧复用、不重复注册。
     assets.unload_memory(&path);
-    let third = load_meshes(&mut assets, &path).expect("逐出后加载");
+    assets.load_file(GlbFileLoader, path.clone()).expect("逐出后加载");
+    let third = assets.loaded_handles_of::<Mesh>(&path);
     assert_eq!(first, third, "DiskOnly 的已注册句柄也应复用");
     assert_eq!(assets.iter_of::<Mesh>().count(), 1);
 }
