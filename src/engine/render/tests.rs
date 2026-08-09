@@ -616,10 +616,10 @@ fn gpu_blit_tone_maps_hdr_radiance() {
     );
 }
 
-/// GpuManager：pin 后 `sync` 上传；unpin 是软释放（sync 不回收），
-/// `gc` 才真正回收，CPU 数据保留。
+/// GpuManager：`sync` 只上传 CPU 侧 Pinned 的条目；`unpin` 是软释放——
+/// 已上传的条目不会在 sync 时被回收（回收归 `gc`）。
 #[test]
-fn gpu_manager_sync_uploads_and_gc_reclaims() {
+fn gpu_manager_unpin_is_soft_release() {
     let (device, queue, _) = require_headless_device();
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
@@ -645,10 +645,6 @@ fn gpu_manager_sync_uploads_and_gc_reclaims() {
         gpu.mesh_gpu_resident(mesh).is_some(),
         "unpin 后 sync 不应回收（软释放）"
     );
-    // gc：真正回收，CPU 数据保留。
-    gpu.gc(&assets);
-    assert!(gpu.mesh_gpu_resident(mesh).is_none());
-    assert!(assets.get_cached(mesh).is_some());
 }
 
 /// 自愈取用：有效句柄未 pin/未同步时，`mesh_gpu` 现场上传并置驻留；
@@ -667,7 +663,7 @@ fn gpu_manager_mesh_gpu_uploads_on_demand() {
     // 注册后既未 pin 也未 sync：ensure 应现场上传，且此后不回收。
     assert!(gpu.mesh_gpu(mesh, &mut assets).is_some(), "有效句柄应按需上传");
     assert!(gpu.mesh_gpu_resident(mesh).is_some());
-    // 上传后应为 Pinned：sync 不会把它回收。
+    // 上传即刷新最近取用：sync 不会回收它。
     gpu.sync(&mut assets);
     assert!(gpu.mesh_gpu_resident(mesh).is_some());
 
@@ -676,7 +672,8 @@ fn gpu_manager_mesh_gpu_uploads_on_demand() {
     assert!(gpu.mesh_gpu(mesh, &mut assets).is_none());
 }
 
-/// 预分配语义：`pin_mesh` 标记驻留（CPU 侧），`sync` 后上传；重复 pin 幂等。
+/// 预分配语义：`pin` 标记驻留（CPU 侧），`sync` 后上传；重复 pin 是引用计数，
+/// 上传只发生一次。
 #[test]
 fn gpu_manager_pin_then_sync_preallocates() {
     let (device, queue, _) = require_headless_device();
@@ -697,6 +694,41 @@ fn gpu_manager_pin_then_sync_preallocates() {
     assert!(assets.pin(mesh));
     gpu.sync(&mut assets);
     assert!(gpu.mesh_gpu_resident(mesh).is_some());
+}
+
+/// 显存 GC（纯成员）：按最近使用窗口淘汰——窗口 0 只保留"当前时钟"最新取用的
+/// 条目；被淘汰的条目 CPU 数据不受影响。
+#[test]
+fn gpu_manager_gc_evicts_cold_by_usage_window() {
+    let (device, queue, _) = require_headless_device();
+    let device = std::sync::Arc::new(device);
+    let queue = std::sync::Arc::new(queue);
+    let mut assets = crate::engine::core::asset::AssetManager::new(
+        crate::engine::core::resource::MergedResourceSpace::new(std::env::temp_dir()),
+    );
+    let mut gpu = crate::engine::render::asset::GpuManager::new(device, queue);
+    let a = assets.register(crate::engine::Mesh::cube());
+    let b = assets.register(crate::engine::Mesh::cube());
+
+    // 分两次 pin + sync：a 先上传（时钟较早），b 后上传（时钟最新）。
+    assert!(assets.pin(a));
+    gpu.sync(&mut assets);
+    assert!(gpu.mesh_gpu_resident(a).is_some());
+    assert!(assets.pin(b));
+    gpu.sync(&mut assets);
+    assert!(gpu.mesh_gpu_resident(b).is_some());
+
+    // gc 窗口 0：a 超窗回收，b（当前时钟最新）保留。
+    gpu.gc(&crate::engine::GcPolicy::default());
+    assert!(gpu.mesh_gpu_resident(b).is_some(), "最新取用的保留");
+    assert!(gpu.mesh_gpu_resident(a).is_none(), "超窗的回收");
+    // GPU 释放不影响 CPU 数据。
+    assert!(assets.get_cached(a).is_some());
+    assert!(assets.get_cached(b).is_some());
+
+    // 自愈：被回收的 a 下次取用自动重传。
+    assert!(gpu.mesh_gpu(a, &mut assets).is_some());
+    assert!(gpu.mesh_gpu_resident(a).is_some());
 }
 
 /// 把天空盒渲染到 HDR 目标，再过 blit 色调映射写 4×4 离屏 Rgba8UnormSrgb，

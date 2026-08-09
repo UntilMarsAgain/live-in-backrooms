@@ -21,6 +21,7 @@ use std::time::Duration;
 use slotmap::{DefaultKey, SlotMap};
 
 use super::game_path::GamePath;
+use super::gc::{GcInfo, GcPolicy};
 use super::mesh::Mesh;
 use super::resource::MergedResourceSpace;
 
@@ -66,6 +67,26 @@ impl<T> Handle<T> {
     }
 }
 
+/// 作用域式 pin 守卫（RAII）：由 [`AssetManager::pin_guard`] 构造，
+/// 离开作用域时自动 `unpin` 一次（与构造时的 `pin` 配对）。
+pub struct PinGuard<'a, T> {
+    assets: &'a mut AssetManager,
+    handle: Handle<T>,
+}
+
+impl<T> PinGuard<'_, T> {
+    /// 守卫持有的句柄。
+    pub fn handle(&self) -> Handle<T> {
+        self.handle
+    }
+}
+
+impl<T> Drop for PinGuard<'_, T> {
+    fn drop(&mut self) {
+        self.assets.unpin(self.handle);
+    }
+}
+
 /// 资源驻留状态：CPU 数据在不在内存、是否要求显存驻留。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetState {
@@ -77,7 +98,8 @@ pub enum AssetState {
     DiskOnly,
     /// CPU 数据驻留内存（内联数据或内存层文件结果）。
     Resident,
-    /// 要求显存驻留：GPU 层上传后禁止回收。
+    /// 要求驻留：至少一个 pin 持有者（引用计数见 [`Slot::pins`]）；GC 不淘汰、
+    /// GPU 层上传后不回收。
     Pinned,
 }
 
@@ -176,8 +198,8 @@ struct Slot {
     state: AssetState,
     /// 注册时的类型标记（`T`），迭代按类型过滤用。
     type_id: TypeId,
-    /// 最近使用序号（注册/get/pin 时更新；智能 GC 按它淘汰冷数据）。
-    last_used: u64,
+    /// GC 记录（最近取用、pin 计数；见 [`super::gc::GcInfo`]）。
+    gc: GcInfo,
     /// `None` = 已移除（世代保留，槽位可复用）。
     data: Option<EntryData>,
 }
@@ -429,7 +451,10 @@ impl AssetManager {
         let key = self.slots.insert(Slot {
             state,
             type_id,
-            last_used: self.use_clock,
+            gc: GcInfo {
+                last_used: self.use_clock,
+                pins: 0,
+            },
             data: Some(data),
         });
         self.version += 1;
@@ -457,7 +482,7 @@ impl AssetManager {
         self.use_clock += 1;
         let now = self.use_clock;
         if let Some(slot) = self.slot_mut(handle) {
-            slot.last_used = now;
+            slot.gc.last_used = now;
         }
         self.get_cached(handle)
     }
@@ -555,25 +580,52 @@ impl AssetManager {
         true
     }
 
-    /// 标记要求显存驻留（不立即上传；上传由渲染层 `GpuManager` 完成）。
+    /// 标记要求驻留（**引用计数**：每次调用 +1，需与 [`Self::unpin`] 配对）。
+    /// 不立即上传；上传由渲染层 `GpuManager` 完成（GPU 驻留按最近使用窗口
+    /// 判定，pin 保护的是 CPU 数据不被 `gc` 逐出）。
     pub fn pin<T>(&mut self, handle: Handle<T>) -> bool {
         self.use_clock += 1;
         let now = self.use_clock;
         let Some(slot) = self.slot_mut(handle) else {
             return false;
         };
-        slot.last_used = now;
+        slot.gc.pins += 1;
+        slot.gc.last_used = now;
         slot.state = AssetState::Pinned;
         true
     }
 
-    /// 允许显存回收（软释放）：`GpuManager::gc` 时释放对应显存表示。
+    /// 解除一次驻留要求（**引用计数**：计数减一，归零才允许回收）。
+    /// 软释放：不立即逐出，等 `GpuManager::gc` / [`Self::gc`] 真正执行。
     pub fn unpin<T>(&mut self, handle: Handle<T>) -> bool {
         let Some(slot) = self.slot_mut(handle) else {
             return false;
         };
-        slot.state = AssetState::Resident;
+        slot.gc.pins = slot.gc.pins.saturating_sub(1);
+        if slot.gc.pins == 0 {
+            slot.state = AssetState::Resident;
+        }
         true
+    }
+
+    /// 句柄当前是否仍有驻留要求（pin 计数 > 0）。
+    pub fn pinned<T>(&self, handle: Handle<T>) -> bool {
+        self.slot(handle).is_some_and(|s| s.gc.pins > 0)
+    }
+
+    /// 作用域式 pin（RAII）：构造时 `pin`，守卫离开作用域自动 `unpin`。
+    ///
+    /// 守卫持有 `&mut AssetManager`，存活期间不能再被其他可变借用；需要边
+    /// 持有驻留边取用其他资源时，改用显式 `pin`/`unpin` 配对。
+    pub fn pin_guard<T>(&mut self, handle: Handle<T>) -> Option<PinGuard<'_, T>> {
+        if self.pin(handle) {
+            Some(PinGuard {
+                assets: self,
+                handle,
+            })
+        } else {
+            None
+        }
     }
 
     /// 卸载：释放条目数据（EntryData），句柄从此失效。
@@ -866,16 +918,16 @@ impl AssetManager {
         }
     }
 
-    /// 智能内存回收（基线：按最近使用窗口）：释放非 `Pinned` 且**最近
-    /// `stale_window_uses` 次使用内未被取用**的文件条目数据（→ `DiskOnly`，
-    /// 下次取用自动重读）；并清理失效来源的重载器/计数。
+    /// 智能内存回收（与 GPU 侧共用 [`GcPolicy::should_keep`] 判定）：
+    /// 被判定淘汰的**文件条目**数据释放（→ `DiskOnly`，下次取用自动重读）；
+    /// 并清理失效来源的重载器/计数。
     ///
     /// 调用时机由物理刻决定（目前由调用方按需触发）。
     #[allow(dead_code)] // 公共 GC API：物理刻接入前由调用方按需触发
-    pub fn gc(&mut self, stale_window_uses: u64) {
-        let cutoff = self.use_clock.saturating_sub(stale_window_uses);
+    pub fn gc(&mut self, policy: &GcPolicy) {
+        let now = self.use_clock;
         for (_, slot) in self.slots.iter_mut() {
-            if slot.state != AssetState::Pinned && slot.last_used < cutoff {
+            if !policy.should_keep(&slot.gc, now) {
                 if let Some(EntryData::File { data, .. }) = &mut slot.data {
                     if data.take().is_some() {
                         slot.state = AssetState::DiskOnly;
@@ -1029,14 +1081,23 @@ mod tests {
         assert!(assets.is_valid(b));
     }
 
-    /// pin/unpin 切换驻留状态；对失效句柄操作返回 false。
+    /// pin/unpin 是引用计数：多次 pin 需同样多次 unpin 才回到 Resident；
+    /// 对失效句柄操作返回 false。
     #[test]
     fn pin_unpin_transitions_state() {
         let mut assets = manager();
         let handle = assets.register(Mesh::quad());
         assert!(assets.pin(handle));
         assert_eq!(assets.state(handle), Some(AssetState::Pinned));
+        assert!(assets.pinned(handle));
+        // 第二次 pin：计数 +1；只 unpin 一次仍是 Pinned。
+        assert!(assets.pin(handle));
         assert!(assets.unpin(handle));
+        assert_eq!(assets.state(handle), Some(AssetState::Pinned), "计数未归零仍驻留");
+        assert!(assets.pinned(handle));
+        // 计数归零 → Resident。
+        assert!(assets.unpin(handle));
+        assert!(!assets.pinned(handle));
         assert_eq!(assets.state(handle), Some(AssetState::Resident));
 
         let stale = Handle::<Mesh> {
@@ -1045,6 +1106,28 @@ mod tests {
         };
         assert!(!assets.pin(stale));
         assert!(!assets.unpin(stale));
+    }
+
+    /// RAII 守卫：pin_guard 构造时 pin，离开作用域自动 unpin。
+    #[test]
+    fn pin_guard_releases_on_drop() {
+        let mut assets = manager();
+        let handle = assets.register(Mesh::cube());
+        // 构造时 pin（计数 1）；守卫持有独占借用，作用域内不能再借 assets。
+        {
+            let guard = assets.pin_guard(handle).expect("句柄有效");
+            assert_eq!(guard.handle(), handle);
+            // 作用域结束自动 unpin。
+        }
+        assert!(!assets.pinned(handle));
+        assert_eq!(assets.state(handle), Some(AssetState::Resident));
+
+        // 失效句柄：pin_guard 返回 None。
+        let stale = Handle::<Mesh> {
+            key: DefaultKey::default(),
+            _marker: PhantomData,
+        };
+        assert!(assets.pin_guard(stale).is_none());
     }
 
     /// 按类型遍历：只产出该类型的存活句柄。
@@ -1163,7 +1246,7 @@ mod tests {
         let loose = assets.register_file::<u32>(path.clone(), Box::new(1u32), 2u32);
         assets.pin(pinned);
 
-        assets.gc(0); // 窗口 0：只保留 Pinned 与"此刻"使用的。
+        assets.gc(&GcPolicy::default()); // 窗口 0：只保留 Pinned 与"此刻"使用的。
         // Pinned 保留数据；非 Pinned 逐出，但 get 能重读。
         assert!(assets.get_cached(pinned).is_some());
         assert!(assets.get_cached(loose).is_none());
@@ -1180,7 +1263,7 @@ mod tests {
         let fresh = assets.register_file::<u32>(path.clone(), Box::new(1u32), 2u32);
         assets.get(fresh); // 使用 fresh，把它标记为最近使用。
 
-        assets.gc(0);
+        assets.gc(&GcPolicy::default());
         assert!(assets.get_cached(fresh).is_some(), "最近使用的应保留");
         assert!(assets.get_cached(old).is_none(), "未使用的应逐出");
     }

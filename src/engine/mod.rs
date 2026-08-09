@@ -25,8 +25,10 @@ pub mod scene;
 pub use core::aabb::Aabb;
 #[allow(unused_imports)]
 pub use core::asset::{
-    AssetManager, AssetState, AssetStatus, FileLoader, Handle, HandleState, MeshSource,
+    AssetManager, AssetState, AssetStatus, FileLoader, Handle, HandleState, MeshSource, PinGuard,
 };
+#[allow(unused_imports)]
+pub use core::gc::GcPolicy;
 #[allow(unused_imports)]
 pub use core::camera::Camera;
 #[allow(unused_imports)]

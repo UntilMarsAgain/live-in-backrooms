@@ -7,16 +7,17 @@
 //! - [`GpuManager::sync`]：**只上传**——Pinned 且未上传的补上（预上传优化）；
 //! - [`GpuManager::mesh_gpu`] / [`GpuManager::texture_gpu`]：**自愈取用**——
 //!   调用方只要给句柄，调度器检查并上传，缺啥传啥；
-//! - [`GpuManager::gc`]：**真正回收**——释放所有不再 Pinned 的显存条目
-//!   （unpin 是软释放，不立即回收；调用时机由物理刻决定）。
+//! - [`GpuManager::gc`]：**真正回收**——按最近使用窗口（[`GcPolicy`]）释放
+//!   超窗未取用的显存条目（与 CPU 侧同款算法，参数不同）。
+//!   调用时机由物理刻决定。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use wgpu::{Device, Queue};
 
-use crate::engine::core::asset::AssetManager;
-use crate::engine::core::asset::{AssetState, Handle};
+use crate::engine::core::asset::{AssetManager, AssetState, Handle};
+use crate::engine::core::gc::{GcInfo, GcPolicy};
 use crate::engine::core::mesh::Mesh;
 use crate::engine::core::texture::Texture;
 
@@ -120,6 +121,17 @@ impl GpuUploader<Texture, TextureGpu> for TextureUploader {
     }
 }
 
+/// 显存条目：GPU 表示 + 与 CPU 侧同款的 GC 记录（最近取用/上传时钟；
+/// `pins` 恒为 0——GPU 驻留按最近使用窗口判定）。
+///
+/// GPU 侧不依赖 CPU 的 pin 来判定驻留（`gc` 是纯成员操作），而是自己记录
+/// 最近取用时间，按 [`GcPolicy`] 的窗口淘汰；被淘汰后下次取用自愈重传。
+#[derive(Debug)]
+struct GpuEntry<T> {
+    gpu: T,
+    gc: GcInfo,
+}
+
 /// 显存驻留管理器：句柄 → 显存表示的纯驻留表（CPU 侧权威）。
 #[derive(Debug)]
 pub struct GpuManager {
@@ -127,8 +139,10 @@ pub struct GpuManager {
     queue: Arc<Queue>,
     mesh_uploader: MeshUploader,
     texture_uploader: TextureUploader,
-    meshes: HashMap<Handle<Mesh>, MeshGpu>,
-    textures: HashMap<Handle<Texture>, TextureGpu>,
+    meshes: HashMap<Handle<Mesh>, GpuEntry<MeshGpu>>,
+    textures: HashMap<Handle<Texture>, GpuEntry<TextureGpu>>,
+    /// GPU 侧最近使用时钟（上传/取用 +1；gc 的"现在"）。
+    use_clock: u64,
 }
 
 impl GpuManager {
@@ -140,6 +154,7 @@ impl GpuManager {
             texture_uploader: TextureUploader,
             meshes: HashMap::new(),
             textures: HashMap::new(),
+            use_clock: 0,
         }
     }
 
@@ -154,7 +169,7 @@ impl GpuManager {
     }
 
     /// 按句柄取用网格显存表示（**自愈**）：未上传则自动上传（CPU 数据不在
-    /// 内存会先回磁盘），并标记 `Pinned` 防止被 `gc` 回收。
+    /// 内存会先回磁盘），并刷新最近取用（`gc` 不会回收正在使用的资源）。
     ///
     /// 这是外部"通过句柄取用"的统一入口——检查与上传是调度器（本管理器）的
     /// 固有行为，调用方不需要先做任何 ensure。句柄无效/已移除返回 `None`。
@@ -164,8 +179,8 @@ impl GpuManager {
         assets: &mut AssetManager,
     ) -> Option<&MeshGpu> {
         self.upload_mesh(handle, assets)?;
-        assets.pin(handle);
-        self.meshes.get(&handle)
+        self.touch_mesh(handle);
+        self.meshes.get(&handle).map(|e| &e.gpu)
     }
 
     pub fn texture_gpu(
@@ -174,17 +189,17 @@ impl GpuManager {
         assets: &mut AssetManager,
     ) -> Option<&TextureGpu> {
         self.upload_texture(handle, assets)?;
-        assets.pin(handle);
-        self.textures.get(&handle)
+        self.touch_texture(handle);
+        self.textures.get(&handle).map(|e| &e.gpu)
     }
 
     /// 纯查询：句柄当前的显存表示，**不触发上传**（已驻留/检查用）。
     pub fn mesh_gpu_resident(&self, handle: Handle<Mesh>) -> Option<&MeshGpu> {
-        self.meshes.get(&handle)
+        self.meshes.get(&handle).map(|e| &e.gpu)
     }
 
     pub fn texture_gpu_resident(&self, handle: Handle<Texture>) -> Option<&TextureGpu> {
-        self.textures.get(&handle)
+        self.textures.get(&handle).map(|e| &e.gpu)
     }
 
     /// 预上传优化：把所有 `Pinned` 且尚未上传的句柄批量上传。
@@ -196,14 +211,17 @@ impl GpuManager {
         self.sync_textures(assets);
     }
 
-    /// 显存垃圾回收：释放所有不再 `Pinned` 的条目（Resident/DiskOnly/已移除）。
+    /// 显存垃圾回收（纯成员操作，不依赖 CPU 侧）：用 [`GcPolicy::should_keep`]
+    /// 统一判定淘汰；被淘汰的条目下次取用自愈重传。
     ///
-    /// `unpin`/`remove` 是软释放：不立即回收，等这里真正释放。
+    /// 与 [`AssetManager::gc`] 同款算法（窗口参数不同）。
     /// 调用时机由物理刻决定（目前由调用方按需触发）。
     #[allow(dead_code)] // 公共 GC API：物理刻接入前由调用方按需触发
-    pub fn gc(&mut self, assets: &AssetManager) {
-        self.gc_meshes(assets);
-        self.gc_textures(assets);
+    pub fn gc(&mut self, policy: &GcPolicy) {
+        let now = self.use_clock;
+        self.meshes.retain(|_, entry| policy.should_keep(&entry.gc, now));
+        self.textures
+            .retain(|_, entry| policy.should_keep(&entry.gc, now));
     }
 
     /// 上传一个网格句柄（自愈取用与 `sync` 共用）。
@@ -219,7 +237,15 @@ impl GpuManager {
         // 自愈：数据缺失（含内存卸载）时 get 会经重载器自动回磁盘。
         let mesh = assets.get(handle)?;
         let gpu = self.mesh_uploader.upload(&self.device, &self.queue, mesh);
-        self.meshes.insert(handle, gpu);
+        self.use_clock += 1;
+        let last_used = self.use_clock;
+        self.meshes.insert(
+            handle,
+            GpuEntry {
+                gpu,
+                gc: GcInfo { last_used, pins: 0 },
+            },
+        );
         Some(())
     }
 
@@ -229,8 +255,33 @@ impl GpuManager {
         }
         let texture = assets.get(handle)?;
         let gpu = self.texture_uploader.upload(&self.device, &self.queue, texture);
-        self.textures.insert(handle, gpu);
+        self.use_clock += 1;
+        let last_used = self.use_clock;
+        self.textures.insert(
+            handle,
+            GpuEntry {
+                gpu,
+                gc: GcInfo { last_used, pins: 0 },
+            },
+        );
         Some(())
+    }
+
+    /// 刷新最近取用（取用路径的时钟推进；与 CPU 侧 `get` 的语义一致）。
+    fn touch_mesh(&mut self, handle: Handle<Mesh>) {
+        self.use_clock += 1;
+        let now = self.use_clock;
+        if let Some(entry) = self.meshes.get_mut(&handle) {
+            entry.gc.last_used = now;
+        }
+    }
+
+    fn touch_texture(&mut self, handle: Handle<Texture>) {
+        self.use_clock += 1;
+        let now = self.use_clock;
+        if let Some(entry) = self.textures.get_mut(&handle) {
+            entry.gc.last_used = now;
+        }
     }
 
     fn sync_meshes(&mut self, assets: &mut AssetManager) {
@@ -259,14 +310,4 @@ impl GpuManager {
         }
     }
 
-    fn gc_meshes(&mut self, assets: &AssetManager) {
-        self.meshes
-            .retain(|handle, _| matches!(assets.state(*handle), Some(AssetState::Pinned)));
-    }
-
-    fn gc_textures(&mut self, assets: &AssetManager) {
-        self.textures.retain(|handle, _| {
-            matches!(assets.state(*handle), Some(AssetState::Pinned))
-        });
-    }
 }

@@ -53,8 +53,13 @@
 - **合并资源空间多包合并**：当前 `MergedResourceSpace` 是单包根简化实现
   （见 TODO 注释）；需包发现（扫描 `game-data/` 下含 `package.toml` 的目录）、
   按依赖/优先级排序、多包 namespace 目录叠加覆盖。
-- **智能 GC**：`AssetManager::gc` / `GpuManager::gc` 已有基线（按最近使用
-  淘汰非 Pinned 数据），待物理刻接入后自动调用；可加内存预算/水位阈值。
+- **智能 GC**：`AssetManager::gc` / `GpuManager::gc` 都是**纯成员操作**，
+  统一实现在 [`GcPolicy::should_keep`]（`core/gc.rs`），两侧只喂自己的时钟
+  与 [`GcInfo`] 记录；扩展只改 `gc.rs`。待物理刻接入后自动调用；可加内存
+  预算/水位阈值（`GcPolicy` 预留字段位置）。
+- **pin 引用计数**：已从开关改为引用计数 + `PinGuard` RAII 守卫（CPU 侧）；
+  GPU 侧驻留改为按最近使用窗口淘汰（gc 不依赖 CPU pin，纯成员），
+  淘汰后自愈重传。
 - **关卡级资产清单**：`LevelAssets` 批量 pin/unpin，关卡切换按清单驻留。
 
 ## 音频
