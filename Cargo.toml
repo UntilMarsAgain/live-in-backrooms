@@ -17,6 +17,7 @@ semver = "1.0.28"
 toml = "1.1.4"
 wgpu = "30.0.0"
 winit = "0.30.13"
+slotmap = "1.1.1"
 
 [dev-dependencies]
 naga = "30.0.0"

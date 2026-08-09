@@ -930,6 +930,7 @@ dependencies = [
  "pollster",
  "semver",
  "serde",
+ "slotmap",
  "toml",
  "wgpu",
  "winit",

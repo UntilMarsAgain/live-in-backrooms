@@ -15,19 +15,23 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
+use slotmap::{DefaultKey, SlotMap};
+
 use super::game_path::GamePath;
 use super::mesh::Mesh;
 use super::resource::MergedResourceSpace;
 
-/// 资源句柄：世代编号 + 类型参数。
+/// 资源句柄：slotmap 世代键 + 类型参数。
+///
+/// 键的世代由 [`SlotMap`] 管理（删除后旧键永不匹配复用的槽位），
+/// `T` 只是编译期标记（不同资源不同类型）。
 #[derive(Debug)]
 pub struct Handle<T> {
-    index: u32,
-    generation: u32,
+    key: DefaultKey,
     _marker: PhantomData<T>,
 }
 
-// 句柄只按 (index, generation) 比较/哈希，类型参数 T 只是编译期标记，
+// 句柄只按 key 比较/哈希，类型参数 T 只是编译期标记，
 // 因此这些 trait 的实现不依赖 T：Handle<Mesh> 与 Handle<Texture> 仍是
 // 不同类型（T 在类型层面区分），但同一 T 的句柄可以自由拷贝比较。
 impl<T> Clone for Handle<T> {
@@ -40,7 +44,7 @@ impl<T> Copy for Handle<T> {}
 
 impl<T> PartialEq for Handle<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.index == other.index && self.generation == other.generation
+        self.key == other.key
     }
 }
 
@@ -48,18 +52,14 @@ impl<T> Eq for Handle<T> {}
 
 impl<T> std::hash::Hash for Handle<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.index.hash(state);
-        self.generation.hash(state);
+        self.key.hash(state);
     }
 }
 
 impl<T> Handle<T> {
-    pub fn index(self) -> usize {
-        self.index as usize
-    }
-
-    pub fn generation(self) -> u32 {
-        self.generation
+    /// 底层 slotmap 键（资产库内部使用；外部通常不需要）。
+    pub fn key(self) -> DefaultKey {
+        self.key
     }
 }
 
@@ -135,7 +135,6 @@ pub trait MeshSource {
 /// 注册表槽位：世代 + 状态 + 类型标记 + 数据。
 #[derive(Debug)]
 struct Slot {
-    generation: u32,
     state: AssetState,
     /// 注册时的类型标记（`T`），迭代按类型过滤用。
     type_id: TypeId,
@@ -162,14 +161,13 @@ pub struct AssetManager {
     /// 每文件的条目引用计数（**跨类型合计**）：计数归零（所有条目都被 `remove`）
     /// 时才释放重载器（关联计数）。
     file_refs: HashMap<GamePath, u32>,
-    /// 反向索引：来源文件 → 该文件注册过的条目句柄（index, generation）。
+    /// 反向索引：来源文件 → 该文件注册过的条目句柄（slotmap 键）。
     ///
     /// 用于"同一 GamePath 已加载则不重复注册"（去重），`remove` 时同步删除；
     /// 键是**规范化后**的 GamePath（`a//b` 与 `a/b` 是同一个键）。
-    file_entries: HashMap<GamePath, Vec<(u32, u32)>>,
-    slots: Vec<Option<Slot>>,
-    /// 空闲槽索引栈（复用被卸载的槽位）。
-    free: Vec<u32>,
+    file_entries: HashMap<GamePath, Vec<DefaultKey>>,
+    /// 槽位表（slotmap：世代键 + 槽位复用由库管理）。
+    slots: SlotMap<DefaultKey, Slot>,
     /// 变更版本：新增/卸载 +1。
     version: u64,
 }
@@ -194,8 +192,7 @@ impl AssetManager {
             reloaders: HashMap::new(),
             file_refs: HashMap::new(),
             file_entries: HashMap::new(),
-            slots: Vec::new(),
-            free: Vec::new(),
+            slots: SlotMap::with_key(),
             version: 0,
         }
     }
@@ -230,7 +227,7 @@ impl AssetManager {
         self.file_entries
             .entry(source)
             .or_default()
-            .push((handle.index, handle.generation));
+            .push(handle.key);
         handle
     }
 
@@ -247,34 +244,17 @@ impl AssetManager {
     }
 
     fn register_with_source<T>(&mut self, type_id: TypeId, data: EntryData) -> Handle<T> {
-        let handle = if let Some(index) = self.free.pop() {
-            let slot = self.slots[index as usize]
-                .as_mut()
-                .expect("free 列表必然指向存活槽位");
-            slot.state = AssetState::Resident;
-            slot.type_id = type_id;
-            slot.data = Some(data);
-            Handle {
-                index,
-                generation: slot.generation,
-                _marker: PhantomData,
-            }
-        } else {
-            let index = self.slots.len() as u32;
-            self.slots.push(Some(Slot {
-                generation: 1,
-                state: AssetState::Resident,
-                type_id,
-                data: Some(data),
-            }));
-            Handle {
-                index,
-                generation: 1,
-                _marker: PhantomData,
-            }
-        };
+        // slotmap 内部管理槽位复用与世代：删除的键永不匹配复用后的槽位。
+        let key = self.slots.insert(Slot {
+            state: AssetState::Resident,
+            type_id,
+            data: Some(data),
+        });
         self.version += 1;
-        handle
+        Handle {
+            key,
+            _marker: PhantomData,
+        }
     }
 
     /// 取数据（downcast 到 `T`）：内联直接返回；文件条目直接取槽位里的数据，
@@ -396,19 +376,12 @@ impl AssetManager {
 
     /// 卸载：释放条目数据（EntryData），句柄从此失效。
     pub fn remove<T>(&mut self, handle: Handle<T>) -> Option<EntryData> {
-        // 先取出数据并结束槽位借用，再处理引用计数（需要 &mut 其他字段）。
-        let data = {
-            let slot = self.slot_mut(handle)?;
-            slot.state = AssetState::Unloaded;
-            slot.generation += 1;
-            slot.data.take()
-        };
+        let slot = self.slots.remove(handle.key)?;
+        let data = slot.data;
         // 反向索引同步删除 + B1.2 引用计数。
         if let Some(EntryData::File { source, .. }) = &data {
             if let Some(handles) = self.file_entries.get_mut(source) {
-                handles.retain(|&(index, generation)| {
-                    !(index == handle.index && generation == handle.generation)
-                });
+                handles.retain(|key| *key != handle.key);
                 if handles.is_empty() {
                     self.file_entries.remove(source);
                 }
@@ -421,7 +394,6 @@ impl AssetManager {
                 }
             }
         }
-        self.free.push(handle.index);
         self.version += 1;
         data
     }
@@ -433,10 +405,7 @@ impl AssetManager {
 
     /// 存活资源数。
     pub fn len(&self) -> usize {
-        self.slots
-            .iter()
-            .filter(|s| s.as_ref().is_some_and(|slot| slot.data.is_some()))
-            .count()
+        self.slots.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -448,15 +417,9 @@ impl AssetManager {
         let target = TypeId::of::<T>();
         self.slots
             .iter()
-            .enumerate()
-            .filter_map(move |(index, slot)| {
-                let slot = slot.as_ref()?;
-                if slot.data.is_none() || slot.type_id != target {
-                    return None;
-                }
-                Some(Handle {
-                    index: index as u32,
-                    generation: slot.generation,
+            .filter_map(move |(key, slot)| {
+                (slot.data.is_some() && slot.type_id == target).then(|| Handle {
+                    key,
                     _marker: PhantomData,
                 })
             })
@@ -472,15 +435,14 @@ impl AssetManager {
             .get(source)
             .into_iter()
             .flatten()
-            .filter_map(|&(index, generation)| {
-                let slot = self.slots.get(index as usize)?.as_ref()?;
+            .filter_map(|key| {
+                let slot = self.slots.get(*key)?;
                 // 只看"是否已注册过该类型"：DiskOnly（数据已逐出）也算，避免
-                // 逐出后重复注册；世代匹配保证不是已移除的旧句柄。
-                (slot.generation == generation && slot.type_id == target).then(|| Handle {
-                        index,
-                        generation,
-                        _marker: PhantomData,
-                    })
+                // 逐出后重复注册；slotmap 键世代保证不是已移除的旧句柄。
+                (slot.type_id == target).then(|| Handle {
+                    key: *key,
+                    _marker: PhantomData,
+                })
             })
             .collect()
     }
@@ -488,18 +450,16 @@ impl AssetManager {
     /// 内存卸载（按文件）：命中 File 条目的数据丢弃（置 `DiskOnly`），
     /// 来源 + 定位保留，下次 `get` 经重载器完整重解析。
     pub fn unload_memory(&mut self, source: &GamePath) {
-        let indices: Vec<usize> = self
+        let keys: Vec<DefaultKey> = self
             .slots
             .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                let slot = slot.as_ref()?;
+            .filter_map(|(key, slot)| {
                 matches!(slot.data.as_ref(), Some(EntryData::File { source: s, .. }) if s == source)
-                    .then_some(index)
+                    .then_some(key)
             })
             .collect();
-        for index in indices {
-            if let Some(slot) = self.slots[index].as_mut() {
+        for key in keys {
+            if let Some(slot) = self.slots.get_mut(key) {
                 if let Some(EntryData::File { data, .. }) = &mut slot.data {
                     if data.take().is_some() {
                         slot.state = AssetState::DiskOnly;
@@ -515,7 +475,7 @@ impl AssetManager {
     /// 调用时机由物理刻决定（目前由调用方按需触发）。
     #[allow(dead_code)] // 公共 GC API：物理刻接入前由调用方按需触发
     pub fn gc(&mut self) {
-        for slot in self.slots.iter_mut().flatten() {
+        for (_, slot) in self.slots.iter_mut() {
             if slot.state != AssetState::Pinned {
                 if let Some(EntryData::File { data, .. }) = &mut slot.data {
                     if data.take().is_some() {
@@ -525,7 +485,7 @@ impl AssetManager {
             }
         }
         let mut in_use = std::collections::HashSet::new();
-        for slot in self.slots.iter().flatten() {
+        for (_, slot) in self.slots.iter() {
             if let Some(EntryData::File { source, .. }) = &slot.data {
                 in_use.insert(source.clone());
             }
@@ -536,13 +496,11 @@ impl AssetManager {
     }
 
     fn slot<T>(&self, handle: Handle<T>) -> Option<&Slot> {
-        let slot = self.slots.get(handle.index as usize)?.as_ref()?;
-        (slot.generation == handle.generation).then_some(slot)
+        self.slots.get(handle.key)
     }
 
     fn slot_mut<T>(&mut self, handle: Handle<T>) -> Option<&mut Slot> {
-        let slot = self.slots.get_mut(handle.index as usize)?.as_mut()?;
-        (slot.generation == handle.generation).then_some(slot)
+        self.slots.get_mut(handle.key)
     }
 }
 
@@ -593,10 +551,9 @@ mod tests {
         assert!(!assets.is_valid(a));
         assert!(assets.data_source(a).is_none());
 
-        // 复用同一槽位注册新资源：旧句柄世代不匹配，仍无效。
+        // 槽位复用由 slotmap 管理：旧键世代不匹配，永远失效。
         let b = assets.register(Texture::checkerboard(2, 1));
-        assert_eq!(b.index(), a.index(), "应复用空闲槽位");
-        assert_ne!(b.generation(), a.generation(), "世代应递增");
+        assert_ne!(b.key(), a.key(), "新句柄应是不同键（世代不同）");
         assert!(!assets.is_valid(a));
         assert!(assets.is_valid(b));
     }
@@ -612,8 +569,7 @@ mod tests {
         assert_eq!(assets.state(handle), Some(AssetState::Resident));
 
         let stale = Handle::<Mesh> {
-            index: 999,
-            generation: 1,
+            key: DefaultKey::default(),
             _marker: PhantomData,
         };
         assert!(!assets.pin(stale));
@@ -639,13 +595,11 @@ mod tests {
     #[test]
     fn handle_types_are_distinct() {
         let mesh: Handle<Mesh> = Handle {
-            index: 0,
-            generation: 1,
+            key: DefaultKey::default(),
             _marker: PhantomData,
         };
         let texture: Handle<Texture> = Handle {
-            index: 0,
-            generation: 1,
+            key: DefaultKey::default(),
             _marker: PhantomData,
         };
         // 不同 T 的 Handle 不是同一个类型（编译器保证），此处仅作存在性说明。
