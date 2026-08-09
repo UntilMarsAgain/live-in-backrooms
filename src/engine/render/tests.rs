@@ -2,8 +2,7 @@
 //!
 //! GPU 相关测试统一用 `gpu_` 前缀命名：默认全量跑，**必须有 GPU**——
 //! 无可用适配器时直接断言失败（防止假绿），无 GPU 的机器必须显式用
-//! `cargo test -- --skip gpu_` 跳过它们
-//! （软件渲染 llvmpipe/lavapipe 并行跑多个 GPU 测试会段错误，建议单线程）。
+//! `cargo test -- --skip gpu_` 跳过它们。
 
 use super::blit::BlitResources;
 use super::environment::create_cube_texture;
