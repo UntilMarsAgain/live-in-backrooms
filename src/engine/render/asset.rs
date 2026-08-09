@@ -212,7 +212,9 @@ impl GpuManager {
     /// 再查显存表——否则移除后仍残留的旧显存条目会被误当成有效上传返回。
     fn upload_mesh(&mut self, handle: Handle<Mesh>, assets: &mut AssetManager) -> Option<()> {
         if self.meshes.contains_key(&handle) {
-            return Some(());
+            // 已上传，但仍需确认 CPU 侧句柄有效：remove 后残留的旧显存条目
+            // 不能继续被取用（gc 才会真正清掉它）。
+            return assets.is_valid(handle).then_some(());
         }
         // 自愈：数据缺失（含内存卸载）时 get 会经重载器自动回磁盘。
         let mesh = assets.get(handle)?;
@@ -223,7 +225,7 @@ impl GpuManager {
 
     fn upload_texture(&mut self, handle: Handle<Texture>, assets: &mut AssetManager) -> Option<()> {
         if self.textures.contains_key(&handle) {
-            return Some(());
+            return assets.is_valid(handle).then_some(());
         }
         let texture = assets.get(handle)?;
         let gpu = self.texture_uploader.upload(&self.device, &self.queue, texture);

@@ -1,7 +1,8 @@
 //! 渲染模块测试：naga WGSL 校验 + 无头 GPU 冒烟 + 端到端像素验证。
 //!
-//! GPU 相关测试统一用 `gpu_` 前缀命名：默认全量跑；
-//! 无 GPU 的机器用 `cargo test -- --skip gpu_` 跳过它们
+//! GPU 相关测试统一用 `gpu_` 前缀命名：默认全量跑，**必须有 GPU**——
+//! 无可用适配器时直接断言失败（防止假绿），无 GPU 的机器必须显式用
+//! `cargo test -- --skip gpu_` 跳过它们
 //! （软件渲染 llvmpipe/lavapipe 并行跑多个 GPU 测试会段错误，建议单线程）。
 
 use super::blit::BlitResources;
@@ -51,7 +52,7 @@ fn blit_shader_compiles() {
 }
 
 /// 无窗口设备：请求适配器并创建设备（含 max_bind_groups 8 与
-/// FLOAT32_FILTERABLE 特性）。失败时打印原因并返回 `None`（CI 无 GPU 可跳过）。
+/// FLOAT32_FILTERABLE 特性）。失败时打印原因并返回 `None`。
 fn headless_device() -> Option<(wgpu::Device, wgpu::Queue, bool)> {
     // 与运行时一致：只启用 PRIMARY 后端（无 OpenGL），避免踩 GL 后端的
     // 数组纹理读回 bug（见 docs/BUG.md）。
@@ -88,13 +89,23 @@ fn headless_device() -> Option<(wgpu::Device, wgpu::Queue, bool)> {
     Some((device, queue, float32_filterable))
 }
 
+/// 取无头 GPU 设备；**无可用适配器直接断言失败**——GPU 测试必须在有 GPU 的
+/// 环境跑，无 GPU 的机器应显式用 `cargo test -- --skip gpu_` 跳过。
+/// 绝不静默"通过"（否则没跑也算绿，正是这种假绿掩盖过真实 bug）。
+fn require_headless_device() -> (wgpu::Device, wgpu::Queue, bool) {
+    headless_device().unwrap_or_else(|| {
+        panic!(
+            "需要 GPU：无可用适配器。无 GPU 的机器请显式用 \
+             `cargo test -- --skip gpu_` 跳过 GPU 测试，而不是让它们假装通过"
+        )
+    })
+}
+
 /// 无窗口冒烟测试：不创建 surface，直接请求适配器/设备，验证环境资源创建、
 /// 计算转换与天空盒渲染不触发 wgpu 校验错误；无 GPU 环境（如 CI）则跳过。
 #[test]
 fn gpu_environment_headless_smoke() {
-    let Some((device, queue, float32_filterable)) = headless_device() else {
-        return;
-    };
+    let (device, queue, float32_filterable) = require_headless_device();
 
     // mesh 着色器声明了 @group(4)：校验它不超出 max_bind_groups 限制。
     device.create_shader_module(ShaderModuleDescriptor {
@@ -203,9 +214,7 @@ fn gpu_environment_headless_smoke() {
 /// 无窗口冒烟测试：灯光调试线框管线的创建与绘制不触发 wgpu 校验错误。
 #[test]
 fn gpu_light_debug_gizmos_headless_smoke() {
-    let Some((device, queue, _)) = headless_device() else {
-        return;
-    };
+    let (device, queue, _) = require_headless_device();
 
     // 相机绑定组（调试管线复用 @group(0) 的相机 uniform 布局）。
     let camera_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -322,9 +331,7 @@ fn gpu_light_debug_gizmos_headless_smoke() {
 /// （绕开 copy_texture_to_buffer 拷数组纹理的路径，直接验证"上传→采样"。）
 #[test]
 fn gpu_skybox_sampling_verifies_texture_content() {
-    let Some((device, queue, float32_filterable)) = headless_device() else {
-        return;
-    };
+    let (device, queue, float32_filterable) = require_headless_device();
 
     // 相机绑定组（天空盒需要 camera uniform）。
     let camera_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -453,9 +460,7 @@ fn gpu_skybox_sampling_verifies_texture_content() {
 /// `submit()` 执行），除顶层外的 mip 全部提前 return，预过滤图基本全黑。
 #[test]
 fn gpu_specular_ibl_outputs_nonblack() {
-    let Some((device, queue, float32_filterable)) = headless_device() else {
-        return;
-    };
+    let (device, queue, float32_filterable) = require_headless_device();
 
     let camera_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some("specular smoke camera layout"),
@@ -519,9 +524,7 @@ fn gpu_specular_ibl_outputs_nonblack() {
 /// 写 Rgba8UnormSrgb 应仍是高亮——证明"HDR 值 → 可显示"的最后一环工作。
 #[test]
 fn gpu_blit_tone_maps_hdr_radiance() {
-    let Some((device, queue, _)) = headless_device() else {
-        return;
-    };
+    let (device, queue, _) = require_headless_device();
 
     // 环境参数（AgX EV 窗口默认值）：blit 绑定组需要这块 uniform。
     let env_params = device.create_buffer(&BufferDescriptor {
@@ -618,9 +621,7 @@ fn gpu_blit_tone_maps_hdr_radiance() {
 /// `gc` 才真正回收，CPU 数据保留。
 #[test]
 fn gpu_manager_sync_uploads_and_gc_reclaims() {
-    let Some((device, queue, _)) = headless_device() else {
-        return;
-    };
+    let (device, queue, _) = require_headless_device();
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
     let mut assets = crate::engine::core::asset::AssetManager::new(
@@ -655,9 +656,7 @@ fn gpu_manager_sync_uploads_and_gc_reclaims() {
 /// 已移除的无效句柄返回 `None`（渲染器据此报错）。
 #[test]
 fn gpu_manager_mesh_gpu_uploads_on_demand() {
-    let Some((device, queue, _)) = headless_device() else {
-        return;
-    };
+    let (device, queue, _) = require_headless_device();
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
     let mut assets = crate::engine::core::asset::AssetManager::new(
@@ -681,9 +680,7 @@ fn gpu_manager_mesh_gpu_uploads_on_demand() {
 /// 预分配语义：`pin_mesh` 标记驻留（CPU 侧），`sync` 后上传；重复 pin 幂等。
 #[test]
 fn gpu_manager_pin_then_sync_preallocates() {
-    let Some((device, queue, _)) = headless_device() else {
-        return;
-    };
+    let (device, queue, _) = require_headless_device();
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
     let mut assets = crate::engine::core::asset::AssetManager::new(

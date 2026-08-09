@@ -197,10 +197,11 @@
     （防"参数缓冲复用导致预过滤图全黑"这类回归）。
   - **资产 GPU 同步**：pin 上传 / unpin 回收 / 按需上传（`ensure_*_gpu`）/
     无效句柄报错路径，headless 设备实测。
-- **注意事项**：GPU 相关测试默认全量跑（`cargo test`）；
-  无 GPU 的机器用 `cargo test -- --skip gpu_` 跳过它们。
-  软件渲染（llvmpipe/lavapipe）并行跑多个 GPU 测试会段错误，
-  建议这类环境加 `-- --test-threads=1`。
+- **注意事项**：GPU 相关测试默认全量跑（`cargo test`），**必须有 GPU**——
+  无可用适配器时直接**断言失败**（防止"没跑也算通过"的假绿）；无 GPU 的机器
+  必须显式用 `cargo test -- --skip gpu_` 跳过它们。软件渲染
+  （llvmpipe/lavapipe）并行跑多个 GPU 测试会段错误，建议这类环境加
+  `-- --test-threads=1`。
 - **可补**：`collect_lights`（方向推导）、uniform 布局（大小/偏移断言）、
   strip/fan 转换的边界。
 - **后端能力验证**：`examples/vulkan_probe.rs`（强制 Vulkan，A/B/C/D 四项实测），
