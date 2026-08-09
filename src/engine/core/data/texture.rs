@@ -1,6 +1,6 @@
 //! 纹理模块：CPU 侧的贴图数据。
 //!
-//! 注册与生命周期管理统一走 [`super::asset::AssetManager`]。
+//! 注册与生命周期管理统一走 [`crate::engine::core::asset::AssetManager`]。
 
 /// 纹理：RGBA8 未压缩像素（sRGB 语义，上传时按 `Rgba8UnormSrgb` 处理）。
 #[derive(Debug, Clone)]

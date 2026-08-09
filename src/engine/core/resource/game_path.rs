@@ -10,7 +10,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// 游戏资源路径：`namespace:path`（path 用 `/` 分隔，可带扩展名）。

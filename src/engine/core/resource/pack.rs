@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 
@@ -38,20 +38,18 @@ pub fn parse_package(text: &str) -> Result<Package> {
     Version::parse(&pkg.version)
         .with_context(|| format!("version=\"{}\" 不是合法 semver", pkg.version))?;
     for (dep, req) in &pkg.dependencies {
-        VersionReq::parse(req)
-            .with_context(|| format!("依赖 {dep} 的版本要求 {req:?} 非法"))?;
+        VersionReq::parse(req).with_context(|| format!("依赖 {dep} 的版本要求 {req:?} 非法"))?;
     }
     for (other, req) in &pkg.conflicts {
-        VersionReq::parse(req)
-            .with_context(|| format!("冲突 {other} 的版本要求 {req:?} 非法"))?;
+        VersionReq::parse(req).with_context(|| format!("冲突 {other} 的版本要求 {req:?} 非法"))?;
     }
     Ok(pkg)
 }
 
 /// 版本要求是否被满足（Cargo 语义：`VersionReq::matches`）。
 pub fn version_satisfies(requirement: &str, version: &str) -> Result<bool> {
-    let req = VersionReq::parse(requirement)
-        .with_context(|| format!("非法版本要求：{requirement:?}"))?;
+    let req =
+        VersionReq::parse(requirement).with_context(|| format!("非法版本要求：{requirement:?}"))?;
     let ver = Version::parse(version).with_context(|| format!("非法包版本：{version:?}"))?;
     Ok(req.matches(&ver))
 }
@@ -167,8 +165,14 @@ old_mod = ">=1.0"
         .expect("应能解析");
         assert_eq!(pkg.id, "mod_a");
         assert_eq!(pkg.version, "0.1.0");
-        assert_eq!(pkg.dependencies.get("vanilla").map(String::as_str), Some("=0.1.0"));
-        assert_eq!(pkg.conflicts.get("old_mod").map(String::as_str), Some(">=1.0"));
+        assert_eq!(
+            pkg.dependencies.get("vanilla").map(String::as_str),
+            Some("=0.1.0")
+        );
+        assert_eq!(
+            pkg.conflicts.get("old_mod").map(String::as_str),
+            Some(">=1.0")
+        );
     }
 
     #[test]

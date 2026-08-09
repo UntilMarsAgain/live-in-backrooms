@@ -13,12 +13,12 @@ use wgpu::{
 use winit::window::Window;
 
 use crate::engine::core::camera::CameraUniform;
-use crate::engine::core::mesh::Vertex;
-use crate::engine::core::texture::Texture;
+use crate::engine::core::data::mesh::Vertex;
+use crate::engine::core::data::texture::Texture;
 use crate::engine::render::debug::LineGizmos;
 use crate::engine::render::environment::EnvironmentResources;
-use crate::engine::render::uniform::{LIGHT_CAPACITY, LightCountUniform, LightUniform, ObjectData};
-use crate::engine::render::{BlitResources, DisplayHandle, HDR_FORMAT, Renderer};
+use crate::engine::render::uniform::{LightCountUniform, LightUniform, ObjectData, LIGHT_CAPACITY};
+use crate::engine::render::{BlitResources, DisplayHandle, Renderer, HDR_FORMAT};
 
 /// 创建与窗口尺寸一致的深度纹理。
 pub(super) fn create_depth_texture(

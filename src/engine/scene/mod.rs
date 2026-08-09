@@ -25,14 +25,14 @@ use std::sync::Arc;
 use glam::{Mat4, Vec3};
 use indextree::{Arena, NodeId};
 
-use super::core::aabb::Aabb;
 use super::core::asset::{Handle, MeshSource};
 use super::core::camera::{Camera, CameraAction};
+use super::core::data::aabb::Aabb;
+use super::core::data::light::Light;
+use super::core::data::material::Material;
+use super::core::data::mesh::Mesh;
+use super::core::data::transform::Transform;
 use super::core::environment::Environment;
-use super::core::light::Light;
-use super::core::material::Material;
-use super::core::mesh::Mesh;
-use super::core::transform::Transform;
 
 /// 场景节点句柄：indextree 的节点 ID（带代际，删除后不失效复用）。
 pub type ObjectKey = NodeId;

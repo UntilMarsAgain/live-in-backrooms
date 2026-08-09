@@ -1,8 +1,8 @@
 //! 自由相机控制器：第一人称式输入 → 相机。
 
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use glam::{Quat, Vec3};
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -10,10 +10,10 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window};
 
 use super::InputController;
-use crate::engine::core::aabb::Aabb;
 use crate::engine::core::asset::MeshSource;
 use crate::engine::core::camera::{Camera, CameraAction};
-use crate::engine::core::transform::Transform;
+use crate::engine::core::data::aabb::Aabb;
+use crate::engine::core::data::transform::Transform;
 use crate::engine::scene::Scene;
 
 /// 第一人称式相机控制器。

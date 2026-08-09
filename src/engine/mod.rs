@@ -22,39 +22,39 @@ pub mod scene;
 
 // 引擎对外 API（应用层/游戏层从这里取用；部分类型当前尚未用到，属预留）。
 #[allow(unused_imports)]
-pub use core::aabb::Aabb;
+pub use asset::MeshView;
 #[allow(unused_imports)]
 pub use core::asset::{
     AssetManager, AssetState, AssetStatus, FileLoader, Handle, HandleState, MeshSource, PinGuard,
 };
 #[allow(unused_imports)]
-pub use core::gc::GcPolicy;
-#[allow(unused_imports)]
 pub use core::camera::Camera;
 #[allow(unused_imports)]
 pub use core::camera::CameraAction;
 #[allow(unused_imports)]
-pub use core::config::PackConfig;
+pub use core::data::aabb::Aabb;
+#[allow(unused_imports)]
+pub use core::data::light::Light;
+#[allow(unused_imports)]
+pub use core::data::material::Material;
+#[allow(unused_imports)]
+pub use core::data::mesh::{Mesh, Vertex};
+#[allow(unused_imports)]
+pub use core::data::texture::Texture;
+#[allow(unused_imports)]
+pub use core::data::transform::Transform;
 #[allow(unused_imports)]
 pub use core::environment::Environment;
 #[allow(unused_imports)]
-pub use core::game_path::GamePath;
+pub use core::gc::GcPolicy;
 #[allow(unused_imports)]
-pub use core::light::Light;
+pub use core::resource::config::PackConfig;
 #[allow(unused_imports)]
-pub use core::material::Material;
+pub use core::resource::game_path::GamePath;
 #[allow(unused_imports)]
-pub use core::mesh::{Mesh, Vertex};
-#[allow(unused_imports)]
-pub use core::pack::Package;
+pub use core::resource::pack::Package;
 #[allow(unused_imports)]
 pub use core::resource::MergedResourceSpace;
-#[allow(unused_imports)]
-pub use core::texture::Texture;
-#[allow(unused_imports)]
-pub use core::transform::Transform;
-#[allow(unused_imports)]
-pub use asset::MeshView;
 #[allow(unused_imports)]
 pub use input::{FreeCameraController, InputController};
 #[allow(unused_imports)]

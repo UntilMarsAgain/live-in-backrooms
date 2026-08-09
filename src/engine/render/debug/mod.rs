@@ -16,9 +16,9 @@ use wgpu::{
     PrimitiveTopology, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, VertexState,
 };
 
-use crate::engine::core::aabb::Aabb;
 use crate::engine::core::asset::MeshSource;
-use crate::engine::core::light::LightKind;
+use crate::engine::core::data::aabb::Aabb;
+use crate::engine::core::data::light::LightKind;
 use crate::engine::scene::{Scene, SceneObjectKind};
 
 /// 调试线条顶点：位置 + 颜色（与 debug.wgsl 顶点输入一一对应）。
@@ -378,13 +378,13 @@ impl LineGizmos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::core::data::light::Light;
+    use crate::engine::core::data::transform::Transform;
+    use crate::engine::scene::SceneObject;
     use crate::engine::AssetManager;
+    use crate::engine::Camera;
     use crate::engine::MergedResourceSpace;
     use crate::engine::MeshView;
-    use crate::engine::Camera;
-    use crate::engine::core::light::Light;
-    use crate::engine::core::transform::Transform;
-    use crate::engine::scene::SceneObject;
     use glam::Quat;
 
     /// 方向光调试射线应指向光线行进方向（光源 → 场景），

@@ -17,9 +17,9 @@ use std::sync::Arc;
 use wgpu::{Device, Queue};
 
 use crate::engine::core::asset::{AssetManager, AssetState, Handle};
+use crate::engine::core::data::mesh::Mesh;
+use crate::engine::core::data::texture::Texture;
 use crate::engine::core::gc::{GcInfo, GcPolicy};
-use crate::engine::core::mesh::Mesh;
-use crate::engine::core::texture::Texture;
 
 /// 上传器：把一类资源的 CPU 数据转换为 GPU 表示（客户端概念）。
 ///
@@ -219,7 +219,8 @@ impl GpuManager {
     #[allow(dead_code)] // 公共 GC API：物理刻接入前由调用方按需触发
     pub fn gc(&mut self, policy: &GcPolicy) {
         let now = self.use_clock;
-        self.meshes.retain(|_, entry| policy.should_keep(&entry.gc, now));
+        self.meshes
+            .retain(|_, entry| policy.should_keep(&entry.gc, now));
         self.textures
             .retain(|_, entry| policy.should_keep(&entry.gc, now));
     }
@@ -254,7 +255,9 @@ impl GpuManager {
             return assets.is_valid(handle).then_some(());
         }
         let texture = assets.get(handle)?;
-        let gpu = self.texture_uploader.upload(&self.device, &self.queue, texture);
+        let gpu = self
+            .texture_uploader
+            .upload(&self.device, &self.queue, texture);
         self.use_clock += 1;
         let last_used = self.use_clock;
         self.textures.insert(
@@ -309,5 +312,4 @@ impl GpuManager {
             self.upload_texture(handle, assets);
         }
     }
-
 }

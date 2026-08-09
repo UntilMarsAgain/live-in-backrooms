@@ -3,8 +3,8 @@
 //! 目前只实现基础色（因子 + 可选贴图）；金属度/粗糙度/法线/自发光等
 //! PBR 通道按同样模式扩展（对应 glTF 的 metallic-roughness/normal/emissive）。
 
-use super::asset::Handle;
 use super::texture::Texture;
+use crate::engine::core::asset::Handle;
 
 /// 材质：基础色 + 金属度/粗糙度 + 法线贴图（glTF PBR 子集）。
 #[derive(Debug, Clone, Copy, PartialEq)]

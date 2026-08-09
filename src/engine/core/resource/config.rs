@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::pack::{self, version_satisfies, Package};
@@ -155,7 +155,13 @@ impl PackConfig {
         ids.sort();
         for id in ids {
             if !inserted.contains(&id) {
-                insert_pack(&id, &mut self.order, &mut inserted, packages, &mut Vec::new())?;
+                insert_pack(
+                    &id,
+                    &mut self.order,
+                    &mut inserted,
+                    packages,
+                    &mut Vec::new(),
+                )?;
             }
         }
         Ok(())
@@ -215,12 +221,7 @@ mod tests {
 
     /// 在临时目录搭一个包布局：`dir/<id>/package.toml`。
     /// `deps` / `conflicts` 为 `(包 ID, 版本要求)`。
-    fn make_pack(
-        dir: &Path,
-        id: &str,
-        deps: &[(&str, &str)],
-        conflicts: &[(&str, &str)],
-    ) {
+    fn make_pack(dir: &Path, id: &str, deps: &[(&str, &str)], conflicts: &[(&str, &str)]) {
         let pack_dir = dir.join(id);
         std::fs::create_dir_all(&pack_dir).expect("创建包目录");
         let mut text = format!("id = \"{id}\"\nversion = \"0.1.0\"\n");
@@ -297,7 +298,10 @@ mod tests {
         assert_eq!(config.order(), ["vanilla"]);
         // 清单文件也被重写，不再包含已删除的包。
         let rewritten = std::fs::read_to_string(dir.join("packs.toml")).expect("读回清单");
-        assert!(!rewritten.contains("gone"), "重写后的清单不应包含 gone：{rewritten}");
+        assert!(
+            !rewritten.contains("gone"),
+            "重写后的清单不应包含 gone：{rewritten}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -324,7 +328,10 @@ mod tests {
         make_pack(&dir, "a", &[("vanilla", "*")], &[]);
 
         let err = PackConfig::discover_and_update(&dir).expect_err("缺失依赖应报错");
-        assert!(err.to_string().contains("vanilla"), "错误信息应提到缺失依赖：{err}");
+        assert!(
+            err.to_string().contains("vanilla"),
+            "错误信息应提到缺失依赖：{err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -420,7 +427,9 @@ mod tests {
             order: vec!["vanilla".into(), "mod_a".into()],
         };
         let err = config.validate(&packages).expect_err("版本不满足应报错");
-        assert!(err.to_string().contains("0.2.0"), "错误应提到实际版本：{err}");
+        assert!(
+            err.to_string().contains("0.2.0"),
+            "错误应提到实际版本：{err}"
+        );
     }
-
 }

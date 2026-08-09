@@ -9,7 +9,7 @@
 
 use glam::{Mat4, Vec3};
 
-use crate::engine::core::light::LightKind;
+use crate::engine::core::data::light::LightKind;
 use crate::engine::scene::{Scene, SceneObjectKind};
 
 /// 每帧参与着色的局部光（点光/面光）数量上限：离相机最近的 X 盏。
@@ -202,8 +202,8 @@ impl Default for EnvironmentParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::core::light::Light;
-    use crate::engine::core::transform::Transform;
+    use crate::engine::core::data::light::Light;
+    use crate::engine::core::data::transform::Transform;
     use crate::engine::scene::{Scene, SceneObject, SceneObjectKind};
     use glam::Quat;
 

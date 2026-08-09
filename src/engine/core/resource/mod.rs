@@ -4,17 +4,27 @@
 //! 定位到合并资源空间下的实际文件并返回系统文件句柄。
 //!
 //! 合并语义：
-//! - 包 ID = `game-data/` 下的文件夹名（见 [`crate::engine::core::config::PackConfig`]）；
+//! - 包 ID = `game-data/` 下的文件夹名（见
+//!   [`crate::engine::core::resource::config::PackConfig`]）；
 //! - 包根列表按加载顺序传入（基础包在前，覆盖包在后），`order = ["vanilla", "mod_a"]`
 //!   表示 `mod_a` 覆盖 `vanilla` 的同名文件；
 //! - [`Self::resolve`] 从最高优先级包开始遍历，返回**首个命中**的文件。
+//!
+//! 子模块：
+//! - [`game_path`]：游戏路径（`namespace:path`）；
+//! - [`pack`]：资源包定义 / 扫描 / 依赖图（`package.toml`）；
+//! - [`config`]：包清单（`packs.toml`）。
+
+pub mod config;
+pub mod game_path;
+pub mod pack;
 
 use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use super::game_path::GamePath;
+use self::game_path::GamePath;
 
 /// 合并资源空间：持有按优先级排序的包根列表，提供"游戏路径 → 文件句柄"的映射。
 #[derive(Debug, Clone)]
@@ -132,8 +142,7 @@ mod tests {
         std::fs::create_dir_all(&base_only).expect("创建目录");
         std::fs::write(base_only.join("only-base.txt"), b"only").expect("写文件");
 
-        let space =
-            MergedResourceSpace::from_pack_roots(vec![base.clone(), override_pack.clone()]);
+        let space = MergedResourceSpace::from_pack_roots(vec![base.clone(), override_pack.clone()]);
         let overridden: GamePath = "test:x.txt".parse().expect("合法路径");
         assert_eq!(space.read(&overridden).expect("读取成功"), b"override");
 

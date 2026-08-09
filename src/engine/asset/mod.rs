@@ -24,18 +24,20 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use glam::{Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use gltf::scene::Transform as GltfTransform;
 
-use crate::engine::core::asset::{AssetManager, FileLoader, FileLoadResult, Handle, LoadedEntry, MeshSource};
-use crate::engine::core::game_path::GamePath;
-use super::core::material::Material;
-use super::core::mesh::{Mesh, Vertex};
-use super::core::texture::Texture;
-use super::core::transform::Transform;
+use super::core::data::material::Material;
+use super::core::data::mesh::{Mesh, Vertex};
+use super::core::data::texture::Texture;
+use super::core::data::transform::Transform;
 use super::scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};
+use crate::engine::core::asset::{
+    AssetManager, FileLoadResult, FileLoader, Handle, LoadedEntry, MeshSource,
+};
+use crate::engine::core::resource::game_path::GamePath;
 
 /// 碰撞数据源视图：把类型无关的 [`AssetManager`] 包装成 [`MeshSource`]
 /// （解读需要加载器，故在资产层实现）。
@@ -222,8 +224,9 @@ impl Loader {
         let pbr = gltf_material.pbr_metallic_roughness();
         // 贴图已在 load_scene 预注册为 File 条目，这里按 image 索引直接取句柄。
         // 基础色/金属度粗糙度是 `Info`，法线是 `NormalTexture`，分开处理。
-        let tex_of_info =
-            |info: Option<gltf::texture::Info>| info.map(|i| self.texture_keys[i.texture().source().index()]);
+        let tex_of_info = |info: Option<gltf::texture::Info>| {
+            info.map(|i| self.texture_keys[i.texture().source().index()])
+        };
         let tex_of_normal = |info: Option<gltf::material::NormalTexture>| {
             info.map(|i| self.texture_keys[i.texture().source().index()])
         };
@@ -241,67 +244,64 @@ impl Loader {
 /// 把一个 glTF primitive 转换成运行时 `Mesh`（顶点属性统一转 f32，索引转 u32）。
 ///
 /// 从 [`Loader::mesh_from_primitive`] 提取，供场景加载与 [`GlbFileLoader`] 共用。
-fn mesh_from_primitive(
-    buffers: &[&[u8]],
-    primitive: &gltf::Primitive<'_>,
-) -> Result<Mesh> {
-        let reader = primitive.reader(|buffer| buffers.get(buffer.index()).copied());
-        let Some(positions) = reader.read_positions() else {
-            bail!("primitive 缺少 POSITION 属性");
-        };
-        let positions: Vec<[f32; 3]> = positions.collect();
-        let normals: Vec<[f32; 3]> = reader
-            .read_normals()
-            .map(|iter| iter.collect())
-            .unwrap_or_default();
-        let tangents: Vec<[f32; 4]> = reader
-            .read_tangents()
-            .map(|iter| iter.collect())
-            .unwrap_or_default();
-        let tex_coords: Vec<[f32; 2]> = reader
-            .read_tex_coords(0)
-            .map(|iter| iter.into_f32().collect())
-            .unwrap_or_default();
-        let colors: Vec<[f32; 3]> = reader
-            .read_colors(0)
-            .map(|iter| iter.into_rgb_f32().collect())
-            .unwrap_or_default();
-        let indices: Vec<u32> = match reader.read_indices() {
-            Some(iter) => iter.into_u32().collect(),
-            None => (0..positions.len() as u32).collect(),
-        };
+fn mesh_from_primitive(buffers: &[&[u8]], primitive: &gltf::Primitive<'_>) -> Result<Mesh> {
+    let reader = primitive.reader(|buffer| buffers.get(buffer.index()).copied());
+    let Some(positions) = reader.read_positions() else {
+        bail!("primitive 缺少 POSITION 属性");
+    };
+    let positions: Vec<[f32; 3]> = positions.collect();
+    let normals: Vec<[f32; 3]> = reader
+        .read_normals()
+        .map(|iter| iter.collect())
+        .unwrap_or_default();
+    let tangents: Vec<[f32; 4]> = reader
+        .read_tangents()
+        .map(|iter| iter.collect())
+        .unwrap_or_default();
+    let tex_coords: Vec<[f32; 2]> = reader
+        .read_tex_coords(0)
+        .map(|iter| iter.into_f32().collect())
+        .unwrap_or_default();
+    let colors: Vec<[f32; 3]> = reader
+        .read_colors(0)
+        .map(|iter| iter.into_rgb_f32().collect())
+        .unwrap_or_default();
+    let indices: Vec<u32> = match reader.read_indices() {
+        Some(iter) => iter.into_u32().collect(),
+        None => (0..positions.len() as u32).collect(),
+    };
 
-        // 只支持三角形拓扑；条带/扇形在这里转换成三角形列表。
-        let indices = match primitive.mode() {
-            Mode::Triangles => indices,
-            Mode::TriangleStrip => strip_to_triangles(&indices),
-            Mode::TriangleFan => fan_to_triangles(&indices),
-            other => bail!("不支持的 primitive 模式：{other:?}"),
-        };
+    // 只支持三角形拓扑；条带/扇形在这里转换成三角形列表。
+    let indices = match primitive.mode() {
+        Mode::Triangles => indices,
+        Mode::TriangleStrip => strip_to_triangles(&indices),
+        Mode::TriangleFan => fan_to_triangles(&indices),
+        other => bail!("不支持的 primitive 模式：{other:?}"),
+    };
 
-        // 切线：文件自带 TANGENT 则直接用；否则按 MikkTSpace 计算（Blender 同款算法），
-        // 无需在 Blender 手动导出切线。
-        let tangents = if !tangents.is_empty() {
-            tangents
-        } else if !tex_coords.is_empty() {
-            compute_tangents(&positions, &normals, &tex_coords, &indices)
-        } else {
-            vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]
-        };
+    // 切线：文件自带 TANGENT 则直接用；否则按 MikkTSpace 计算（Blender 同款算法），
+    // 无需在 Blender 手动导出切线。
+    let tangents = if !tangents.is_empty() {
+        tangents
+    } else if !tex_coords.is_empty() {
+        compute_tangents(&positions, &normals, &tex_coords, &indices)
+    } else {
+        vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]
+    };
 
-        let mut vertices = Vec::with_capacity(positions.len());
-        for i in 0..positions.len() {
-            vertices.push(Vertex {
-                position: positions[i],
-                normal: normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]),
-                tangent: tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
-                tex_coord: tex_coords.get(i).copied().unwrap_or([0.0, 0.0]),
-                color: colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0]),
-            });
-        }
-
-        Ok(Mesh::new(vertices, indices))
+    let mut vertices = Vec::with_capacity(positions.len());
+    for i in 0..positions.len() {
+        vertices.push(Vertex {
+            position: positions[i],
+            normal: normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]),
+            tangent: tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
+            tex_coord: tex_coords.get(i).copied().unwrap_or([0.0, 0.0]),
+            color: colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0]),
+        });
     }
+
+    Ok(Mesh::new(vertices, indices))
+}
 
 /// glTF 文件解析结果：该文件的所有网格与贴图（不含场景树）。
 ///
@@ -349,13 +349,10 @@ fn parse_glb(
 pub struct GlbFileLoader;
 
 impl FileLoader for GlbFileLoader {
-    fn scan(
-        &self,
-        bytes: &[u8],
-    ) -> Result<Vec<(TypeId, Vec<Box<dyn Any + Send + Sync>>)>> {
+    fn scan(&self, bytes: &[u8]) -> Result<Vec<(TypeId, Vec<Box<dyn Any + Send + Sync>>)>> {
         // 轻量结构扫描：只解析 JSON 结构（缓冲区数据不读不解码）。
-        let gltf = gltf::Gltf::from_slice(bytes)
-            .with_context(|| "扫描 glTF 结构失败".to_string())?;
+        let gltf =
+            gltf::Gltf::from_slice(bytes).with_context(|| "扫描 glTF 结构失败".to_string())?;
         let document = &gltf.document;
         let mesh_extras: Vec<_> = document
             .meshes()
