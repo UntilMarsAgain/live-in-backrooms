@@ -2,12 +2,12 @@
 //!
 //! - [`Handle<T>`]：带世代的稳定句柄，`T` 是**编译期标记**（不同资源不同类型，
 //!   不能混用）；槽位存储本身是类型擦除的；
-//! - [`AssetManager`]：类型无关的存储与生命周期管理——注册/移除/驻留状态/
-//!   内存层。数据以 `Box<dyn Any>` 存储，**解读留给外部**（资产层的 typed 助手
-//!   负责把句柄解读成 `&Mesh`/`&Texture` 等）；
-//! - [`MemoryLayer`]：按文件缓存解析结果（类型擦除，供该文件所有条目共享）。
+//! - [`AssetManager`]：类型无关的存储与生命周期管理——槽位表（slotmap）、
+//!   注册/移除/驻留状态机、文件来源重载器与反向索引。数据以 `Box<dyn Any>`
+//!   存储在**槽位单一存储点**，**解读留给外部**（资产层的 typed 助手负责把
+//!   句柄解读成 `&Mesh`/`&Texture` 等）。
 //!
-//! 职责边界：本模块只管理"内存"（槽位、内存层、状态机），不解读数据；
+//! 职责边界：本模块只管理"内存"（槽位、重载器、状态机），不解读数据；
 //! 文件解析/条目解读在 [`crate::engine::asset`]，显存驻留在渲染层 `GpuManager`。
 #![allow(dead_code)]
 
@@ -337,20 +337,6 @@ impl AssetManager {
         key
     }
 
-    /// 注册一个**占位文件条目**（异步加载中）：数据 `None`、状态 `Loading`，
-    /// 后台解析完成后由 `pump` 填充。
-    pub fn register_file_pending<T: Any + Send + Sync>(
-        &mut self,
-        source: GamePath,
-        extra: Box<dyn Any + Send + Sync>,
-    ) -> Handle<T> {
-        let key = self.register_pending_erased(source, TypeId::of::<T>(), extra);
-        Handle {
-            key,
-            _marker: PhantomData,
-        }
-    }
-
     /// 注册一个**类型擦除**的占位文件条目（[`FileLoader`] 异步加载用：
     /// 调用方只有 `TypeId`，没有静态类型 `T`）。占位句柄由调用方经
     /// `loaded_handles_of::<T>` 取回。
@@ -569,15 +555,6 @@ impl AssetManager {
     /// 当前驻留状态。
     pub fn state<T>(&self, handle: Handle<T>) -> Option<AssetState> {
         self.slot(handle).map(|s| s.state)
-    }
-
-    /// 设置驻留状态（资产层在内存加载/卸载时调用）。
-    pub fn set_state<T>(&mut self, handle: Handle<T>, state: AssetState) -> bool {
-        let Some(slot) = self.slot_mut(handle) else {
-            return false;
-        };
-        slot.state = state;
-        true
     }
 
     /// 标记要求驻留（**引用计数**：每次调用 +1，需与 [`Self::unpin`] 配对）。
