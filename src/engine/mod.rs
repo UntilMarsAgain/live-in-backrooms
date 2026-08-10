@@ -16,6 +16,7 @@
 
 pub mod asset;
 pub mod core;
+pub mod ecs;
 pub mod input;
 pub mod render;
 pub mod scene;
