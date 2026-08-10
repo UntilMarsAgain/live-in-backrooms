@@ -5,9 +5,9 @@
 
 use bevy_ecs::prelude::*;
 use glam::{Mat4, Vec3};
-use winit::keyboard::KeyCode;
 
 use super::components::{CameraC, Collider, LocalTransform, MainCamera, WorldMatrix};
+use super::input::{ActionState, InputAction};
 use super::{FixedStep, InputSnapshot};
 use crate::engine::core::data::aabb::Aabb;
 
@@ -36,6 +36,7 @@ impl Default for FreeCamState {
 pub fn free_camera(
     mut input: ResMut<InputSnapshot>,
     step: Res<FixedStep>,
+    actions: Res<ActionState>,
     mut state: Local<FreeCamState>,
     mut camera: Query<(&mut CameraC, &mut LocalTransform), With<MainCamera>>,
     colliders: Query<(&WorldMatrix, &Collider)>,
@@ -58,24 +59,24 @@ pub fn free_camera(
 
     cam.0.rotate(yaw_delta, pitch_delta);
 
-    // 3. 键盘移动。
+    // 3. 键盘移动（语义动作：W/↑ 等绑定在 InputBindings，系统不关心物理键）。
     let mut movement = Vec3::ZERO;
-    if input.pressed(KeyCode::KeyW) || input.pressed(KeyCode::ArrowUp) {
+    if actions.pressed(InputAction::MoveForward) {
         movement += cam.0.forward_horizontal();
     }
-    if input.pressed(KeyCode::KeyS) || input.pressed(KeyCode::ArrowDown) {
+    if actions.pressed(InputAction::MoveBackward) {
         movement -= cam.0.forward_horizontal();
     }
-    if input.pressed(KeyCode::KeyD) || input.pressed(KeyCode::ArrowRight) {
+    if actions.pressed(InputAction::MoveRight) {
         movement += cam.0.right();
     }
-    if input.pressed(KeyCode::KeyA) || input.pressed(KeyCode::ArrowLeft) {
+    if actions.pressed(InputAction::MoveLeft) {
         movement -= cam.0.right();
     }
-    if input.pressed(KeyCode::Space) {
+    if actions.pressed(InputAction::MoveUp) {
         movement += Vec3::Y;
     }
-    if input.pressed(KeyCode::ShiftLeft) {
+    if actions.pressed(InputAction::MoveDown) {
         movement -= Vec3::Y;
     }
 

@@ -23,6 +23,7 @@ use super::components::{
     CameraC, Collider, LightC, LocalTransform, MainCamera, MeshObject, WorldMatrix,
 };
 use super::frame::{RenderExtract, render_schedule};
+use super::input::{ActionEvents, ActionState, InputAction, InputBindings};
 use super::{DebugFlags, FixedStep, FixedTimestep, InputSnapshot, tick_schedule};
 use crate::engine::asset::MeshView;
 use crate::engine::core::asset::{AssetManager, MeshSource, PinToken};
@@ -63,6 +64,9 @@ impl Playground {
             .register_component_as::<dyn RenderExtract, MeshObject>()
             .register_component_as::<dyn RenderExtract, LightC>()
             .register_component_as::<dyn RenderExtract, Collider>();
+        world.insert_resource(InputBindings::default());
+        world.insert_resource(ActionState::default());
+        world.insert_resource(ActionEvents::default());
         world.insert_resource(FixedStep(Duration::from_secs_f64(1.0 / 60.0)));
         world.insert_resource(InputSnapshot::default());
         world.insert_resource(DebugFlags::default());
@@ -132,18 +136,19 @@ impl Playground {
         self.world.resource_mut::<InputSnapshot>().scroll_delta += delta;
     }
 
-    /// 切换灯光调试可视化，返回切换后的状态。
-    pub fn toggle_light_debug(&mut self) -> bool {
-        let mut flags = self.world.resource_mut::<DebugFlags>();
-        flags.show_light_debug = !flags.show_light_debug;
-        flags.show_light_debug
+    /// 查询某个动作**本物理刻刚按下**（App 级副作用用；ECS 系统直接查
+    /// [`ActionEvents`] 资源）。
+    pub fn just_pressed(&self, action: InputAction) -> bool {
+        self.world.resource::<ActionEvents>().just_pressed(action)
     }
 
-    /// 切换碰撞箱调试可视化，返回切换后的状态。
-    pub fn toggle_collision_debug(&mut self) -> bool {
-        let mut flags = self.world.resource_mut::<DebugFlags>();
-        flags.show_collision_debug = !flags.show_collision_debug;
-        flags.show_collision_debug
+    /// 重绑动作的按键（覆盖默认绑定；后续可接配置文件）。
+    ///
+    /// 例如：`playground.bind(InputAction::MoveForward, KeyCode::KeyW)`。
+    pub fn bind(&mut self, action: InputAction, code: KeyCode) {
+        self.world
+            .resource_mut::<InputBindings>()
+            .bind(action, code);
     }
 
     /// 累加真实时间并跑固定步长物理刻；返回本帧实际执行的物理刻数

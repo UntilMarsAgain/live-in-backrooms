@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 use glam::{Quat, Vec3};
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, Window};
 
+use crate::engine::ecs::input::InputAction;
 use crate::engine::ecs::playground::Playground;
 use crate::engine::render::Renderer;
 use crate::engine::{
@@ -56,14 +57,12 @@ impl MemoryBudget {
     /// 环境变量优先级最高，便于按机器覆盖：
     /// `BACKROOMS_CPU_MEMORY_MB` / `BACKROOMS_GPU_MEMORY_MB`。
     fn load() -> Self {
-        let cpu_limit = env_mib("BACKROOMS_CPU_MEMORY_MB")
-            .unwrap_or_else(|| {
-                total_system_memory()
-                    .map(|total| (total as f64 * CPU_MEMORY_RATIO) as u64)
-                    .unwrap_or(DEFAULT_GPU_MEMORY_LIMIT)
-            });
-        let gpu_limit = env_mib("BACKROOMS_GPU_MEMORY_MB")
-            .unwrap_or(DEFAULT_GPU_MEMORY_LIMIT);
+        let cpu_limit = env_mib("BACKROOMS_CPU_MEMORY_MB").unwrap_or_else(|| {
+            total_system_memory()
+                .map(|total| (total as f64 * CPU_MEMORY_RATIO) as u64)
+                .unwrap_or(DEFAULT_GPU_MEMORY_LIMIT)
+        });
+        let gpu_limit = env_mib("BACKROOMS_GPU_MEMORY_MB").unwrap_or(DEFAULT_GPU_MEMORY_LIMIT);
         Self {
             cpu_limit,
             gpu_limit,
@@ -421,31 +420,10 @@ impl App {
                 let PhysicalKey::Code(code) = key_event.physical_key else {
                     return;
                 };
+                // 只写原始按键状态；语义动作（移动/开关/切换）由 ECS 输入动作
+                // 体系映射，App 不再手动 match 键位。
                 self.playground
                     .set_key(code, key_event.state == ElementState::Pressed);
-                if key_event.state == ElementState::Pressed {
-                    // L：切换灯光调试可视化（长按不重复触发）。
-                    if code == KeyCode::KeyL && !key_event.repeat {
-                        let on = self.playground.toggle_light_debug();
-                        tracing::info!("灯光调试可视化：{}", if on { "开" } else { "关" });
-                    }
-                    // B：切换碰撞箱调试可视化（长按不重复触发）。
-                    if code == KeyCode::KeyB && !key_event.repeat {
-                        let on = self.playground.toggle_collision_debug();
-                        tracing::info!("碰撞箱调试可视化：{}", if on { "开" } else { "关" });
-                    }
-                    // F1/F2：切换 demo1 / demo2（长按不重复触发）。
-                    if code == KeyCode::F1 && !key_event.repeat {
-                        self.switch_demo(0);
-                    }
-                    if code == KeyCode::F2 && !key_event.repeat {
-                        self.switch_demo(1);
-                    }
-                }
-                // Esc 释放鼠标，回到系统光标。
-                if code == KeyCode::Escape && self.mouse_captured {
-                    self.release_mouse();
-                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 // 点击窗口后捕获鼠标，进入自由视角。
@@ -506,6 +484,19 @@ impl App {
         self.last_frame = now;
 
         let _ticks = self.playground.advance(frame_dt);
+
+        // App 级副作用：demo 切换、释放鼠标捕获（涉及窗口/场景模板，
+        // 不适合放进 ECS 系统）。按键到动作的映射已在 ECS 侧完成，
+        // 这里只查动作事件。
+        if self.playground.just_pressed(InputAction::SwitchDemo1) {
+            self.switch_demo(0);
+        }
+        if self.playground.just_pressed(InputAction::SwitchDemo2) {
+            self.switch_demo(1);
+        }
+        if self.playground.just_pressed(InputAction::ReleaseMouse) && self.mouse_captured {
+            self.release_mouse();
+        }
 
         // 资产回收按真实时间间隔触发（统一 GC 策略，两侧同窗口参数）。
         self.gc_accum += frame_dt;

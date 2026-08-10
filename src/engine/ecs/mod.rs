@@ -12,6 +12,7 @@ pub mod camera;
 pub mod components;
 pub mod frame;
 pub mod hierarchy;
+pub mod input;
 pub mod playground;
 
 use std::collections::HashSet;
@@ -19,6 +20,8 @@ use std::time::Duration;
 
 use bevy_ecs::prelude::*;
 use winit::keyboard::KeyCode;
+
+use self::input::{ActionEvents, InputAction, bind_input};
 
 /// 固定步长累加器：真实帧时间累积到步长就补一个物理刻。
 #[derive(Debug, Clone, Copy)]
@@ -64,12 +67,6 @@ pub struct InputSnapshot {
     pub scroll_delta: f32,
 }
 
-impl InputSnapshot {
-    pub fn pressed(&self, code: KeyCode) -> bool {
-        self.keys.contains(&code)
-    }
-}
-
 /// 调试可视化开关（App 按键切换，渲染刻系统读取后写入渲染指令）。
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct DebugFlags {
@@ -80,6 +77,35 @@ pub struct DebugFlags {
 /// 物理刻调度：世界变换传播 → 自由相机（固定步长跑这个）。
 pub fn tick_schedule() -> Schedule {
     let mut schedule = Schedule::default();
-    schedule.add_systems((hierarchy::propagate_world_transforms, camera::free_camera).chain());
+    schedule.add_systems((
+        bind_input,
+        toggle_debug_flags,
+        hierarchy::propagate_world_transforms,
+        camera::free_camera,
+    ));
     schedule
+}
+
+/// 调试开关系统：响应"切换灯光/碰撞箱可视化"动作（边沿事件），改 [`DebugFlags`]。
+///
+/// 取代 App 层手动 match 键位——新开关只需绑定动作 + 在这里加一条。
+fn toggle_debug_flags(events: Res<ActionEvents>, mut flags: ResMut<DebugFlags>) {
+    if events.just_pressed(InputAction::ToggleLightDebug) {
+        flags.show_light_debug = !flags.show_light_debug;
+        tracing::info!(
+            "灯光调试可视化：{}",
+            if flags.show_light_debug { "开" } else { "关" }
+        );
+    }
+    if events.just_pressed(InputAction::ToggleCollisionDebug) {
+        flags.show_collision_debug = !flags.show_collision_debug;
+        tracing::info!(
+            "碰撞箱调试可视化：{}",
+            if flags.show_collision_debug {
+                "开"
+            } else {
+                "关"
+            }
+        );
+    }
 }
