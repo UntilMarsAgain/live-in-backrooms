@@ -1,21 +1,22 @@
-//! 每帧渲染：相机/灯光/物体数据提交、场景 pass 绘制到 HDR 目标、
-//! 色调映射 blit pass 写交换链并呈现。
+//! 每帧渲染：从 [`RenderFrame`] 取相机/灯光/物体数据提交、场景 pass 绘制到
+//! HDR 目标、色调映射 blit pass 写交换链并呈现。
+
+use std::mem::size_of;
 
 use glam::Mat3;
 use wgpu::{
-    CommandEncoderDescriptor, CurrentSurfaceTexture, LoadOp, Operations, RenderPassColorAttachment,
-    RenderPassDescriptor, StoreOp, TextureViewDescriptor,
+    BindGroupDescriptor, BindGroupEntry, BufferDescriptor, BufferUsages, CommandEncoderDescriptor,
+    CurrentSurfaceTexture, LoadOp, Operations, RenderPassColorAttachment, RenderPassDescriptor,
+    StoreOp, TextureViewDescriptor,
 };
 
 use crate::engine::core::asset::AssetManager;
-use crate::engine::core::camera::{Camera, CameraUniform};
+use crate::engine::core::camera::CameraUniform;
 use crate::engine::render::asset::GpuManager;
 use crate::engine::render::init::{create_depth_texture, create_hdr_texture};
-use crate::engine::render::uniform::{
-    collect_lights, LightCountUniform, ObjectData, LIGHT_CAPACITY,
-};
+use crate::engine::render::prepare::RenderFrame;
+use crate::engine::render::uniform::{LightCountUniform, ObjectData};
 use crate::engine::render::{Renderer, CLEAR_COLOR};
-use crate::engine::scene::Scene;
 
 impl Renderer {
     /// 窗口尺寸变化时重建交换链。
@@ -38,34 +39,30 @@ impl Renderer {
         );
     }
 
-    /// 渲染一帧：写入相机与物体 uniform，清屏，绘制场景中所有物体并呈现。
+    /// 渲染一帧：从 [`RenderFrame`] 取相机/物体/灯光/线框，写入 uniform，
+    /// 场景 pass 绘制到 HDR 中间目标，blit 色调映射后写交换链并呈现。
     ///
-    /// `show_light_debug` / `show_collision_debug` 为 `true` 时，在网格之后
-    /// 叠加对应的调试线框（顶点在 `load_scene` 时已上传，见 [`debug`] 模块）。
-    ///
-    /// 两段式：场景 pass 把天空盒/网格/线框画进 HDR 中间目标（原始辐射值，
-    /// 可 >1），blit pass 采样它做 AgX 色调映射后写交换链。色调映射全帧
-    /// 只做一次，后处理（Bloom/SSAO/SSR 等）以后可以插在两步之间。
+    /// 物体数据与材质绑定组**每帧**从帧数据构建（物体数量小，可接受；
+    /// 后续优化：按 (实体, 材质版本) 缓存绑定组）。
     pub fn render(
         &mut self,
-        camera: &Camera,
-        scene: &Scene,
+        render_frame: &RenderFrame,
         gpu: &mut GpuManager,
         assets: &mut AssetManager,
         show_light_debug: bool,
         show_collision_debug: bool,
     ) {
-        // 每帧把相机数据写入 uniform 缓冲区。
+        let Some(camera) = &render_frame.camera else {
+            return;
+        };
+        // 相机 uniform。
         let uniform = CameraUniform::from_camera(camera);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
 
-        // 每帧收集灯光：所有方向光 + 离相机最近的局部光（场景灯光缓存），
-        // 写入数量 uniform 与 storage 数组。手电筒等动态光以后并入同一列表。
-        let lights = collect_lights(scene, camera.position());
-        debug_assert!(lights.len() <= LIGHT_CAPACITY);
+        // 灯光：数量 uniform + storage 数组（帧数据里已收集好）。
         let light_count = LightCountUniform {
-            count: lights.len() as u32,
+            count: render_frame.lights.len() as u32,
             _pad: [0; 3],
         };
         self.queue.write_buffer(
@@ -73,19 +70,38 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&light_count),
         );
-        if !lights.is_empty() {
-            self.queue
-                .write_buffer(&self.light_storage_buffer, 0, bytemuck::cast_slice(&lights));
+        if !render_frame.lights.is_empty() {
+            self.queue.write_buffer(
+                &self.light_storage_buffer,
+                0,
+                bytemuck::cast_slice(&render_frame.lights),
+            );
         }
 
-        // 每帧把物体数据写入 storage 数组（紧凑布局，无对齐步长填充）。
-        if scene.object_count() > 0 {
-            let entry_size = size_of::<ObjectData>();
-            let mut bytes = vec![0u8; scene.object_count() * entry_size];
-            for (i, (key, object)) in scene.objects().enumerate() {
-                let model = scene
-                    .world_transform(key)
-                    .expect("objects() 只产出存活节点，world_transform 必然有值");
+        // 物体数据：容量不足时重建 storage 缓冲（紧凑数组，实例下标 = 数组下标）。
+        let entry_size = size_of::<ObjectData>();
+        let needed = (render_frame.objects.len() as u64).max(1) * entry_size as u64;
+        if self.object_data_buffer.size() < needed {
+            self.object_data_buffer = self.device.create_buffer(&BufferDescriptor {
+                label: Some("object data buffer"),
+                size: needed,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.object_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                label: Some("object data bind group"),
+                layout: &self.object_bind_group_layout,
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    // 绑定整个缓冲：着色器按实例索引访问，无动态偏移。
+                    resource: self.object_data_buffer.as_entire_binding(),
+                }],
+            });
+        }
+        if !render_frame.objects.is_empty() {
+            let mut bytes = vec![0u8; render_frame.objects.len() * entry_size];
+            for (i, object) in render_frame.objects.iter().enumerate() {
+                let model = object.world_matrix;
                 // 法线矩阵 = 模型上三角的逆转置，非等比缩放下法线方向才正确。
                 let m = Mat3::from_mat4(model).inverse().transpose();
                 let cols = m.to_cols_array();
@@ -171,15 +187,50 @@ impl Renderer {
 
                 // 每个物体：句柄 → 资产管理器取独立 GPU 缓冲（每网格一份），
                 // 用实例区间 i..i+1 编码物体索引（instance_index = i）。
-                // 有效句柄未上传时**立即上传**（渲染违例，不能静默跳过）；
-                // 句柄彻底无效（已卸载/不存在）属于运行错误，终端报错后跳过。
-                // 非网格节点（分组、未来的灯光/相机等）同样跳过。
-                for (i, (_, object)) in scene.objects().enumerate() {
-                    let Some(handle) = object.mesh_handle() else {
-                        continue;
-                    };
-                    let Some(mesh_gpu) = gpu.mesh_gpu(handle, assets) else {
-                        eprintln!("渲染违例：场景引用了无效的网格句柄 {handle:?}，跳过绘制");
+                // 材质绑定组每帧从帧数据构建（自愈取用贴图视图）。
+                for (i, object) in render_frame.objects.iter().enumerate() {
+                    let base_view = object
+                        .material
+                        .base_color_texture
+                        .and_then(|handle| gpu.texture_gpu(handle, assets).map(|g| g.view.clone()))
+                        .unwrap_or_else(|| self.default_white_view.clone());
+                    let mr_view = object
+                        .material
+                        .metallic_roughness_texture
+                        .and_then(|handle| gpu.texture_gpu(handle, assets).map(|g| g.view.clone()))
+                        .unwrap_or_else(|| self.default_white_view.clone());
+                    let normal_view = object
+                        .material
+                        .normal_texture
+                        .and_then(|handle| gpu.texture_gpu(handle, assets).map(|g| g.view.clone()))
+                        .unwrap_or_else(|| self.default_normal_view.clone());
+                    let material_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                        label: Some("material bind group"),
+                        layout: &self.texture_bind_group_layout,
+                        entries: &[
+                            BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&base_view),
+                            },
+                            BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&self.texture_sampler),
+                            },
+                            BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(&mr_view),
+                            },
+                            BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(&normal_view),
+                            },
+                        ],
+                    });
+                    let Some(mesh_gpu) = gpu.mesh_gpu(object.mesh, assets) else {
+                        eprintln!(
+                            "渲染违例：场景引用了无效的网格句柄 {:?}，跳过绘制",
+                            object.mesh
+                        );
                         continue;
                     };
                     pass.set_vertex_buffer(0, mesh_gpu.vertex_buffer.slice(..));
@@ -187,12 +238,19 @@ impl Renderer {
                         mesh_gpu.index_buffer.slice(..),
                         wgpu::IndexFormat::Uint32,
                     );
-                    pass.set_bind_group(3, &self.material_bind_groups[i], &[]);
+                    pass.set_bind_group(3, &material_bind_group, &[]);
                     pass.draw_indexed(0..mesh_gpu.index_count, 0, i as u32..i as u32 + 1);
                 }
 
-                // 调试线框：顶点已上传，这里只按开关绘制
+                // 调试线框：顶点每帧从 ECS 查询重建，这里直接上传并绘制
                 //（深度 Always + 不写深度，被遮挡也可见；关闭时跳过）。
+                self.light_gizmos
+                    .upload(&self.device, &self.queue, &render_frame.light_gizmos);
+                self.collision_gizmos.upload(
+                    &self.device,
+                    &self.queue,
+                    &render_frame.collision_gizmos,
+                );
                 if show_light_debug {
                     self.light_gizmos.draw(&mut pass, &self.camera_bind_group);
                 }

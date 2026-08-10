@@ -9,7 +9,7 @@
 //! 物体支持动画后再改成每帧重建），走专用线框管线绘制：
 //! 深度比较 Always + 不写深度，保证灯泡被物体挡住时依然可见，方便调试。
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use wgpu::{
     BindGroupLayout, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
     CompareFunction, DepthStencilState, FragmentState, PipelineLayoutDescriptor, PrimitiveState,
@@ -19,12 +19,13 @@ use wgpu::{
 use crate::engine::core::asset::MeshSource;
 use crate::engine::core::data::aabb::Aabb;
 use crate::engine::core::data::light::LightKind;
+use crate::engine::ecs::components::{Collider, LightC, WorldMatrix};
 use crate::engine::scene::{Scene, SceneObjectKind};
 
 /// 调试线条顶点：位置 + 颜色（与 debug.wgsl 顶点输入一一对应）。
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct DebugVertex {
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct DebugVertex {
     pub(super) position: [f32; 3],
     pub(super) color: [f32; 3],
 }
@@ -107,6 +108,62 @@ pub(super) fn build_collision_gizmos(scene: &Scene, meshes: &dyn MeshSource) -> 
         }
     }
     vertices
+}
+
+/// ECS 版：从灯光组件查询生成调试线框（位置/朝向由世界矩阵决定）。
+pub(super) fn build_light_gizmos_ecs<'a>(
+    lights: impl Iterator<Item = (&'a LightC, &'a WorldMatrix)>,
+) -> Vec<DebugVertex> {
+    let mut vertices = Vec::new();
+    for (light, world) in lights {
+        let (_, rotation, translation) = world.0.to_scale_rotation_translation();
+        let color = light.0.color.max(Vec3::splat(0.35));
+        match light.0.kind {
+            LightKind::Directional => {
+                push_directional(&mut vertices, translation, rotation * Vec3::NEG_Z, color);
+            }
+            LightKind::Point => {
+                push_point(&mut vertices, &world.0, color);
+            }
+            LightKind::Area { width, height } => {
+                push_area(&mut vertices, &world.0, rotation, width, height, color);
+            }
+        }
+    }
+    vertices
+}
+
+/// ECS 版：从碰撞盒组件生成世界 AABB 线框（碰撞盒为局部空间，经世界矩阵变换）。
+pub(super) fn build_collision_gizmos_ecs<'a>(
+    colliders: impl Iterator<Item = (&'a WorldMatrix, &'a Collider)>,
+) -> Vec<DebugVertex> {
+    let color = Vec3::new(1.0, 0.55, 0.1);
+    let mut vertices = Vec::new();
+    for (world, collider) in colliders {
+        let aabb = transform_aabb(collider.0, world.0);
+        push_aabb(&mut vertices, &aabb, color);
+    }
+    vertices
+}
+
+/// AABB 经矩阵变换：8 个角点变换后重取包围盒。
+fn transform_aabb(aabb: Aabb, matrix: Mat4) -> Aabb {
+    let (min, max) = (aabb.min, aabb.max);
+    let corners = [
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(max.x, max.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+    ];
+    Aabb::from_points(
+        corners
+            .iter()
+            .map(|corner| matrix.transform_point3(*corner)),
+    )
 }
 
 /// 追加一个 AABB 的 12 条边（4 底 + 4 顶 + 4 竖柱）。

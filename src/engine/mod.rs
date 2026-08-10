@@ -2,14 +2,14 @@
 //!
 //! ```text
 //! core（共享数据/数学） ← scene ← render / asset
-//!                       ← input（只依赖 core）
+//!                       ← ecs（场景/渲染/输入统一在 ECS 上）
 //! ```
 //!
 //! - [`core`]：无 GPU、无场景依赖的共享数据层（Transform/Mesh/Texture/Material/Light/Camera）；
 //! - [`scene`]：层级场景图；
 //! - [`render`]：渲染；
 //! - [`asset`]：资产加载；
-//! - [`input`]：输入控制。
+//! - [`ecs`]：实体组件系统（场景生成、固定步长物理刻、自由相机）。
 //!
 //! 未来的 physics / audio 等子系统同样消费 core/scene。游戏内容不属于这里，
 //! 见 [`crate::game`]。
@@ -17,7 +17,6 @@
 pub mod asset;
 pub mod core;
 pub mod ecs;
-pub mod input;
 pub mod render;
 pub mod scene;
 
@@ -56,8 +55,6 @@ pub use core::resource::game_path::GamePath;
 pub use core::resource::pack::Package;
 #[allow(unused_imports)]
 pub use core::resource::MergedResourceSpace;
-#[allow(unused_imports)]
-pub use input::{FreeCameraController, InputController};
 #[allow(unused_imports)]
 pub use render::{DisplayHandle, GpuManager, MeshGpu, Renderer, TextureGpu};
 #[allow(unused_imports)]

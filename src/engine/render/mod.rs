@@ -2,7 +2,8 @@
 //!
 //! 本文件只做**集合点**：类型定义与再导出，具体实现拆到子模块：
 //! - [`init`]：渲染器初始化（设备/交换链/绑定组/管线装配）；
-//! - [`scene`]：场景数据上传（网格/纹理/环境/灯光调试）；
+//! - [`scene`]：环境设置（天空盒/IBL）；
+//! - [`prepare`]：ECS 渲染帧准备（组件 → [`RenderFrame`]）；
 //! - [`frame`]：每帧渲染与窗口尺寸变化；
 //! - [`uniform`]：GPU uniform 布局与灯光收集；
 //! - [`environment`]：环境贴图（天空盒 + IBL）的 GPU 资源与转换；
@@ -17,6 +18,7 @@ mod debug;
 mod environment;
 mod frame;
 mod init;
+pub(crate) mod prepare;
 mod scene;
 #[cfg(test)]
 mod tests;
@@ -69,10 +71,6 @@ pub struct Renderer {
     default_white_view: wgpu::TextureView,
     /// 默认 1×1 中性法线纹理视图。
     default_normal_view: wgpu::TextureView,
-    /// 全默认材质的绑定组（非网格节点占位用）。
-    default_material_bind_group: wgpu::BindGroup,
-    /// 每个物体的材质绑定组（load_scene 时按 objects() 顺序构建）。
-    material_bind_groups: Vec<wgpu::BindGroup>,
     /// 网格渲染管线。
     pipeline: wgpu::RenderPipeline,
     /// 深度缓冲（纹理 + 视图），随窗口尺寸重建。

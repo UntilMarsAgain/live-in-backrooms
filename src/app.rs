@@ -1,68 +1,91 @@
 //! App：各功能的集成点。
 //!
-//! 这里持有窗口与渲染器等子系统，把 winit 事件翻译成上层逻辑。
-//! 后续的输入、游戏逻辑、场景管理都可以从这里接入。
+//! 持有 ECS `World`（场景/输入/渲染帧数据）+ 双调度器：
+//! - 物理刻（固定步长，`tick_schedule`）：世界变换传播、自由相机、资产回收；
+//! - 渲染刻（按帧，`render_schedule`）：查询组件 → 填 [`RenderFrame`]。
+//!
+//! winit 事件只负责**累积输入快照**（写进 `World` 资源），不直接改游戏状态。
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use winit::event::{DeviceEvent, WindowEvent};
+use bevy_ecs::prelude::*;
+use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::window::Window;
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::{CursorGrabMode, Window};
 
+use crate::engine::ecs::components::{CameraC, MainCamera};
+use crate::engine::ecs::{self, FixedStep, FixedTimestep, InputSnapshot};
+use crate::engine::render::prepare::{render_schedule, RenderFrame};
+use crate::engine::render::Renderer;
 use crate::engine::{
-    AssetManager, Camera, CameraAction, DisplayHandle, Environment, FreeCameraController, GamePath,
-    GpuManager, Handle, InputController, MergedResourceSpace, Mesh, MeshView, PackConfig, Renderer,
-    Scene, Texture,
+    AssetManager, Camera, DisplayHandle, Environment, GamePath, GcPolicy, GpuManager, Handle,
+    MergedResourceSpace, Mesh, MeshView, PackConfig, Scene, Texture,
 };
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
 pub struct App {
     window: Arc<Window>,
     renderer: Renderer,
-    controller: Box<dyn InputController<Camera, Action = CameraAction>>,
+    /// ECS 世界：实体/组件/资源（输入快照、渲染帧等）。
+    world: World,
+    /// 物理刻调度（固定步长）。
+    tick_schedule: Schedule,
+    /// 渲染刻调度（按帧）。
+    render_schedule: Schedule,
+    /// 固定步长累加器。
+    timestep: FixedTimestep,
     last_frame: Instant,
     /// CPU 资产管理器：内存副本、磁盘读取与内存卸载（无 GPU 依赖）。
     assets: AssetManager,
     /// GPU 资产管理器：句柄 → 显存表示的驻留表（上传/回收）。
     gpu: GpuManager,
-    scene: Scene,
-    /// 灯光调试可视化开关（控制器按 L 翻转，渲染时读取）。
+    /// 鼠标是否已捕获（自由视角）。
+    mouse_captured: bool,
+    /// 灯光调试可视化开关（App 事件处理翻转，渲染时读取）。
     show_light_debug: Arc<AtomicBool>,
-    /// 碰撞箱调试可视化开关（控制器按 B 翻转，渲染时读取）。
+    /// 碰撞箱调试可视化开关。
     show_collision_debug: Arc<AtomicBool>,
 }
 
 impl App {
-    /// 装配各子系统。窗口已由 main.rs 创建好，这里初始化渲染器。
+    /// 装配各子系统。窗口已由 main.rs 创建好，这里初始化渲染器与 ECS 世界。
     pub fn new(window: Arc<Window>, display: DisplayHandle) -> anyhow::Result<Self> {
-        // 灯光调试开关由控制器独占翻转，App 只读；用 Arc 共享给两边。
         let show_light_debug = Arc::new(AtomicBool::new(false));
         let show_collision_debug = Arc::new(AtomicBool::new(false));
-        let controller: Box<dyn InputController<Camera, Action = CameraAction>> = Box::new(
-            FreeCameraController::new(show_light_debug.clone(), show_collision_debug.clone()),
-        );
         let renderer = Renderer::new(&window, display)?;
         // 启动主流程：扫描有效包 → 生成/更新 packs.toml 顺序（环 → 报错），
         // 再按 order 校验依赖与冲突（不满足 → 报错退出）。
         let (pack_config, packages) = PackConfig::discover_and_update("game-data")?;
         pack_config.validate(&packages)?;
         eprintln!("资源包加载顺序：{}", pack_config.order().join(" → "));
-        let assets =
-            AssetManager::new(MergedResourceSpace::from_pack_roots(pack_config.pack_roots("game-data")));
+        let assets = AssetManager::new(MergedResourceSpace::from_pack_roots(
+            pack_config.pack_roots("game-data"),
+        ));
         let gpu = GpuManager::new(
             std::sync::Arc::new(renderer.device()),
             std::sync::Arc::new(renderer.queue().clone()),
         );
+
+        // ECS 世界：固定步长 + 输入快照 + 渲染帧资源。
+        let mut world = World::new();
+        world.insert_resource(FixedStep(Duration::from_secs_f64(1.0 / 60.0)));
+        world.insert_resource(InputSnapshot::default());
+        world.insert_resource(RenderFrame::default());
+
         let mut app = Self {
             window,
             renderer,
-            controller,
+            world,
+            tick_schedule: ecs::tick_schedule(),
+            render_schedule: render_schedule(),
+            timestep: FixedTimestep::new(Duration::from_secs_f64(1.0 / 60.0)),
             last_frame: Instant::now(),
             assets,
             gpu,
-            scene: Scene::default(),
+            mouse_captured: false,
             show_light_debug,
             show_collision_debug,
         };
@@ -101,7 +124,6 @@ impl App {
             }
         };
         // 场景加载（节点摆放/材质）走 GamePath 一次解析，并进 demo。
-        // "路径 → 句柄"的 File 条目链路（load_file/load_file_async）由测试覆盖。
         match self.assets.load_scene(&test_path) {
             Ok(gltf_scene) => {
                 // 把测试模型放大 5 倍（等比），并挪到演示物体右前方，
@@ -119,7 +141,6 @@ impl App {
     }
 
     /// 加载环境贴图：`BACKROOMS_ENV`（GamePath 字符串）优先，否则 `test:test.hdr`。
-    /// 经合并资源空间读取，按内容自动识别 HDR / LDR。
     fn load_example_environment(&mut self) -> Option<Arc<Environment>> {
         let path: GamePath = std::env::var("BACKROOMS_ENV")
             .ok()
@@ -134,10 +155,7 @@ impl App {
         };
         match Environment::from_bytes(&bytes) {
             Ok(env) => {
-                eprintln!(
-                    "环境贴图 {path} 加载成功（{}×{}）",
-                    env.width, env.height
-                );
+                eprintln!("环境贴图 {path} 加载成功（{}×{}）", env.width, env.height);
                 Some(Arc::new(env))
             }
             Err(e) => {
@@ -149,11 +167,7 @@ impl App {
 
     /// 尝试从 glTF 文件加载场景；成功返回 `true`，失败打印原因并返回 `false`。
     #[allow(dead_code)] // 预留：BACKROOMS_GLTF / game-data 场景加载路径，demo 阶段未启用
-    fn try_load_gltf(
-        &mut self,
-        path: &GamePath,
-        environment: Option<&Arc<Environment>>,
-    ) -> bool {
+    fn try_load_gltf(&mut self, path: &GamePath, environment: Option<&Arc<Environment>>) -> bool {
         match self.assets.load_scene(path) {
             Ok(scene) => {
                 let scene = match environment {
@@ -170,7 +184,7 @@ impl App {
         }
     }
 
-    /// 批量注册网格：追加进全局资产库并整体重传 GPU 合并缓冲，返回句柄列表。
+    /// 批量注册网格：追加进全局资产库，返回句柄列表。
     pub fn register_meshes(&mut self, meshes: Vec<Mesh>) -> Vec<Handle<Mesh>> {
         meshes
             .into_iter()
@@ -178,7 +192,7 @@ impl App {
             .collect()
     }
 
-    /// 批量注册贴图：追加进全局纹理库并增量上传 GPU 纹理，返回句柄列表。
+    /// 批量注册贴图：追加进全局纹理库，返回句柄列表。
     pub fn register_textures(&mut self, textures: Vec<Texture>) -> Vec<Handle<Texture>> {
         textures
             .into_iter()
@@ -186,10 +200,9 @@ impl App {
             .collect()
     }
 
-    /// App 级别的场景切换 API：渲染器（GPU 数据）与后续游戏逻辑统一从这里换场景。
+    /// App 级别的场景切换 API：模板场景 → 资产驻留 → 生成进 ECS 世界。
     pub fn load_scene(&mut self, mut scene: Scene) {
-        // 每个场景必须有一个主相机（出生点视角）；外部内容（glTF）通常不带相机，
-        // 缺省时补一个默认相机。模组作者也可以在场景里显式摆放相机并切换。
+        // 每个场景必须有一个主相机（出生点视角）；缺省时补一个默认相机。
         self.ensure_main_camera(&mut scene);
         // 环境跟随场景：场景自带环境（天空盒 + IBL）时一并上传；
         // 不带环境时切回默认黑环境，避免残留上一关卡的天空盒。
@@ -203,15 +216,18 @@ impl App {
             }
             None => self.renderer.reset_environment(),
         }
-        // 收集场景引用的资产并 pin（CPU 侧标记驻留），随后 GPU 层上传，
-        // 再让渲染器构建绑定组（贴图视图需要已上传）。
+        // 收集场景引用的资产并 pin（CPU 侧标记驻留），随后 GPU 层上传。
         self.pin_scene_assets(&scene);
         self.gpu.sync(&mut self.assets);
-        self.renderer.load_scene(&scene, &mut self.gpu, &mut self.assets);
-        self.scene = scene;
+        // 场景模板 → ECS 实体（碰撞盒在生成时从网格 AABB 派生）。
+        let main_camera =
+            ecs::scene::spawn_scene(&scene, &mut self.world, &MeshView::new(&self.assets));
+        if main_camera.is_none() {
+            eprintln!("场景生成后没有主相机（不应发生：ensure_main_camera 已兜底）");
+        }
     }
 
-    /// 场景引用的所有网格/贴图句柄标记为 GPU 驻留（pin）。
+    /// 场景引用的所有网格/贴图句柄标记为驻留（pin）。
     fn pin_scene_assets(&mut self, scene: &Scene) {
         for (_, object) in scene.objects() {
             if let Some(handle) = object.mesh_handle() {
@@ -224,9 +240,6 @@ impl App {
     }
 
     /// 场景没有主相机时补一个默认相机（与早期硬编码相机相同的位置/朝向）。
-    ///
-    /// 只有"未指定"（`None`）才会兜底；若场景声明了主相机但指向已删除的节点或
-    /// 非相机节点，属于运行违例，[`Scene::main_camera`] 会直接 panic，加载被拒绝。
     fn ensure_main_camera(&self, scene: &mut Scene) {
         if scene.main_camera().is_none() {
             let size = self.window.inner_size();
@@ -247,59 +260,133 @@ impl App {
         }
     }
 
-    /// main.rs 转发的窗口事件统一在这里处理。
+    /// main.rs 转发的窗口事件统一在这里处理：只累积输入快照 / 切换调试开关。
     pub fn handle_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         match &event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 self.renderer.resize(size.width, size.height);
-                if let Some(camera) = self.scene.main_camera_mut() {
-                    camera.set_aspect(size.width as f32 / size.height.max(1) as f32);
+                let aspect = size.width as f32 / size.height.max(1) as f32;
+                let mut query = self.world.query::<(&mut CameraC, &MainCamera)>();
+                if let Ok((mut camera, _)) = query.single_mut(&mut self.world) {
+                    camera.0.set_aspect(aspect);
                 }
                 self.window.request_redraw();
             }
-            WindowEvent::RedrawRequested => {
-                // 主相机来自场景树：场景自带出生点视角，切换场景即切换相机。
-                if let Some(camera) = self.scene.main_camera_ref() {
-                    self.renderer.render(
-                        camera,
-                        &self.scene,
-                        &mut self.gpu,
-                        &mut self.assets,
-                        self.show_light_debug.load(Ordering::Relaxed),
-                        self.show_collision_debug.load(Ordering::Relaxed),
-                    );
+            WindowEvent::RedrawRequested => self.draw(),
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
+                let PhysicalKey::Code(code) = key_event.physical_key else {
+                    return;
+                };
+                let mut input = self.world.resource_mut::<InputSnapshot>();
+                match key_event.state {
+                    ElementState::Pressed => {
+                        input.keys.insert(code);
+                        // L：切换灯光调试可视化（长按不重复触发）。
+                        if code == KeyCode::KeyL && !key_event.repeat {
+                            let on = self.show_light_debug.fetch_xor(true, Ordering::Relaxed);
+                            eprintln!("灯光调试可视化：{}", if on { "关" } else { "开" });
+                        }
+                        // B：切换碰撞箱调试可视化（长按不重复触发）。
+                        if code == KeyCode::KeyB && !key_event.repeat {
+                            let on = self.show_collision_debug.fetch_xor(true, Ordering::Relaxed);
+                            eprintln!("碰撞箱调试可视化：{}", if on { "关" } else { "开" });
+                        }
+                    }
+                    ElementState::Released => {
+                        input.keys.remove(&code);
+                    }
+                }
+                drop(input);
+                // Esc 释放鼠标，回到系统光标。
+                if code == KeyCode::Escape && self.mouse_captured {
+                    self.release_mouse();
                 }
             }
-            // 其余（键盘、鼠标等）交给控制器处理。
-            _ => self.controller.handle_event(&event, &self.window),
+            WindowEvent::MouseInput { state, button, .. } => {
+                // 点击窗口后捕获鼠标，进入自由视角。
+                if *button == MouseButton::Left
+                    && *state == ElementState::Pressed
+                    && !self.mouse_captured
+                {
+                    self.capture_mouse();
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scroll = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 20.0,
+                };
+                self.world.resource_mut::<InputSnapshot>().scroll_delta += scroll;
+            }
+            _ => {}
         }
     }
 
-    /// main.rs 转发的设备事件（鼠标相对位移等）统一在这里处理。
+    /// main.rs 转发的设备事件（鼠标相对位移等）。
     pub fn handle_device_event(&mut self, event: DeviceEvent) {
-        self.controller.handle_device_event(&event);
+        if let DeviceEvent::MouseMotion { delta } = event {
+            if self.mouse_captured {
+                let mut input = self.world.resource_mut::<InputSnapshot>();
+                input.look_delta.0 += delta.0 as f32;
+                input.look_delta.1 += delta.1 as f32;
+            }
+        }
     }
 
-    /// 每帧更新入口：后续的游戏逻辑（输入、物理、场景）从这里扩展。
+    fn capture_mouse(&mut self) {
+        if self.window.set_cursor_grab(CursorGrabMode::Locked).is_ok() {
+            self.window.set_cursor_visible(false);
+            self.mouse_captured = true;
+        } else if self
+            .window
+            .set_cursor_grab(CursorGrabMode::Confined)
+            .is_ok()
+        {
+            // 部分平台不支持锁定光标，退而求其次限制在窗口内。
+            self.window.set_cursor_visible(false);
+            self.mouse_captured = true;
+        }
+    }
+
+    fn release_mouse(&mut self) {
+        let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+        self.mouse_captured = false;
+    }
+
+    /// 每帧更新入口：固定步长物理刻（世界变换 + 相机 + 资产回收），
+    /// 然后渲染刻准备帧数据，请求下一帧。
     pub fn update(&mut self) {
-        // 计算帧间隔并交给控制器。
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32().min(0.25);
+        let frame_dt = (now - self.last_frame).min(Duration::from_secs_f32(0.25));
         self.last_frame = now;
 
-        // GPU 驻留调和：pinned 且未上传的上传，非 pinned 的回收。
-        self.gpu.sync(&mut self.assets);
+        let (ticks, _alpha) = self.timestep.advance(frame_dt);
+        for _ in 0..ticks {
+            self.tick_schedule.run(&mut self.world);
+            // 资产回收挂到物理刻（统一 GC 策略）。
+            let policy = GcPolicy::default();
+            self.assets.gc(&policy);
+            self.gpu.gc(&policy);
+        }
 
-        // 控制器只读相机 + 查询场景碰撞，输出一帧操作；操作由场景统一应用
-        // （不可变借用先结束，再可变借用应用，无冲突）。
-        let mesh_view = MeshView::new(&self.assets);
-        let action = match self.scene.main_camera_ref() {
-            Some(camera) => self.controller.update(camera, dt, &self.scene, &mesh_view),
-            None => CameraAction::default(),
-        };
-        self.scene.apply_main_camera_action(action);
-        // 请求下一帧，驱动持续渲染。
+        // 渲染刻：查询组件 → 填 RenderFrame。
+        self.render_schedule.run(&mut self.world);
         self.window.request_redraw();
+    }
+
+    /// 渲染一帧：读取 ECS 世界里的渲染帧数据交给渲染器。
+    fn draw(&mut self) {
+        let frame = self.world.resource::<RenderFrame>();
+        self.renderer.render(
+            &frame,
+            &mut self.gpu,
+            &mut self.assets,
+            self.show_light_debug.load(Ordering::Relaxed),
+            self.show_collision_debug.load(Ordering::Relaxed),
+        );
     }
 }

@@ -273,6 +273,7 @@ impl Scene {
     }
 
     /// 主相机的只读引用。
+    #[allow(dead_code)] // 模板场景 API：ECS 迁移后仅测试使用
     pub fn main_camera_ref(&self) -> Option<&Camera> {
         let key = self.main_camera()?;
         match &self.object(key)?.kind {
@@ -282,6 +283,7 @@ impl Scene {
     }
 
     /// 主相机的可变引用（输入控制、窗口尺寸变化等）。
+    #[allow(dead_code)] // 模板场景 API：ECS 迁移后仅测试使用
     pub fn main_camera_mut(&mut self) -> Option<&mut Camera> {
         let key = self.main_camera()?;
         match &mut self.object_mut(key)?.kind {
@@ -294,6 +296,7 @@ impl Scene {
     ///
     /// 输入控制器每帧输出 [`CameraAction`]，由这里统一应用——相机始终由
     /// 场景持有与控制，控制器不直接修改相机。
+    #[allow(dead_code)] // 模板场景 API：ECS 迁移后仅测试使用
     pub fn apply_main_camera_action(&mut self, action: CameraAction) -> bool {
         let Some(camera) = self.main_camera_mut() else {
             return false;

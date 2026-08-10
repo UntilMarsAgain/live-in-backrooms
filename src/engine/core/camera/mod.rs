@@ -22,6 +22,7 @@ use glam::{Mat4, Vec3};
 /// [`crate::engine::scene::Scene::apply_main_camera_action`] 里统一应用，
 /// 避免控制器直接持有/修改相机造成与场景查询的借用冲突。
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)] // 模板场景的相机操作 API：ECS 迁移后仅测试使用，保留作为公共配置接口
 pub struct CameraAction {
     /// 平移增量（世界空间，已做分轴碰撞剔除）。
     pub translate: Vec3,

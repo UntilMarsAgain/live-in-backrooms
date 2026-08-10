@@ -113,8 +113,8 @@ pub(super) struct ObjectData {
 
 /// 单个光源在 GPU 缓冲里的布局（80 字节，std140 兼容）。
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct LightUniform {
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct LightUniform {
     /// 0=方向光 1=点光 2=面光。
     pub(super) kind: u32,
     pub(super) _pad: [u32; 3],

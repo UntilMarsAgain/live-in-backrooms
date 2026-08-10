@@ -365,28 +365,6 @@ impl Renderer {
         // 默认 1×1 纹理（白 / 中性法线）：无贴图材质直接采样它们，着色器无需分支。
         let default_white_view = create_texture_view(&device, &queue, &Texture::white());
         let default_normal_view = create_texture_view(&device, &queue, &Texture::neutral_normal());
-        let default_material_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("default material bind group"),
-            layout: &texture_bind_group_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&default_white_view),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&texture_sampler),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&default_white_view),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&default_normal_view),
-                },
-            ],
-        });
 
         // 5.7 环境子系统：布局、计算管线、天空盒管线与默认绑定组。
         // 天空盒输出原始辐射值，目标格式是 HDR 中间目标而非交换链格式。
@@ -486,8 +464,6 @@ impl Renderer {
             texture_sampler,
             default_white_view,
             default_normal_view,
-            default_material_bind_group,
-            material_bind_groups: Vec::new(),
             pipeline,
             depth_texture,
             depth_view,
