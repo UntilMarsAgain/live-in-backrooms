@@ -15,7 +15,7 @@ use glam::Mat4;
 
 use super::components::{CameraC, Collider, LightC, MainCamera, MeshObject, WorldMatrix};
 use super::DebugFlags;
-use crate::engine::core::frame::{ColliderData, LightData, RenderCommand, RenderObject};
+use crate::engine::core::frame::{ColliderData, LightData, RenderCommand};
 
 /// 渲染指令作为 ECS 资源使用（core 层保持 bevy 无关）。
 impl Resource for RenderCommand {}
@@ -45,7 +45,7 @@ fn extract_frame(
 ) {
     frame.camera = camera.iter().next().map(|c| c.0);
     // 指令资源跨帧复用：先清空再按当前组件状态重建。
-    frame.objects.clear();
+    frame.meshes.clear();
     frame.lights.clear();
     frame.colliders.clear();
     for (traits, world) in &renderables {
@@ -57,14 +57,10 @@ fn extract_frame(
     frame.show_collision_debug = flags.show_collision_debug;
 }
 
-/// 网格物体：网格句柄 + 材质 → 指令物体。
+/// 网格物体：网格句柄 + 材质 → 指令物体（并入同网格同材质的组）。
 impl RenderExtract for MeshObject {
     fn extract(&self, world: &Mat4, frame: &mut RenderCommand) {
-        frame.objects.push(RenderObject {
-            world_matrix: *world,
-            material: self.material.clone(),
-            mesh: self.mesh,
-        });
+        frame.push_mesh_instance(self.mesh, self.material.clone(), *world);
     }
 }
 

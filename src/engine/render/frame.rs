@@ -17,8 +17,8 @@ use crate::engine::core::frame::RenderCommand;
 use crate::engine::render::asset::GpuManager;
 use crate::engine::render::debug;
 use crate::engine::render::init::{create_depth_texture, create_hdr_texture};
-use crate::engine::render::uniform::{LightCountUniform, ObjectData, collect_light_uniforms};
-use crate::engine::render::{CLEAR_COLOR, Renderer};
+use crate::engine::render::uniform::{collect_light_uniforms, LightCountUniform, ObjectData};
+use crate::engine::render::{Renderer, CLEAR_COLOR};
 
 impl Renderer {
     /// 窗口尺寸变化时重建交换链。
@@ -84,8 +84,10 @@ impl Renderer {
         }
 
         // 物体数据：容量不足时重建 storage 缓冲（紧凑数组，实例下标 = 数组下标）。
+        // 实例按"组 → 组内实例"顺序连续编号，绘制时用组区间画一次。
         let entry_size = size_of::<ObjectData>();
-        let needed = (command.objects.len() as u64).max(1) * entry_size as u64;
+        let instance_count: usize = command.meshes.iter().map(|g| g.instances.len()).sum();
+        let needed = (instance_count as u64).max(1) * entry_size as u64;
         if self.object_data_buffer.size() < needed {
             self.object_data_buffer = self.device.create_buffer(&BufferDescriptor {
                 label: Some("object data buffer"),
@@ -103,28 +105,31 @@ impl Renderer {
                 }],
             });
         }
-        if !command.objects.is_empty() {
-            let mut bytes = vec![0u8; command.objects.len() * entry_size];
-            for (i, object) in command.objects.iter().enumerate() {
-                let model = object.world_matrix;
-                // 法线矩阵 = 模型上三角的逆转置，非等比缩放下法线方向才正确。
-                let m = Mat3::from_mat4(model).inverse().transpose();
-                let cols = m.to_cols_array();
-                let normal_matrix = [
-                    [cols[0], cols[1], cols[2], 0.0],
-                    [cols[3], cols[4], cols[5], 0.0],
-                    [cols[6], cols[7], cols[8], 0.0],
-                ];
-                let data = ObjectData {
-                    model,
-                    normal_matrix,
-                    base_color: object.material.base_color,
-                    metallic: object.material.metallic_factor,
-                    roughness: object.material.roughness_factor,
-                    _pad: [0.0; 2],
-                };
-                bytes[i * entry_size..(i + 1) * entry_size]
-                    .copy_from_slice(bytemuck::bytes_of(&data));
+        if instance_count > 0 {
+            let mut bytes = vec![0u8; instance_count * entry_size];
+            let mut i = 0;
+            for group in &command.meshes {
+                for model in &group.instances {
+                    // 法线矩阵 = 模型上三角的逆转置，非等比缩放下法线方向才正确。
+                    let m = Mat3::from_mat4(*model).inverse().transpose();
+                    let cols = m.to_cols_array();
+                    let normal_matrix = [
+                        [cols[0], cols[1], cols[2], 0.0],
+                        [cols[3], cols[4], cols[5], 0.0],
+                        [cols[6], cols[7], cols[8], 0.0],
+                    ];
+                    let data = ObjectData {
+                        model: *model,
+                        normal_matrix,
+                        base_color: group.material.base_color,
+                        metallic: group.material.metallic_factor,
+                        roughness: group.material.roughness_factor,
+                        _pad: [0.0; 2],
+                    };
+                    bytes[i * entry_size..(i + 1) * entry_size]
+                        .copy_from_slice(bytemuck::bytes_of(&data));
+                    i += 1;
+                }
             }
             self.queue.write_buffer(&self.object_data_buffer, 0, &bytes);
         }
@@ -190,21 +195,23 @@ impl Renderer {
                 pass.set_bind_group(2, &self.light_bind_group, &[]);
                 pass.set_bind_group(4, &self.environment.mesh_bind_group, &[]);
 
-                // 每个物体：句柄 → 资源库取 GPU 缓冲/贴图视图（缺失自愈上传），
-                // 用实例区间 i..i+1 编码物体索引（instance_index = i）。
+                // 每个绘制组：句柄 → 资源库取 GPU 缓冲/贴图视图（缺失自愈上传），
+                // 组内所有实例一次 draw_indexed，实例区间 = 组在 object_data
+                // 数组中的连续段（first_instance 随组累加）。
                 // 材质绑定组每帧从解析出的视图构建（后续优化：按材质缓存）。
-                for (i, object) in command.objects.iter().enumerate() {
-                    let base_view = object
+                let mut first_instance = 0u32;
+                for group in &command.meshes {
+                    let base_view = group
                         .material
                         .base_color_texture
                         .and_then(|handle| gpu.texture_gpu(handle, assets).map(|g| g.view.clone()))
                         .unwrap_or_else(|| self.default_white_view.clone());
-                    let mr_view = object
+                    let mr_view = group
                         .material
                         .metallic_roughness_texture
                         .and_then(|handle| gpu.texture_gpu(handle, assets).map(|g| g.view.clone()))
                         .unwrap_or_else(|| self.default_white_view.clone());
-                    let normal_view = object
+                    let normal_view = group
                         .material
                         .normal_texture
                         .and_then(|handle| gpu.texture_gpu(handle, assets).map(|g| g.view.clone()))
@@ -231,11 +238,12 @@ impl Renderer {
                             },
                         ],
                     });
-                    let Some(mesh_gpu) = gpu.mesh_gpu(object.mesh, assets) else {
+                    let Some(mesh_gpu) = gpu.mesh_gpu(group.mesh, assets) else {
                         eprintln!(
                             "渲染违例：场景引用了无效的网格句柄 {:?}，跳过绘制",
-                            object.mesh
+                            group.mesh
                         );
+                        first_instance += group.instances.len() as u32;
                         continue;
                     };
                     pass.set_vertex_buffer(0, mesh_gpu.vertex_buffer.slice(..));
@@ -244,7 +252,13 @@ impl Renderer {
                         wgpu::IndexFormat::Uint32,
                     );
                     pass.set_bind_group(3, &material_bind_group, &[]);
-                    pass.draw_indexed(0..mesh_gpu.index_count, 0, i as u32..i as u32 + 1);
+                    let instances = group.instances.len() as u32;
+                    pass.draw_indexed(
+                        0..mesh_gpu.index_count,
+                        0,
+                        first_instance..first_instance + instances,
+                    );
+                    first_instance += instances;
                 }
 
                 // 调试线框：从指令里的语义灯光/碰撞箱生成顶点并上传绘制

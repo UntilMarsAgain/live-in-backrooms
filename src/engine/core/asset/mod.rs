@@ -66,6 +66,14 @@ impl<T> std::hash::Hash for Handle<T> {
 }
 
 impl<T> Handle<T> {
+    /// 用底层键构造句柄（资产库内部 / 测试使用）。
+    pub(crate) fn from_key(key: DefaultKey) -> Self {
+        Self {
+            key,
+            _marker: PhantomData,
+        }
+    }
+
     /// 底层 slotmap 键（资产库内部使用；外部通常不需要）。
     pub fn key(self) -> DefaultKey {
         self.key

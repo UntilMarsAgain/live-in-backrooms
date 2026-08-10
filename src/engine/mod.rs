@@ -49,7 +49,7 @@ pub use core::data::transform::Transform;
 #[allow(unused_imports)]
 pub use core::environment::Environment;
 #[allow(unused_imports)]
-pub use core::frame::{ColliderData, LightData, RenderCommand, RenderObject};
+pub use core::frame::{ColliderData, LightData, RenderCommand, RenderMeshGroup};
 #[allow(unused_imports)]
 pub use core::gc::GcPolicy;
 #[allow(unused_imports)]
@@ -63,4 +63,4 @@ pub use core::resource::MergedResourceSpace;
 #[allow(unused_imports)]
 pub use render::{DisplayHandle, GpuManager, MeshGpu, Renderer, TextureGpu};
 #[allow(unused_imports)]
-pub use scene::{ObjectKey, SceneObject, SceneObjectKind, Scene};
+pub use scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};
