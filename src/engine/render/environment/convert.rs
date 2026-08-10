@@ -129,11 +129,7 @@ impl EnvironmentResources {
     /// 设置全局曝光（blit 统一乘在原始辐射值上）：`1.0` = 原亮度，
     /// 大于 1 提亮、小于 1 压暗（0 = 全黑，仅调试用）。只写 exposure 字段。
     pub(crate) fn set_exposure(&self, queue: &wgpu::Queue, exposure: f32) {
-        queue.write_buffer(
-            &self.env_params_buffer,
-            4,
-            bytemuck::bytes_of(&exposure),
-        );
+        queue.write_buffer(&self.env_params_buffer, 4, bytemuck::bytes_of(&exposure));
     }
 
     /// 设置 AgX 色调映射的 EV 窗口（场景级配置，默认与 Blender 一致）。

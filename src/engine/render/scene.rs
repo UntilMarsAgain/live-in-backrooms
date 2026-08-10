@@ -1,10 +1,10 @@
 //! 场景级渲染设置：环境（天空盒 + IBL）与 AgX 色调映射窗口。
 
 use crate::engine::core::environment::Environment;
+use crate::engine::render::Renderer;
 use crate::engine::render::uniform::{
     AGX_DEFAULT_EV_MAX, AGX_DEFAULT_EV_MIN, AGX_MIDDLE_GRAY_LOG2,
 };
-use crate::engine::render::Renderer;
 
 impl Renderer {
     /// 上传环境贴图（HDRI 等距矩形图）并转换成环境立方体贴图 + 辐照度图。

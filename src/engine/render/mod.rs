@@ -49,6 +49,10 @@ pub const CLEAR_COLOR: Color = Color {
 /// 且默认支持过滤（不像 RGBA32F 需要 FLOAT32_FILTERABLE）。
 pub(super) const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// 场景 pass 的 MSAA 采样数：渲染到 4x 附件后 resolve 到 HDR 纹理，
+/// bloom / blit 消费的是 resolve 后的单采样结果（FXAA 不做，避免糊纹理）。
+pub(super) const MSAA_SAMPLES: u32 = 4;
+
 /// wgpu 渲染器：持有 surface / device / queue，负责清屏渲染。
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -83,6 +87,9 @@ pub struct Renderer {
     /// blit pass 采样它做色调映射后写交换链。随窗口尺寸重建。
     hdr_texture: wgpu::Texture,
     hdr_view: wgpu::TextureView,
+    /// 场景 pass 的 MSAA 附件：4x 采样渲染，随后 resolve 到 [`Self::hdr_view`]。
+    hdr_msaa_texture: wgpu::Texture,
+    hdr_msaa_view: wgpu::TextureView,
     /// 色调映射 blit 资源（管线 + 绑定组布局 + 采样器）。
     blit_resources: BlitResources,
     /// blit 绑定组：引用 HDR 视图与环境参数 uniform，resize 时重建。

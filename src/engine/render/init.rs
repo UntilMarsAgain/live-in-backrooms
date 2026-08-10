@@ -15,17 +15,19 @@ use winit::window::Window;
 use crate::engine::core::camera::CameraUniform;
 use crate::engine::core::data::mesh::Vertex;
 use crate::engine::core::data::texture::Texture;
+use crate::engine::render::MSAA_SAMPLES;
+use crate::engine::render::bloom::BloomResources;
 use crate::engine::render::debug::LineGizmos;
 use crate::engine::render::environment::EnvironmentResources;
-use crate::engine::render::uniform::{LightCountUniform, LightUniform, ObjectData, LIGHT_CAPACITY};
-use crate::engine::render::bloom::BloomResources;
-use crate::engine::render::{BlitResources, DisplayHandle, Renderer, HDR_FORMAT};
+use crate::engine::render::uniform::{LIGHT_CAPACITY, LightCountUniform, LightUniform, ObjectData};
+use crate::engine::render::{BlitResources, DisplayHandle, HDR_FORMAT, Renderer};
 
 /// 创建与窗口尺寸一致的深度纹理。
 pub(super) fn create_depth_texture(
     device: &wgpu::Device,
     width: u32,
     height: u32,
+    sample_count: u32,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth texture"),
@@ -35,9 +37,37 @@ pub(super) fn create_depth_texture(
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth24Plus,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// 创建场景 pass 的 **MSAA 附件**（4x 采样，仅作渲染目标）。
+///
+/// 场景 pass 画到这里，`resolve_target` 指向单采样的 HDR 纹理；bloom/blit
+/// 采样的是 resolve 后的 HDR，不受 MSAA 影响。
+pub(super) fn create_hdr_msaa_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    samples: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("HDR MSAA texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: samples,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
@@ -178,9 +208,13 @@ impl Renderer {
         surface.configure(&device, &config);
 
         // 3.5 深度缓冲：管线与渲染通道都要用它来做正确的遮挡关系。
-        let (depth_texture, depth_view) = create_depth_texture(&device, width, height);
-        // 3.6 HDR 中间目标：场景 pass 渲染到这里，blit pass 采样后写交换链。
+        let (depth_texture, depth_view) =
+            create_depth_texture(&device, width, height, MSAA_SAMPLES);
+        // 3.6 HDR 中间目标：场景 pass resolve 到这里，blit pass 采样后写交换链。
         let (hdr_texture, hdr_view) = create_hdr_texture(&device, width, height);
+        // 3.7 场景 pass 的 MSAA 附件：4x 采样渲染，随后 resolve 到 HDR 纹理。
+        let (hdr_msaa_texture, hdr_msaa_view) =
+            create_hdr_msaa_texture(&device, width, height, MSAA_SAMPLES);
 
         // 绑定组与着色器阶段的约定（改布局/着色器时两边都要对账）：
         //   group 0 相机    ：VERTEX 用 view_proj，FRAGMENT 用 position
@@ -386,12 +420,15 @@ impl Renderer {
             &camera_bind_group_layout,
             HDR_FORMAT,
             float32_filterable,
+            MSAA_SAMPLES,
         );
 
         // 5.8 调试线框：灯光与碰撞箱各一个实例，管线复用相机绑定组（@group(0)）。
         // 调试线框画进 HDR 目标（与场景一起被色调映射）。
-        let light_gizmos = LineGizmos::new(&device, &camera_bind_group_layout, HDR_FORMAT);
-        let collision_gizmos = LineGizmos::new(&device, &camera_bind_group_layout, HDR_FORMAT);
+        let light_gizmos =
+            LineGizmos::new(&device, &camera_bind_group_layout, HDR_FORMAT, MSAA_SAMPLES);
+        let collision_gizmos =
+            LineGizmos::new(&device, &camera_bind_group_layout, HDR_FORMAT, MSAA_SAMPLES);
 
         // 5.9 色调映射 blit：采样 HDR 目标 → AgX 映射 → 写交换链。
         let blit_resources = BlitResources::new(&device, config.format);
@@ -446,7 +483,11 @@ impl Renderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            // 场景 pass 用 MSAA 4x：管线采样数与渲染附件一致。
+            multisample: wgpu::MultisampleState {
+                count: MSAA_SAMPLES,
+                ..Default::default()
+            },
             fragment: Some(FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
@@ -484,6 +525,8 @@ impl Renderer {
             depth_view,
             hdr_texture,
             hdr_view,
+            hdr_msaa_texture,
+            hdr_msaa_view,
             blit_resources,
             blit_bind_group,
             bloom,

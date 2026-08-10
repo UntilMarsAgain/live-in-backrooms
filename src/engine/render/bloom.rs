@@ -7,9 +7,9 @@
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, BufferBindingType,
-    BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CommandEncoder,
-    FragmentState, LoadOp, Operations, PipelineLayoutDescriptor, PrimitiveState,
-    PrimitiveTopology, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
+    BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, FragmentState,
+    LoadOp, Operations, PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
     ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, TextureDescriptor,
     TextureSampleType, TextureUsages, TextureViewDimension, VertexState,
 };

@@ -16,9 +16,11 @@ use crate::engine::core::camera::CameraUniform;
 use crate::engine::core::frame::RenderCommand;
 use crate::engine::render::asset::GpuManager;
 use crate::engine::render::debug;
-use crate::engine::render::init::{create_depth_texture, create_hdr_texture};
-use crate::engine::render::uniform::{collect_light_uniforms, LightCountUniform, ObjectData};
-use crate::engine::render::{Renderer, CLEAR_COLOR};
+use crate::engine::render::init::{
+    create_depth_texture, create_hdr_msaa_texture, create_hdr_texture,
+};
+use crate::engine::render::uniform::{LightCountUniform, ObjectData, collect_light_uniforms};
+use crate::engine::render::{CLEAR_COLOR, MSAA_SAMPLES, Renderer};
 
 impl Renderer {
     /// 窗口尺寸变化时重建交换链。
@@ -31,9 +33,12 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         // 深度缓冲必须与交换链尺寸保持一致。
-        (self.depth_texture, self.depth_view) = create_depth_texture(&self.device, width, height);
-        // HDR 中间目标同样随尺寸重建；blit 绑定组引用它的视图，需要一并重建。
+        (self.depth_texture, self.depth_view) =
+            create_depth_texture(&self.device, width, height, MSAA_SAMPLES);
+        // HDR 中间目标与 MSAA 附件随尺寸重建；blit 绑定组引用 HDR 视图。
         (self.hdr_texture, self.hdr_view) = create_hdr_texture(&self.device, width, height);
+        (self.hdr_msaa_texture, self.hdr_msaa_view) =
+            create_hdr_msaa_texture(&self.device, width, height, MSAA_SAMPLES);
         self.bloom.resize(&self.device, width, height);
         self.blit_bind_group = self.blit_resources.create_bind_group(
             &self.device,
@@ -174,14 +179,15 @@ impl Renderer {
                     label: Some("frame encoder"),
                 });
 
-            // ---- Pass 1：场景 pass，渲染到 HDR 中间目标 ----
+            // ---- Pass 1：场景 pass，渲染到 MSAA 附件并 resolve 到 HDR ----
             {
                 let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                     label: Some("scene pass (HDR)"),
                     color_attachments: &[Some(RenderPassColorAttachment {
-                        view: &self.hdr_view,
+                        // 渲染到 4x 附件，resolve 到单采样 HDR（bloom/blit 消费）。
+                        view: &self.hdr_msaa_view,
                         depth_slice: None,
-                        resolve_target: None,
+                        resolve_target: Some(&self.hdr_view),
                         ops: Operations {
                             load: LoadOp::Clear(CLEAR_COLOR),
                             store: StoreOp::Store,

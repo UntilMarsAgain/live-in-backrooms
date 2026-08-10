@@ -158,6 +158,7 @@ fn gpu_environment_headless_smoke() {
         &camera_layout,
         super::HDR_FORMAT,
         float32_filterable,
+        1,
     );
 
     // 转换一个 2×1 的微型 HDR（左红右绿），验证计算管线与绑定组创建。
@@ -171,7 +172,7 @@ fn gpu_environment_headless_smoke() {
     // 天空盒渲染到离屏纹理，验证渲染管线 + 绑定组 + 实际绘制。
     // 天空盒管线现在输出到 HDR 中间目标（原始辐射值）。
     let (_, color_view) = create_hdr_texture(&device, 4, 4);
-    let depth = create_depth_texture(&device, 4, 4);
+    let depth = create_depth_texture(&device, 4, 4, 1);
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("smoke encoder"),
     });
@@ -255,8 +256,12 @@ fn gpu_light_debug_gizmos_headless_smoke() {
     });
 
     // 调试管线 + 两条线段（4 个顶点）绘制到离屏纹理。
-    let mut gizmos =
-        super::debug::LineGizmos::new(&device, &camera_layout, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let mut gizmos = super::debug::LineGizmos::new(
+        &device,
+        &camera_layout,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        1,
+    );
     let color_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("debug smoke color texture"),
         size: wgpu::Extent3d {
@@ -271,7 +276,7 @@ fn gpu_light_debug_gizmos_headless_smoke() {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
-    let depth = create_depth_texture(&device, 4, 4);
+    let depth = create_depth_texture(&device, 4, 4, 1);
     let color_view = color_texture.create_view(&TextureViewDescriptor::default());
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("debug smoke encoder"),
@@ -377,6 +382,7 @@ fn gpu_skybox_sampling_verifies_texture_content() {
         &camera_layout,
         super::HDR_FORMAT,
         float32_filterable,
+        1,
     );
 
     // 1) 已知全红 cube（4×4×6）→ 天空盒渲染 → 应偏红。
@@ -518,6 +524,7 @@ fn gpu_specular_ibl_outputs_nonblack() {
         &camera_layout,
         super::HDR_FORMAT,
         float32_filterable,
+        1,
     );
 
     // 红绿 2×1 环境图：预过滤 mip 0 与 BRDF LUT 都应有非零分量。
@@ -772,7 +779,7 @@ fn render_skybox_rgb(
 ) -> Vec<u8> {
     // 1) 场景 pass：天空盒 → HDR 中间目标（原始辐射值）。
     let (_hdr_texture, hdr_view) = create_hdr_texture(device, 4, 4);
-    let depth = create_depth_texture(device, 4, 4);
+    let depth = create_depth_texture(device, 4, 4, 1);
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("verify scene encoder"),
     });

@@ -282,6 +282,7 @@ impl LineGizmos {
         device: &wgpu::Device,
         camera_bind_group_layout: &BindGroupLayout,
         format: wgpu::TextureFormat,
+        sample_count: u32,
     ) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("debug line shader"),
@@ -316,7 +317,10 @@ impl LineGizmos {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                ..Default::default()
+            },
             fragment: Some(FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),

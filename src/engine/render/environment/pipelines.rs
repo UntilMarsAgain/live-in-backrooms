@@ -20,6 +20,7 @@ impl EnvironmentResources {
         camera_bind_group_layout: &wgpu::BindGroupLayout,
         color_target_format: wgpu::TextureFormat,
         float32_filterable: bool,
+        sample_count: u32,
     ) -> Self {
         // mesh 管线 @group(4)：辐照度图 + 环境图 + 采样器。
         let environment_bind_group_layout =
@@ -455,7 +456,10 @@ impl EnvironmentResources {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                ..Default::default()
+            },
             fragment: Some(FragmentState {
                 module: &env_shader,
                 entry_point: Some("skybox_fs_main"),
