@@ -1,7 +1,7 @@
 //! 轴对齐包围盒（AABB）：碰撞、剔除、尺寸查询共用的小数学类型。
 //!
 //! 局部 AABB 由 [`super::mesh::Mesh`] 从顶点计算并持有；世界 AABB =
-//! 局部 AABB 经场景对象世界变换后的包围盒（见 [`super::super::scene::SceneTemplate`]
+//! 局部 AABB 经场景对象世界变换后的包围盒（见 [`super::super::scene::Scene`]
 //! 的碰撞查询）。
 
 use glam::{Mat4, Vec3};

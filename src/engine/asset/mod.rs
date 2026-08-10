@@ -1,7 +1,7 @@
 //! 资产加载与解读模块：把 glTF 2.0 文件转换成运行时的网格资产与场景。
 //!
 //! 目前只处理“模型”部分：
-//! - 节点层级与局部变换 → [`SceneTemplate`]（每个 glTF 节点一个容器物体，网格 primitive
+//! - 节点层级与局部变换 → [`Scene`]（每个 glTF 节点一个容器物体，网格 primitive
 //!   作为其子物体，保证“父节点动、子节点跟着动”的层级关系）；
 //! - 每个 primitive → [`Mesh`] 注册进类型无关的
 //!   [`AssetManager`](crate::engine::core::asset::AssetManager)
@@ -15,7 +15,7 @@
 //! 加载一律走**泛型入口**：`AssetManager::load_file` / `load_file_async`
 //! （实现 [`FileLoader`] 的 [`GlbFileLoader`]），句柄取用走泛型的
 //! `loaded_handles_of::<T>` / `get` / `get_cached`，不提供 per-type 便捷函数。
-//! `MeshView` 把管理器包装成 [`MeshSource`] 供碰撞/调试使用。`load_scene_template`
+//! `MeshView` 把管理器包装成 [`MeshSource`] 供碰撞/调试使用。`load_scene`
 //! 是特殊入口：需要 glTF `Document` 构建场景树（节点层级 + 材质绑定），
 //! 条目注册与重载仍与文件加载共用同一逻辑。
 //!
@@ -33,7 +33,7 @@ use super::core::data::material::Material;
 use super::core::data::mesh::{Mesh, Vertex};
 use super::core::data::texture::Texture;
 use super::core::data::transform::Transform;
-use super::scene::{ObjectKey, SceneObject, SceneObjectKind, SceneTemplate};
+use super::scene::{ObjectKey, SceneObject, SceneObjectKind, Scene};
 use crate::engine::core::asset::{
     AssetManager, FileLoadResult, FileLoader, Handle, LoadedEntry, MeshSource,
 };
@@ -59,11 +59,11 @@ impl MeshSource for MeshView<'_> {
 
 impl AssetManager {
     /// 从 glTF 文件加载场景（按游戏路径从合并资源空间读取）：
-    /// 网格/贴图资产注册进管理器自身，返回带层级的 [`SceneTemplate`]。
+    /// 网格/贴图资产注册进管理器自身，返回带层级的 [`Scene`]。
     ///
     /// 需要 glTF `Document`（节点层级、变换、材质→贴图绑定），所以保留自己的
     /// 解析入口；条目注册与重载器和 [`Self::load_file`] 共用同一逻辑。
-    pub fn load_scene_template(&mut self, path: &GamePath) -> Result<SceneTemplate> {
+    pub fn load_scene(&mut self, path: &GamePath) -> Result<Scene> {
         // 先从合并资源空间读字节（借用 self.space() 在 read 后结束），
         // 之后可安全地 &mut self 注册资产。
         let bytes = self.space().read(path)?;
@@ -121,7 +121,7 @@ impl AssetManager {
             texture_keys: texture_handles,
         };
 
-        let mut out = SceneTemplate::new();
+        let mut out = Scene::new();
         for node in scene.nodes() {
             loader.load_node(&mut out, node, None)?;
         }
@@ -141,7 +141,7 @@ impl Loader {
     /// 递归加载 glTF 节点：每个节点一个容器物体，网格与子节点挂在它下面。
     fn load_node(
         &mut self,
-        scene: &mut SceneTemplate,
+        scene: &mut Scene,
         node: gltf::scene::Node<'_>,
         parent: Option<ObjectKey>,
     ) -> Result<()> {
@@ -203,7 +203,7 @@ impl Loader {
         Ok(())
     }
 
-    /// 取一个 glTF 网格各 primitive 的 (句柄, 材质) 列表（句柄在 load_scene_template 预注册）。
+    /// 取一个 glTF 网格各 primitive 的 (句柄, 材质) 列表（句柄在 load_scene 预注册）。
     fn register_mesh(&self, mesh: &gltf::Mesh<'_>) -> Result<Vec<(Handle<Mesh>, Material)>> {
         let keys = self
             .mesh_keys
@@ -222,7 +222,7 @@ impl Loader {
         // gltf::Material 总是存在（未指定时是默认材质，因子为 1）。
         let gltf_material = primitive.material();
         let pbr = gltf_material.pbr_metallic_roughness();
-        // 贴图已在 load_scene_template 预注册为 File 条目，这里按 image 索引直接取句柄。
+        // 贴图已在 load_scene 预注册为 File 条目，这里按 image 索引直接取句柄。
         // 基础色/金属度粗糙度是 `Info`，法线是 `NormalTexture`，分开处理。
         let tex_of_info = |info: Option<gltf::texture::Info>| {
             info.map(|i| self.texture_keys[i.texture().source().index()])
@@ -315,7 +315,7 @@ pub struct GlbAssets {
 
 /// 解析 glb 字节：返回文档（场景树）与解析出的网格/贴图资产。
 ///
-/// [`GlbFileLoader`]（文件加载）与 [`load_scene_template`]（场景加载）共用同一解析，
+/// [`GlbFileLoader`]（文件加载）与 [`load_scene`]（场景加载）共用同一解析，
 /// 保证两类入口产出的条目顺序一致（`GlbAssets` 数组索引即 File 条目的 Extra）。
 fn parse_glb(
     bytes: &[u8],

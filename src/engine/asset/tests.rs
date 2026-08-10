@@ -89,7 +89,7 @@ fn load_triangle_glb() {
     let path: crate::engine::GamePath = "test:triangle.glb".parse().expect("合法路径");
     let mut assets = AssetManager::new(space);
     let scene = assets
-        .load_scene_template(&path)
+        .load_scene(&path)
         .expect("应能加载测试三角形");
 
     // 网格：3 个顶点、3 个索引，属性值原样转换。
@@ -132,7 +132,7 @@ fn load_repo_test_glb() {
     }
     let mut assets = AssetManager::new(space);
     let scene = assets
-        .load_scene_template(&path)
+        .load_scene(&path)
         .expect("test/test.glb 应能加载");
     assert!(assets.iter_of::<Mesh>().next().is_some());
     assert!(

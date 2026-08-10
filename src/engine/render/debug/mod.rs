@@ -20,7 +20,7 @@ use crate::engine::core::asset::MeshSource;
 use crate::engine::core::data::aabb::Aabb;
 use crate::engine::core::data::light::LightKind;
 use crate::engine::ecs::components::{Collider, LightC, WorldMatrix};
-use crate::engine::scene::{SceneObjectKind, SceneTemplate};
+use crate::engine::scene::{SceneObjectKind, Scene};
 
 /// 调试线条顶点：位置 + 颜色（与 debug.wgsl 顶点输入一一对应）。
 #[repr(C)]
@@ -68,7 +68,7 @@ const DISC_SEGMENTS: usize = 16;
 ///
 /// 灯光是静态场景数据，在 `load_scene` 时调用一次；光源将来支持动画时
 /// 再改成每帧重建。
-pub(super) fn build_light_gizmos(scene: &SceneTemplate) -> Vec<DebugVertex> {
+pub(super) fn build_light_gizmos(scene: &Scene) -> Vec<DebugVertex> {
     let mut vertices = Vec::new();
     for (key, object) in scene.objects() {
         let SceneObjectKind::Light(light) = object.kind else {
@@ -100,7 +100,7 @@ pub(super) fn build_light_gizmos(scene: &SceneTemplate) -> Vec<DebugVertex> {
 ///
 /// 固定橙色线框；空包围盒（无网格数据）的节点自动跳过。
 pub(super) fn build_collision_gizmos(
-    scene: &SceneTemplate,
+    scene: &Scene,
     meshes: &dyn MeshSource,
 ) -> Vec<DebugVertex> {
     let color = Vec3::new(1.0, 0.55, 0.1);
@@ -451,7 +451,7 @@ mod tests {
     /// 即物体局部 -Z（统一约定的行进方向）经旋转后的方向。
     #[test]
     fn directional_gizmo_ray_points_along_travel_direction() {
-        let mut scene = SceneTemplate::new();
+        let mut scene = Scene::new();
         // 与演示场景相同的布光：光从右上前方照向场景（来向 = light_dir），
         // 物体局部 -Z 按约定对齐行进方向（-light_dir）。
         let light_dir = Vec3::new(0.5, 0.6, 0.6).normalize();
@@ -485,7 +485,7 @@ mod tests {
     /// 且线段的端点落在立方体 8 个角点上。
     #[test]
     fn collision_gizmos_wire_a_single_cube() {
-        let mut scene = SceneTemplate::new();
+        let mut scene = Scene::new();
         let mut assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
         let key = assets.register(crate::engine::Mesh::cube());
         scene.add_object(SceneObject::new(
@@ -518,7 +518,7 @@ mod tests {
     /// 空场景：无碰撞箱可画；非网格节点（分组/灯光）不会产出线段。
     #[test]
     fn collision_gizmos_skip_non_mesh_nodes() {
-        let mut scene = SceneTemplate::new();
+        let mut scene = Scene::new();
         let assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
         scene.add_object(SceneObject::new(
             SceneObjectKind::Empty,

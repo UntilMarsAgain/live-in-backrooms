@@ -5,14 +5,15 @@
 //! 渲染刻按帧跑 `render_schedule`（定义在渲染层，见
 //! [`crate::engine::render::prepare`]）。
 //!
-//! 现有 [`SceneTemplate`](crate::engine::scene::SceneTemplate) 保留为**加载期模板**
-//! （glTF / 演示构建、合并、环境），由 [`instance::spawn_scene`] 生成进
-//! [`World`]；渲染与自由视角相机都改为消费 ECS 组件 / 系统。
+//! 现有 [`Scene`](crate::engine::scene::Scene) 保留为**加载期模板**
+//! （glTF / 演示构建、合并、环境），由 [`playground::Playground::spawn`]
+//! 生成进 [`World`] 成为运行中的 Playground；渲染与自由视角相机都改为
+//! 消费 ECS 组件 / 系统。
 
 pub mod camera;
 pub mod components;
 pub mod hierarchy;
-pub mod instance;
+pub mod playground;
 
 use std::collections::HashSet;
 use std::time::Duration;

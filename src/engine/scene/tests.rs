@@ -10,13 +10,13 @@ use glam::{Quat, Vec3};
 /// 环境强度默认应为 1.0（满环境光），避免手误改成 0 后物体失去环境光。
 #[test]
 fn default_environment_intensity_is_full() {
-    assert_eq!(SceneTemplate::new().environment_intensity(), 1.0);
+    assert_eq!(Scene::new().environment_intensity(), 1.0);
 }
 
 /// 世界变换 = 根 × 父 × 自身（平移链沿祖先累乘）。
 #[test]
 fn world_transform_multiplies_parent_chain() {
-    let mut scene = SceneTemplate::new();
+    let mut scene = Scene::new();
     let root = scene.add_object(SceneObject::new(
         SceneObjectKind::Empty,
         Transform::new(Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE),
@@ -39,7 +39,7 @@ fn world_transform_multiplies_parent_chain() {
 /// 子节点跟随父节点旋转：父绕 Y 转 90°，子局部 +X 方向点应落到 ±Z 轴上。
 #[test]
 fn world_transform_follows_parent_rotation() {
-    let mut scene = SceneTemplate::new();
+    let mut scene = Scene::new();
     let root = scene.add_object(SceneObject::new(
         SceneObjectKind::Empty,
         Transform::new(
@@ -69,7 +69,7 @@ fn world_transform_follows_parent_rotation() {
 /// merge 必须保留材质（glTF 场景合并进演示场景时材质不能丢）。
 #[test]
 fn merge_preserves_material() {
-    let mut a = SceneTemplate::new();
+    let mut a = Scene::new();
     a.add_object(
         SceneObject::new(SceneObjectKind::Empty, Transform::IDENTITY).with_material(Material {
             base_color: [0.2, 0.3, 0.4, 1.0],
@@ -77,7 +77,7 @@ fn merge_preserves_material() {
         }),
     );
 
-    let mut b = SceneTemplate::new();
+    let mut b = Scene::new();
     let merged = b.merge(&a);
     assert_eq!(merged.len(), 1);
     let obj = b.object(merged[0]).expect("合并后的节点应存活");
@@ -87,7 +87,7 @@ fn merge_preserves_material() {
 /// 灯光缓存：add/attach 登记，删除整棵子树时一并移出。
 #[test]
 fn light_cache_tracks_add_and_remove() {
-    let mut scene = SceneTemplate::new();
+    let mut scene = Scene::new();
     let point = scene.add_object(SceneObject::new(
         SceneObjectKind::Light(Light::point(Vec3::ONE, 1.0)),
         Transform::IDENTITY,
@@ -121,7 +121,7 @@ fn light_cache_tracks_add_and_remove() {
 /// 主相机：add_camera 只添加不设为主相机，set_main_camera 显式切换并校验类型。
 #[test]
 fn main_camera_lifecycle() {
-    let mut scene = SceneTemplate::new();
+    let mut scene = Scene::new();
     assert!(scene.main_camera().is_none());
 
     let cam = scene.add_camera(Camera::new(Vec3::ZERO, 0.0, 0.0, 1.0, 1.0, 0.1, 100.0));
@@ -147,7 +147,7 @@ fn main_camera_lifecycle() {
 /// merge 保留外部场景的主相机（句柄重映射到本场景）。
 #[test]
 fn merge_preserves_main_camera() {
-    let mut a = SceneTemplate::new();
+    let mut a = Scene::new();
     let cam = a.add_camera(Camera::new(
         Vec3::new(1.0, 2.0, 3.0),
         0.0,
@@ -160,7 +160,7 @@ fn merge_preserves_main_camera() {
     assert!(a.set_main_camera(cam));
     assert_eq!(a.main_camera(), Some(cam));
 
-    let mut b = SceneTemplate::new();
+    let mut b = Scene::new();
     let merged = b.merge(&a);
     assert_eq!(merged.len(), 1);
     assert_eq!(b.main_camera(), Some(merged[0]));
@@ -174,7 +174,7 @@ fn merge_preserves_main_camera() {
 #[test]
 #[should_panic(expected = "不是相机")]
 fn main_camera_invalid_kind_panics() {
-    let mut scene = SceneTemplate::new();
+    let mut scene = Scene::new();
     let cam = scene.add_camera(Camera::new(Vec3::ZERO, 0.0, 0.0, 1.0, 1.0, 0.1, 100.0));
     assert!(scene.set_main_camera(cam));
     // 绕过 set_main_camera 的校验把相机节点改成其他类型（模拟脏状态）。
@@ -185,7 +185,7 @@ fn main_camera_invalid_kind_panics() {
 /// 主相机操作：平移与旋转按操作应用；无主相机时返回 `false`。
 #[test]
 fn apply_main_camera_action_moves_and_rotates() {
-    let mut scene = SceneTemplate::new();
+    let mut scene = Scene::new();
     let cam = scene.add_camera(Camera::new(Vec3::ZERO, 0.0, 0.0, 1.0, 1.0, 0.1, 100.0));
     assert!(scene.set_main_camera(cam));
 
@@ -205,12 +205,12 @@ fn apply_main_camera_action_moves_and_rotates() {
     assert!((f.z - 0.5_f32.sin() * 0.25_f32.cos()).abs() < 1e-6);
 
     // 没有主相机时应用失败，返回 false。
-    let mut empty = SceneTemplate::new();
+    let mut empty = Scene::new();
     assert!(!empty.apply_main_camera_action(CameraAction::default()));
 }
 
 /// 场景碰撞查询的公共脚手架：一个边长 1 的立方体资产 + 放在原点的实例。
-fn cube_world(assets: &mut AssetManager, scene: &mut SceneTemplate, position: Vec3) -> ObjectKey {
+fn cube_world(assets: &mut AssetManager, scene: &mut Scene, position: Vec3) -> ObjectKey {
     let key = assets.register(Mesh::cube());
     scene.add_object(SceneObject::new(
         SceneObjectKind::Mesh(key),
@@ -222,7 +222,7 @@ fn cube_world(assets: &mut AssetManager, scene: &mut SceneTemplate, position: Ve
 #[test]
 fn point_inside_uses_world_aabb() {
     let mut assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
-    let mut scene = SceneTemplate::new();
+    let mut scene = Scene::new();
     let cube = cube_world(&mut assets, &mut scene, Vec3::new(2.0, 0.0, 0.0));
 
     assert!(scene.point_inside(&MeshView::new(&assets), cube, Vec3::new(2.0, 0.0, 0.0)));
@@ -240,7 +240,7 @@ fn point_inside_uses_world_aabb() {
 #[test]
 fn objects_collide_uses_world_aabb() {
     let mut assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
-    let mut scene = SceneTemplate::new();
+    let mut scene = Scene::new();
     let a = cube_world(&mut assets, &mut scene, Vec3::ZERO);
     let b = cube_world(&mut assets, &mut scene, Vec3::new(0.5, 0.0, 0.0));
     let c = cube_world(&mut assets, &mut scene, Vec3::new(2.0, 0.0, 0.0));
@@ -262,7 +262,7 @@ fn objects_collide_uses_world_aabb() {
 #[test]
 fn collides_with_external_probe() {
     let mut assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
-    let mut scene = SceneTemplate::new();
+    let mut scene = Scene::new();
     let cube = cube_world(&mut assets, &mut scene, Vec3::ZERO);
 
     // 玩家盒子局部 AABB（以自身原点为中心，半尺寸 (0.3, 0.9, 0.3)）：

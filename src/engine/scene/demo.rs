@@ -2,7 +2,7 @@
 
 use glam::{Quat, Vec3};
 
-use super::{SceneObject, SceneObjectKind, SceneTemplate};
+use super::{SceneObject, SceneObjectKind, Scene};
 use crate::engine::core::asset::Handle;
 use crate::engine::core::camera::Camera;
 use crate::engine::core::data::light::Light;
@@ -11,7 +11,7 @@ use crate::engine::core::data::mesh::Mesh;
 use crate::engine::core::data::texture::Texture;
 use crate::engine::core::data::transform::Transform;
 
-impl SceneTemplate {
+impl Scene {
     pub fn demo(
         triangle: Handle<Mesh>,
         quad: Handle<Mesh>,

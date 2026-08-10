@@ -7,7 +7,7 @@ use bevy_ecs::prelude::*;
 use glam::{Mat4, Vec3};
 
 use super::debug::{self, DebugVertex};
-use super::uniform::{LightUniform, LIGHT_CAPACITY, MAX_NEARBY_LIGHTS};
+use super::uniform::{LIGHT_CAPACITY, LightUniform, MAX_NEARBY_LIGHTS};
 use crate::engine::core::asset::Handle;
 use crate::engine::core::camera::Camera;
 use crate::engine::core::data::light::LightKind;
