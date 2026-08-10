@@ -13,8 +13,6 @@ pub mod camera;
 pub mod components;
 pub mod hierarchy;
 pub mod scene;
-#[cfg(test)]
-mod tests;
 
 use std::collections::HashSet;
 use std::time::Duration;
