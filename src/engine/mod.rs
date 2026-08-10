@@ -29,6 +29,7 @@ pub use asset::MeshView;
 #[allow(unused_imports)]
 pub use core::asset::{
     AssetManager, AssetState, AssetStatus, FileLoader, Handle, HandleState, MeshSource, PinGuard,
+    PinToken,
 };
 #[allow(unused_imports)]
 pub use core::camera::Camera;

@@ -20,12 +20,13 @@ use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use slotmap::{DefaultKey, SlotMap};
 
 use super::data::mesh::Mesh;
+use super::data::texture::Texture;
 use super::gc::GcInfo;
 use super::resource::game_path::GamePath;
 use super::resource::MergedResourceSpace;
@@ -92,10 +93,71 @@ impl<T> PinGuard<'_, T> {
     pub fn handle(&self) -> Handle<T> {
         self.handle
     }
+
+    /// 通过守卫取用数据（守卫已 pin，数据保证驻留；取用会刷新最近使用）。
+    ///
+    /// 因为守卫独占借用 `AssetManager`，数据引用从守卫内部重新借出，
+    /// 生命周期绑定到守卫——"先 pin 再 get"合并在一次调用里，无需手动配对。
+    pub fn get(&mut self) -> Option<&T>
+    where
+        T: Any,
+    {
+        self.assets.get(self.handle)
+    }
+}
+
+/// 批量驻留令牌：一次 pin 一组句柄（key 集合，类型无关），drop 时自动 unpin。
+///
+/// 由 [`PinToken::pin`] 从 `Arc<Mutex<AssetManager>>` 创建：创建时对每个 key
+/// `pin`，持有 `Weak`（不阻止 App 销毁），drop 时 upgrade + lock 逐个 `unpin`。
+/// 与场景实例同生命周期（存进 `SceneInstance`），覆盖/卸载即自动释放——
+/// 免去调用方手动 pin/unpin 配对。
+#[derive(Debug)]
+pub struct PinToken {
+    assets: Weak<Mutex<AssetManager>>,
+    keys: Vec<DefaultKey>,
+}
+
+impl PinToken {
+    /// 批量 pin：创建令牌并登记这批 key（类型无关——`Handle<T>` 用
+    /// [`Handle::key`] 收敛成 `DefaultKey`，Mesh/Texture 可混在同一批）。
+    ///
+    /// 返回的令牌应交给"驻留期的持有者"（如场景实例）；drop 时自动 unpin。
+    /// 管理器锁中毒/已销毁时静默跳过（资源本来也在销毁路径上）。
+    pub fn pin(assets: &Arc<Mutex<AssetManager>>, keys: &[DefaultKey]) -> Self {
+        if let Ok(mut assets) = assets.lock() {
+            for &key in keys {
+                assets.pin_key(key);
+            }
+        }
+        Self {
+            assets: Arc::downgrade(assets),
+            keys: keys.to_vec(),
+        }
+    }
+
+    /// 令牌登记的句柄键（调试/查询用）。
+    pub fn keys(&self) -> &[DefaultKey] {
+        &self.keys
+    }
+}
+
+impl Drop for PinToken {
+    fn drop(&mut self) {
+        if let Some(assets) = self.assets.upgrade() {
+            if let Ok(mut assets) = assets.lock() {
+                for &key in &self.keys {
+                    assets.unpin_key(key);
+                }
+                tracing::debug!("PinToken 释放：{} 个句柄", self.keys.len());
+            }
+        }
+    }
 }
 
 impl<T> Drop for PinGuard<'_, T> {
     fn drop(&mut self) {
+        tracing::debug!("PinGuard 析构：unpin {:?}", self.handle.key());
         self.assets.unpin(self.handle);
     }
 }
@@ -251,8 +313,6 @@ pub struct AssetManager {
     load_rx: mpsc::Receiver<(GamePath, anyhow::Result<FileLoadResult>)>,
     /// 加载完成的唤醒信号（后台线程发送结果后 notify）。
     load_cond: Arc<(Mutex<()>, Condvar)>,
-    /// 最近使用时钟（单调递增；智能 GC 的"现在"）。
-    use_clock: u64,
     /// 变更版本：新增/卸载 +1。
     version: u64,
 }
@@ -285,7 +345,6 @@ impl AssetManager {
             load_tx,
             load_rx,
             load_cond: Arc::new((Mutex::new(()), Condvar::new())),
-            use_clock: 0,
             version: 0,
         }
     }
@@ -370,12 +429,11 @@ impl AssetManager {
         data: EntryData,
     ) -> DefaultKey {
         // slotmap 内部管理槽位复用与世代：删除的键永不匹配复用后的槽位。
-        self.use_clock += 1;
         let key = self.slots.insert(Slot {
             state,
             type_id,
             gc: GcInfo {
-                last_used: self.use_clock,
+                last_used: Instant::now(),
                 pins: 0,
             },
             data: Some(data),
@@ -402,10 +460,8 @@ impl AssetManager {
         }
         self.ensure_entry_data(handle)?;
         // 记录最近使用（智能 GC 按它淘汰冷数据）。
-        self.use_clock += 1;
-        let now = self.use_clock;
         if let Some(slot) = self.slot_mut(handle) {
-            slot.gc.last_used = now;
+            slot.gc.last_used = Instant::now();
         }
         self.get_cached(handle)
     }
@@ -499,29 +555,37 @@ impl AssetManager {
     /// 不立即上传；上传由渲染层 `GpuManager` 完成（GPU 驻留按最近使用窗口
     /// 判定，pin 保护的是 CPU 数据不被 `gc` 逐出）。
     pub fn pin<T>(&mut self, handle: Handle<T>) -> bool {
-        self.use_clock += 1;
-        let now = self.use_clock;
-        let Some(slot) = self.slot_mut(handle) else {
-            return false;
-        };
-        slot.gc.pins += 1;
-        slot.gc.last_used = now;
-        slot.state = AssetState::Pinned;
-        tracing::debug!("资产 pin：{:?}（pins={}）", handle.key(), slot.gc.pins);
-        true
+        self.pin_key(handle.key)
     }
 
     /// 解除一次驻留要求（**引用计数**：计数减一，归零才允许回收）。
     /// 软释放：不立即逐出，等 `GpuManager::gc` / [`Self::gc`] 真正执行。
     pub fn unpin<T>(&mut self, handle: Handle<T>) -> bool {
-        let Some(slot) = self.slot_mut(handle) else {
+        self.unpin_key(handle.key)
+    }
+
+    /// key 级 pin（`Handle<T>` 泛型方法的底层；`PinToken` 批量登记用）。
+    pub(crate) fn pin_key(&mut self, key: DefaultKey) -> bool {
+        let Some(slot) = self.slots.get_mut(key) else {
+            return false;
+        };
+        slot.gc.pins += 1;
+        slot.gc.last_used = Instant::now();
+        slot.state = AssetState::Pinned;
+        tracing::debug!("资产 pin：{key:?}（pins={}）", slot.gc.pins);
+        true
+    }
+
+    /// key 级 unpin（`Handle<T>` 泛型方法的底层；`PinToken` 释放用）。
+    pub(crate) fn unpin_key(&mut self, key: DefaultKey) -> bool {
+        let Some(slot) = self.slots.get_mut(key) else {
             return false;
         };
         slot.gc.pins = slot.gc.pins.saturating_sub(1);
         if slot.gc.pins == 0 {
             slot.state = AssetState::Resident;
         }
-        tracing::debug!("资产 unpin：{:?}（pins={}）", handle.key(), slot.gc.pins);
+        tracing::debug!("资产 unpin：{key:?}（pins={}）", slot.gc.pins);
         true
     }
 
@@ -587,6 +651,27 @@ impl AssetManager {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// 当前**驻留数据**的总内存占用（字节）。
+    ///
+    /// 遍历所有存活槽位，按已知资源类型（Mesh / Texture）估算数据体积：
+    /// 顶点/索引缓冲的原始字节数 + 贴图像素字节数。未知类型按 0 计
+    /// （目前资产库只有这两种资源；新增类型时在这里补估算）。
+    ///
+    /// 用途：内存压力检测——超过预算上限时 App 层触发强制 GC。
+    pub fn memory_usage(&self) -> u64 {
+        self.slots
+            .iter()
+            .filter_map(|(_, slot)| slot.data.as_ref())
+            .map(|data| match data {
+                EntryData::Inline(boxed) => estimate_bytes(&**boxed),
+                EntryData::File {
+                    data: Some(boxed), ..
+                } => estimate_bytes(&**boxed),
+                EntryData::File { data: None, .. } => 0,
+            })
+            .sum()
     }
 
     /// 按类型遍历存活句柄（TypeId 过滤；`T` 必须与注册时的类型一致）。
@@ -663,6 +748,21 @@ impl AssetManager {
     fn slot_mut<T>(&mut self, handle: Handle<T>) -> Option<&mut Slot> {
         self.slots.get_mut(handle.key)
     }
+}
+
+/// 按类型估算一个已擦除数据条目的内存占用（字节）。
+///
+/// 目前只有 Mesh / Texture 两种资源；未知类型返回 0（调用方保证类型正确，
+/// 新增类型时在这里补一条 downcast 分支即可）。
+fn estimate_bytes(data: &dyn Any) -> u64 {
+    if let Some(mesh) = data.downcast_ref::<Mesh>() {
+        return (mesh.vertices().len() * std::mem::size_of::<super::data::mesh::Vertex>()
+            + mesh.indices().len() * std::mem::size_of::<u32>()) as u64;
+    }
+    if let Some(texture) = data.downcast_ref::<Texture>() {
+        return texture.rgba8.len() as u64;
+    }
+    0
 }
 
 mod gc;

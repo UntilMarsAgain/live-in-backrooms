@@ -713,16 +713,21 @@ fn gpu_manager_gc_evicts_cold_by_usage_window() {
     let a = assets.register(crate::engine::Mesh::cube());
     let b = assets.register(crate::engine::Mesh::cube());
 
-    // 分两次 pin + sync：a 先上传（时钟较早），b 后上传（时钟最新）。
+    // 分两次 pin + sync：a 先上传，等 a 超窗后 b 再上传（b 最新）。
     assert!(assets.pin(a));
     gpu.sync(&mut assets);
     assert!(gpu.mesh_gpu_resident(a).is_some());
+    std::thread::sleep(std::time::Duration::from_millis(5));
     assert!(assets.pin(b));
     gpu.sync(&mut assets);
     assert!(gpu.mesh_gpu_resident(b).is_some());
 
-    // gc 窗口 0：a 超窗回收，b（当前时钟最新）保留。
-    gpu.gc(&crate::engine::GcPolicy::default());
+    // gc 小窗口：a（5ms 前）超窗回收，b（刚上传）保留。
+    let policy = crate::engine::GcPolicy {
+        stale_window: std::time::Duration::from_millis(2),
+        ..crate::engine::GcPolicy::default()
+    };
+    gpu.gc(&policy);
     assert!(gpu.mesh_gpu_resident(b).is_some(), "最新取用的保留");
     assert!(gpu.mesh_gpu_resident(a).is_none(), "超窗的回收");
     // GPU 释放不影响 CPU 数据。

@@ -1,5 +1,8 @@
 //! 资产库核心测试。
 
+use std::time::Duration;
+use std::sync::{Arc, Mutex};
+
 use crate::engine::core::gc::GcPolicy;
 
 use super::*;
@@ -179,6 +182,48 @@ fn pin_guard_releases_on_drop() {
     assert!(assets.pin_guard(stale).is_none());
 }
 
+/// 守卫取用：pin_guard + get 合并——拿到守卫后通过守卫取数据，
+/// 作用域结束自动 unpin，全程无需手动 pin/unpin 配对。
+#[test]
+fn pin_guard_get_keeps_data_resident() {
+    let mut assets = manager();
+    let handle = assets.register(Mesh::cube());
+    {
+        let mut guard = assets.pin_guard(handle).expect("句柄有效");
+        // 通过守卫取数据：数据在（守卫存活时 assets 被独占借用，
+        // 只能经由守卫访问）。
+        let data = guard.get().expect("守卫已 pin，数据应可取得");
+        assert_eq!(data.vertices().len(), Mesh::cube().vertices().len());
+    }
+    // 作用域结束：守卫自动 unpin，回到非驻留。
+    assert!(!assets.pinned(handle));
+}
+
+/// 批量驻留令牌：pin 一组句柄（含不同类型），drop 自动全部 unpin；
+/// 场景切换"覆盖旧实例"就是靠这个生命周期结束释放驻留。
+#[test]
+fn pin_token_unpins_all_on_drop() {
+    let assets = Arc::new(Mutex::new(manager()));
+    let mesh = assets.lock().unwrap().register(Mesh::cube());
+    let texture = assets
+        .lock()
+        .unwrap()
+        .register(crate::engine::core::data::texture::Texture::white());
+    let keys = vec![mesh.key(), texture.key()];
+
+    {
+        let token = PinToken::pin(&assets, &keys);
+        assert_eq!(token.keys(), &keys[..]);
+        assert!(assets.lock().unwrap().pinned(mesh));
+        assert!(assets.lock().unwrap().pinned(texture));
+        // drop(token) 在作用域结束自动触发。
+    }
+
+    let assets = assets.lock().unwrap();
+    assert!(!assets.pinned(mesh), "drop 后网格应自动 unpin");
+    assert!(!assets.pinned(texture), "drop 后贴图应自动 unpin");
+}
+
 /// 按类型遍历：只产出该类型的存活句柄。
 #[test]
 fn iter_of_filters_by_type() {
@@ -284,8 +329,8 @@ fn file_entry_get_auto_reloads_from_disk() {
     assert_eq!(assets.state(handle), Some(AssetState::Resident));
 }
 
-/// 智能 gc（按最近使用窗口）：释放非 Pinned 且超窗未使用的文件数据，
-/// Pinned 与最近使用过的保留。
+/// 智能 gc：`ignore_stale_window` 全量清扫时，Pinned 保留、非 Pinned 逐出
+/// （但来源仍在，`get` 能重读）。
 #[test]
 fn gc_evicts_unpinned_file_data() {
     let mut assets = manager();
@@ -295,24 +340,33 @@ fn gc_evicts_unpinned_file_data() {
     let loose = assets.register_file::<u32>(path.clone(), Box::new(1u32), 2u32);
     assets.pin(pinned);
 
-    assets.gc(&GcPolicy::default()); // 窗口 0：只保留 Pinned 与"此刻"使用的。
-                                     // Pinned 保留数据；非 Pinned 逐出，但 get 能重读。
+    let policy = GcPolicy {
+        ignore_stale_window: true, // 全量清扫：不区分最近使用，只有 pin 保护。
+        ..GcPolicy::default()
+    };
+    assets.gc(&policy);
     assert!(assets.get_cached(pinned).is_some());
     assert!(assets.get_cached(loose).is_none());
     assert_eq!(assets.get(loose), Some(&11u32));
 }
 
-/// 最近使用保护：get 过的条目在窗口内不被 gc 逐出。
+/// 最近使用保护：超窗（真实时间）的条目被逐出，刚 get 过的保留。
 #[test]
 fn gc_keeps_recently_used_entries() {
     let mut assets = manager();
     let path: GamePath = "test:data.bin".parse().expect("合法路径");
     assets.set_file_reloader(path.clone(), u32_reloader);
     let old = assets.register_file::<u32>(path.clone(), Box::new(0u32), 1u32);
+    // 让 old 真实超窗（>2ms），fresh 在窗口内被 get。
+    std::thread::sleep(Duration::from_millis(5));
     let fresh = assets.register_file::<u32>(path.clone(), Box::new(1u32), 2u32);
-    assets.get(fresh); // 使用 fresh，把它标记为最近使用。
+    assets.get(fresh);
 
-    assets.gc(&GcPolicy::default());
+    let policy = GcPolicy {
+        stale_window: Duration::from_millis(2),
+        ..GcPolicy::default()
+    };
+    assets.gc(&policy);
     assert!(assets.get_cached(fresh).is_some(), "最近使用的应保留");
     assert!(assets.get_cached(old).is_none(), "未使用的应逐出");
 }

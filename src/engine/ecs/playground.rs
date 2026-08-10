@@ -11,6 +11,7 @@
 //! 的存储与调度细节都收在内部。
 
 use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use bevy_ecs::hierarchy::ChildOf;
 use bevy_ecs::prelude::*;
@@ -24,7 +25,7 @@ use super::components::{
 use super::frame::{render_schedule, RenderExtract};
 use super::{tick_schedule, DebugFlags, FixedStep, FixedTimestep, InputSnapshot};
 use crate::engine::asset::MeshView;
-use crate::engine::core::asset::{AssetManager, Handle, MeshSource};
+use crate::engine::core::asset::{AssetManager, Handle, MeshSource, PinToken};
 use crate::engine::core::data::aabb::Aabb;
 use crate::engine::core::data::mesh::Mesh;
 use crate::engine::core::data::texture::Texture;
@@ -43,16 +44,14 @@ pub struct Playground {
 }
 
 /// 一次场景实例的登记：顶层实体 + 引用的资产句柄（卸载时 unpin 用）。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SceneInstance {
     /// 顶层实体（每个 root 的 `ChildOf` 子树在 `despawn` 时级联清理）。
     roots: Vec<Entity>,
     /// 主相机实体（模板指定；App 兜底补默认相机后也会登记）。
     main_camera: Option<Entity>,
-    /// 该场景引用的网格句柄。
-    mesh_handles: Vec<Handle<Mesh>>,
-    /// 该场景引用的贴图句柄。
-    texture_handles: Vec<Handle<Texture>>,
+    /// 该场景的资产驻留令牌：与实例同生命周期，覆盖/卸载时自动 unpin。
+    pin_token: PinToken,
 }
 
 impl Playground {
@@ -182,15 +181,29 @@ impl Playground {
         }
     }
 
-    /// 加载场景模板：卸载上一实例（unpin 资产 + 级联 despawn），再把新
-    /// 场景生成进世界。资产驻留（pin）与 GPU 上传由调用方在调用前后负责，
-    /// 这里只通过 `assets` 完成旧实例的 unpin 与生成时的碰撞盒派生。
-    pub fn load_scene(&mut self, scene: &Scene, assets: &mut AssetManager) {
+    /// 加载场景模板：**旧实例被覆盖（drop）→ 其 `PinToken` 自动 unpin 资产**，
+    /// 再把新场景生成进世界。`pin_token` 是调用方对新场景资产做的一次性驻留
+    /// 声明；生成时的碰撞盒派生需要 `assets`（只读借用）。
+    ///
+    /// 顺序很关键：先 take 旧实例——despawn 其 ECS 实体（不需要 assets），
+    /// 随后旧实例 drop → 旧 PinToken drop → 自动 unpin（此刻**不持锁**，
+    /// 内部自行 lock/unlock）；再锁住生成新场景，否则 Mutex 重入死锁。
+    pub fn load_scene(
+        &mut self,
+        scene: &Scene,
+        pin_token: PinToken,
+        assets: &Arc<Mutex<AssetManager>>,
+    ) {
         if let Some(old) = self.scene.take() {
-            old.despawn(&mut self.world, assets);
+            old.despawn(&mut self.world);
         }
-        let view = MeshView::new(assets);
-        let mut instance = SceneInstance::default();
+        let assets = assets.lock().expect("资产库锁中毒");
+        let view = MeshView::new(&*assets);
+        let mut instance = SceneInstance {
+            roots: Vec::new(),
+            main_camera: None,
+            pin_token,
+        };
         for (key, _) in scene.roots() {
             let root = spawn_node(scene, key, None, &mut self.world, &view, &mut instance);
             instance.roots.push(root);
@@ -200,14 +213,8 @@ impl Playground {
 }
 
 impl SceneInstance {
-    /// 卸载一个场景实例：先 `unpin` 引用的资产，再级联 `despawn` 各根实体。
-    fn despawn(&self, world: &mut World, assets: &mut AssetManager) {
-        for handle in &self.mesh_handles {
-            assets.unpin(*handle);
-        }
-        for handle in &self.texture_handles {
-            assets.unpin(*handle);
-        }
+    /// 级联 despawn 各根实体（资产驻留由 `PinToken` 的 drop 负责，这里不管）。
+    fn despawn(&self, world: &mut World) {
         for root in &self.roots {
             if let Ok(entity) = world.get_entity_mut(*root) {
                 // bevy 层级：despawn 父实体时级联 despawn 整棵子树。
@@ -303,10 +310,6 @@ fn spawn_node(
                 .mesh(handle)
                 .map(|mesh| Collider(mesh.bounds()))
                 .unwrap_or(Collider(Aabb::EMPTY));
-            instance.mesh_handles.push(handle);
-            instance
-                .texture_handles
-                .extend(object.material.texture_handles());
             world
                 .spawn((
                     local,

@@ -114,4 +114,50 @@ impl Scene {
         );
         scene
     }
+
+    /// 第二个演示场景（demo2）：资产少、物体简单，用来与 demo1 对比
+    /// 场景切换时的 PinToken pin/unpin 生命周期（无贴图、无 glb 大资产）。
+    pub fn demo2(triangle: Handle<Mesh>, cube: Handle<Mesh>) -> Self {
+        let mut scene = Self::new();
+        // 方向光：从右上前方照向场景。
+        let light_arrival = Vec3::new(0.4, 0.7, 0.6).normalize();
+        scene.add_object(SceneObject::new(
+            SceneObjectKind::Light(Light::directional(Vec3::ONE, 0.8)),
+            Transform::new(
+                Vec3::ZERO,
+                Quat::from_rotation_arc(Vec3::NEG_Z, -light_arrival),
+                Vec3::ONE,
+            ),
+        ));
+        // 一个三角形 + 一排立方体（纯程序网格，无贴图）。
+        scene.add_object(SceneObject::new(
+            SceneObjectKind::Mesh(triangle),
+            Transform::new(
+                Vec3::new(-1.2, 0.0, 0.0),
+                Quat::from_rotation_y(0.5),
+                Vec3::splat(1.5),
+            ),
+        ));
+        for i in 0..4 {
+            scene.add_object(SceneObject::new(
+                SceneObjectKind::Mesh(cube),
+                Transform::new(
+                    Vec3::new(0.8 + i as f32 * 1.1, 0.4, -0.5),
+                    Quat::from_rotation_y(i as f32 * 0.4),
+                    Vec3::splat(0.9),
+                ),
+            ));
+        }
+        let camera = scene.add_camera(Camera::new(
+            Vec3::new(0.0, 1.2, 3.5),
+            -std::f32::consts::FRAC_PI_2,
+            -0.1,
+            std::f32::consts::FRAC_PI_4,
+            16.0 / 9.0,
+            0.1,
+            100.0,
+        ));
+        assert!(scene.set_main_camera(camera), "新相机必然能设为主相机");
+        scene
+    }
 }

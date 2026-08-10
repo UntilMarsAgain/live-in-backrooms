@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use wgpu::{Device, Queue};
 
@@ -39,12 +40,27 @@ pub struct MeshGpu {
     pub index_count: u32,
 }
 
+impl MeshGpu {
+    /// 显存占用（顶点缓冲 + 索引缓冲的分配大小，字节）。
+    pub fn memory_usage(&self) -> u64 {
+        self.vertex_buffer.size() + self.index_buffer.size()
+    }
+}
+
 /// 纹理的 GPU 表示：贴图纹理及其视图。
 #[derive(Debug)]
 pub struct TextureGpu {
     #[allow(dead_code)] // 预留：纹理重建/尺寸查询；当前仅 view 被采样
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
+}
+
+impl TextureGpu {
+    /// 显存占用（纹理分配的字节数；当前 RGBA8、单 mip）。
+    pub fn memory_usage(&self) -> u64 {
+        let size = self.texture.size();
+        (size.width * size.height * size.depth_or_array_layers * 4) as u64
+    }
 }
 
 /// 网格上传器：把 `Mesh` 转成独立 GPU 缓冲（顶点 + 索引）。
@@ -141,8 +157,6 @@ pub struct GpuManager {
     texture_uploader: TextureUploader,
     meshes: HashMap<Handle<Mesh>, GpuEntry<MeshGpu>>,
     textures: HashMap<Handle<Texture>, GpuEntry<TextureGpu>>,
-    /// GPU 侧最近使用时钟（上传/取用 +1；gc 的"现在"）。
-    use_clock: u64,
 }
 
 impl GpuManager {
@@ -154,7 +168,6 @@ impl GpuManager {
             texture_uploader: TextureUploader,
             meshes: HashMap::new(),
             textures: HashMap::new(),
-            use_clock: 0,
         }
     }
 
@@ -202,6 +215,15 @@ impl GpuManager {
         self.textures.get(&handle).map(|e| &e.gpu)
     }
 
+    /// 当前**显存驻留**的总占用（字节）：网格缓冲 + 贴图纹理的实际分配大小。
+    ///
+    /// 用途：显存压力检测——超过预算上限时 App 层触发强制 GC。
+    pub fn memory_usage(&self) -> u64 {
+        let meshes: u64 = self.meshes.values().map(|e| e.gpu.memory_usage()).sum();
+        let textures: u64 = self.textures.values().map(|e| e.gpu.memory_usage()).sum();
+        meshes + textures
+    }
+
     /// 预上传优化：把所有 `Pinned` 且尚未上传的句柄批量上传。
     ///
     /// 不做这一步也不会错——取用时 `mesh_gpu`/`texture_gpu` 会自愈，
@@ -218,7 +240,7 @@ impl GpuManager {
     /// 调用时机由物理刻决定（目前由调用方按需触发）。
     #[allow(dead_code)] // 公共 GC API：物理刻接入前由调用方按需触发
     pub fn gc(&mut self, policy: &GcPolicy) {
-        let now = self.use_clock;
+        let now = Instant::now();
         let meshes_before = self.meshes.len();
         let textures_before = self.textures.len();
         self.meshes
@@ -249,13 +271,14 @@ impl GpuManager {
         // 自愈：数据缺失（含内存卸载）时 get 会经重载器自动回磁盘。
         let mesh = assets.get(handle)?;
         let gpu = self.mesh_uploader.upload(&self.device, &self.queue, mesh);
-        self.use_clock += 1;
-        let last_used = self.use_clock;
         self.meshes.insert(
             handle,
             GpuEntry {
                 gpu,
-                gc: GcInfo { last_used, pins: 0 },
+                gc: GcInfo {
+                    last_used: Instant::now(),
+                    pins: 0,
+                },
             },
         );
         tracing::debug!("显存上传：网格 {:?}", handle.key());
@@ -270,13 +293,14 @@ impl GpuManager {
         let gpu = self
             .texture_uploader
             .upload(&self.device, &self.queue, texture);
-        self.use_clock += 1;
-        let last_used = self.use_clock;
         self.textures.insert(
             handle,
             GpuEntry {
                 gpu,
-                gc: GcInfo { last_used, pins: 0 },
+                gc: GcInfo {
+                    last_used: Instant::now(),
+                    pins: 0,
+                },
             },
         );
         tracing::debug!("显存上传：贴图 {:?}", handle.key());
@@ -285,18 +309,14 @@ impl GpuManager {
 
     /// 刷新最近取用（取用路径的时钟推进；与 CPU 侧 `get` 的语义一致）。
     fn touch_mesh(&mut self, handle: Handle<Mesh>) {
-        self.use_clock += 1;
-        let now = self.use_clock;
         if let Some(entry) = self.meshes.get_mut(&handle) {
-            entry.gc.last_used = now;
+            entry.gc.last_used = Instant::now();
         }
     }
 
     fn touch_texture(&mut self, handle: Handle<Texture>) {
-        self.use_clock += 1;
-        let now = self.use_clock;
         if let Some(entry) = self.textures.get_mut(&handle) {
-            entry.gc.last_used = now;
+            entry.gc.last_used = Instant::now();
         }
     }
 

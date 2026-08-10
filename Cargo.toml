@@ -22,6 +22,7 @@ bevy_ecs = "0.18.1"
 bevy-trait-query = "0.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 naga = "30.0.0"

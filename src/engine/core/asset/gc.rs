@@ -36,7 +36,7 @@ impl AssetManager {
     /// 调用时机由物理刻决定（目前由调用方按需触发）。
     #[allow(dead_code)] // 公共 GC API：物理刻接入前由调用方按需触发
     pub fn gc(&mut self, policy: &GcPolicy) {
-        let now = self.use_clock;
+        let now = Instant::now();
         let total = self.slots.len();
         let mut evicted = 0usize;
         for (_, slot) in self.slots.iter_mut() {
