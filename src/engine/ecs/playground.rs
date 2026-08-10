@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use bevy_ecs::hierarchy::ChildOf;
 use bevy_ecs::prelude::*;
-use bevy_trait_query::RegisterExt;
+use bevy_ecs::schedule::IntoScheduleConfigs;
+use bevy_ecs::system::ScheduleSystem;
+use bevy_trait_query::{RegisterExt, TraitQuery, TraitQueryMarker};
 
 use super::components::{
     CameraC, Collider, LightC, LocalTransform, MainCamera, MeshObject, WorldMatrix,
@@ -75,6 +77,40 @@ impl Playground {
             timestep: FixedTimestep::new(Duration::from_secs_f64(1.0 / 60.0)),
             scene: None,
         }
+    }
+
+    /// 注册一个**物理刻**系统（在固定步长循环里运行）。
+    ///
+    /// 系统可以在任意文件里定义，只有注册到这个调度器才会被执行；
+    /// 可在首次 `advance` 之前或之后调用（bevy 会在下一次运行前完成初始化）。
+    pub fn add_tick_system<M>(
+        &mut self,
+        systems: impl IntoScheduleConfigs<ScheduleSystem, M>,
+    ) -> &mut Self {
+        self.tick_schedule.add_systems(systems);
+        self
+    }
+
+    /// 注册一个**渲染刻**系统（每帧运行一次）。
+    ///
+    /// 同样支持任意文件里定义的系统；可在首次 `prepare_frame` 之前或之后调用。
+    pub fn add_render_system<M>(
+        &mut self,
+        systems: impl IntoScheduleConfigs<ScheduleSystem, M>,
+    ) -> &mut Self {
+        self.render_schedule.add_systems(systems);
+        self
+    }
+
+    /// 把组件登记到 trait 查询注册表（如 `dyn RenderExtract`）。
+    ///
+    /// **必须在首次运行任何调度之前调用**，否则 bevy-trait-query 会 panic。
+    pub fn register_component_as<Trait: ?Sized + TraitQuery, C: Component>(&mut self) -> &mut Self
+    where
+        (C,): TraitQueryMarker<Trait, Covered = C>,
+    {
+        self.world.register_component_as::<Trait, C>();
+        self
     }
 
     /// 记录按键状态（winit 事件回调写入，系统在物理刻消费）。
@@ -178,6 +214,73 @@ impl SceneInstance {
                 entity.despawn();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy_ecs::prelude::*;
+    use glam::{Mat4, Quat, Vec3};
+
+    use super::*;
+    use crate::engine::core::data::light::LightKind;
+    use crate::engine::core::frame::LightData;
+
+    /// 外部自定义的可渲染组件：定义在测试里，不碰引擎内部文件。
+    #[derive(Component, Debug)]
+    struct ExternalBeacon(f32);
+
+    impl RenderExtract for ExternalBeacon {
+        fn extract(&self, _world: &Mat4, frame: &mut RenderCommand) {
+            frame.lights.push(LightData {
+                kind: LightKind::Point,
+                position: Vec3::splat(self.0),
+                rotation: Quat::IDENTITY,
+                color: Vec3::ONE,
+                intensity: self.0,
+            });
+        }
+    }
+
+    /// 外部系统：给自定义组件做动画（物理刻跑）。
+    fn bob_beacon(mut beacons: Query<&mut ExternalBeacon>) {
+        for mut beacon in &mut beacons {
+            beacon.0 += 1.0;
+        }
+    }
+
+    /// 外部渲染刻系统：往独立资源里记录"跑过一次"（避免与提取系统争指令写入顺序）。
+    fn stamp_frame(mut stamps: ResMut<FrameStamps>) {
+        stamps.0.push(42.0);
+    }
+
+    #[derive(Resource, Default)]
+    struct FrameStamps(Vec<f32>);
+
+    /// 组件/系统都可以定义在任何文件，只有注册到 Playground 才生效。
+    #[test]
+    fn external_component_and_systems_register_into_playground() {
+        let mut playground = Playground::new();
+        // 外部注册 trait 组件 + 两个外部系统（物理刻 / 渲染刻各一个）。
+        playground.world.insert_resource(FrameStamps::default());
+        playground
+            .register_component_as::<dyn RenderExtract, ExternalBeacon>()
+            .add_tick_system(bob_beacon)
+            .add_render_system(stamp_frame);
+
+        playground
+            .world
+            .spawn((ExternalBeacon(1.0), WorldMatrix(Mat4::IDENTITY)));
+
+        playground.advance(Duration::from_secs_f64(1.0 / 60.0));
+        playground.prepare_frame();
+
+        let frame = playground.render_frame();
+        // 物理刻系统把组件从 1.0 加到 2.0，trait 提取自动收集。
+        assert_eq!(frame.lights.len(), 1);
+        assert_eq!(frame.lights[0].intensity, 2.0);
+        // 渲染刻外部系统确实每帧跑了一次。
+        assert_eq!(playground.world.resource::<FrameStamps>().0, vec![42.0]);
     }
 }
 
