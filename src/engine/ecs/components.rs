@@ -1,8 +1,9 @@
 //! 组件（C）：场景物体的数据，全部由 bevy_ecs 存储。
 //!
 //! 对应旧 `SceneObjectKind` 的拆解：变换 / 网格句柄 / 材质 / 灯光 / 相机
-//! 各自成为独立组件，层级用 `Parent` / `Children`，碰撞盒从网格 AABB 派生
-//! 为 `Collider`（系统只读它，不碰资产库）。
+//! 各自成为独立组件，层级用 bevy 内置的 `ChildOf` / `Children` 关系
+//! （自动维护 + 级联 despawn，见 `bevy_ecs::hierarchy`），碰撞盒从网格 AABB
+//! 派生为 `Collider`（系统只读它，不碰资产库）。
 
 use bevy_ecs::prelude::*;
 use glam::Mat4;
@@ -46,11 +47,3 @@ pub struct MainCamera;
 /// 局部空间碰撞盒（由网格 AABB 派生；渲染/碰撞系统只读这个，不碰资产库）。
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Collider(pub Aabb);
-
-/// 父实体（层级用）。
-#[derive(Component, Debug, Clone, Copy)]
-pub struct Parent(pub Entity);
-
-/// 子实体列表（层级用）。
-#[derive(Component, Debug, Clone, Default)]
-pub struct Children(pub Vec<Entity>);

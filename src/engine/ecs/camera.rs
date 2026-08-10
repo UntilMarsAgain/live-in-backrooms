@@ -1,7 +1,7 @@
 //! 自由视角相机系统：取代旧的 `FreeCameraController`。
 //!
 //! 输入来自 [`super::InputSnapshot`] 资源（App 事件回调累积），系统在固定刻
-//! 直接修改主相机组件，碰撞用 `Collider` 组件做分轴滑动（不再需要 Scene 查询）。
+//! 直接修改主相机组件，碰撞用 `Collider` 组件做分轴滑动（不再需要场景模板查询）。
 
 use bevy_ecs::prelude::*;
 use glam::{Mat4, Vec3};

@@ -10,7 +10,7 @@
 use glam::{Mat4, Vec3};
 
 use crate::engine::core::data::light::LightKind;
-use crate::engine::scene::{Scene, SceneObjectKind};
+use crate::engine::scene::{SceneObjectKind, SceneTemplate};
 
 /// 每帧参与着色的局部光（点光/面光）数量上限：离相机最近的 X 盏。
 /// 方向光不占此额度，总是全部参与。
@@ -25,7 +25,8 @@ pub(super) const LIGHT_CAPACITY: usize = 64;
 /// [`MAX_NEARBY_LIGHTS`] 盏局部光（欧氏距离，近 → 远）。
 ///
 /// 世界方向由物体的世界旋转决定（局部 -Z = 光行进方向）。
-pub(super) fn collect_lights(scene: &Scene, camera_position: Vec3) -> Vec<LightUniform> {
+#[allow(dead_code)] // 模板版灯光收集：已被 ECS 版（render::prepare）取代，测试仍覆盖数学
+pub(super) fn collect_lights(scene: &SceneTemplate, camera_position: Vec3) -> Vec<LightUniform> {
     let mut directional = Vec::new();
     let mut nearby: Vec<(f32, LightUniform)> = Vec::new();
 
@@ -204,14 +205,14 @@ mod tests {
     use super::*;
     use crate::engine::core::data::light::Light;
     use crate::engine::core::data::transform::Transform;
-    use crate::engine::scene::{Scene, SceneObject, SceneObjectKind};
+    use crate::engine::scene::{SceneObject, SceneObjectKind, SceneTemplate};
     use glam::Quat;
 
     /// 方向光的 uniform direction 应为行进方向（光源 → 场景），
     /// 即物体局部 -Z 经旋转后的方向，与面光"发射方向"语义一致。
     #[test]
     fn directional_light_direction_is_travel_direction() {
-        let mut scene = Scene::new();
+        let mut scene = SceneTemplate::new();
         // 光从右上前方照向场景（来向 = arrival），行进方向 = -arrival。
         let arrival = Vec3::new(0.5, 0.6, 0.6).normalize();
         scene.add_object(SceneObject::new(
@@ -235,7 +236,7 @@ mod tests {
     /// 收集规则：方向光总是包含且在前，局部光按离相机距离取最近 X 盏。
     #[test]
     fn collect_lights_keeps_directionals_and_nearest_local() {
-        let mut scene = Scene::new();
+        let mut scene = SceneTemplate::new();
         scene.add_object(SceneObject::new(
             SceneObjectKind::Light(Light::directional(Vec3::ONE, 1.0)),
             Transform::new(
@@ -265,7 +266,7 @@ mod tests {
     /// 局部光超过 X 盏时只保留最近的 X 盏。
     #[test]
     fn collect_lights_truncates_to_nearest_max() {
-        let mut scene = Scene::new();
+        let mut scene = SceneTemplate::new();
         // 9 盏点光，距离 1..=9，X = MAX_NEARBY_LIGHTS = 8。
         for i in 0..9 {
             scene.add_object(SceneObject::new(

@@ -8,10 +8,10 @@
 //! - 物体组织成一棵树，每个节点有唯一父节点；`remove_object` 删除**整棵子树**，
 //!   父节点没了，子节点不允许残存为孤儿；
 //! - 变换是相对父节点的局部值，世界变换 = 沿祖先链向上累乘
-//!   （见 [`Scene::world_transform`]）；
+//!   （见 [`SceneTemplate::world_transform`]）；
 //! - 句柄带代际，删除后不会复用同一数值，失效句柄被安全识别（返回 `None`/`false`）；
 //! - 成环在库层就被禁止（`append`/`checked_append` 拒绝自挂与挂祖先），
-//!   [`Scene::reparent`] 也会预检查后代关系，因此遍历不需要环保护。
+//!   [`SceneTemplate::reparent`] 也会预检查后代关系，因此遍历不需要环保护。
 //!
 //! 网格资产由统一 `AssetManager` 持有，不属于某个场景；场景对象用
 //! [`SceneObjectKind`] 区分类型（网格 / 空分组节点 / 灯光 / 相机）。
@@ -68,7 +68,7 @@ pub struct SceneObject {
 }
 
 impl SceneObject {
-    /// 新建一个节点。要挂到树上用 [`Scene::attach`] 或 [`Scene::reparent`]。
+    /// 新建一个节点。要挂到树上用 [`SceneTemplate::attach`] 或 [`SceneTemplate::reparent`]。
     pub fn new(kind: SceneObjectKind, transform: Transform) -> Self {
         Self {
             transform,
@@ -94,7 +94,7 @@ impl SceneObject {
 
 /// 场景：层级化的物体树（网格资产在统一 `AssetManager` 中）。
 #[derive(Debug, Clone)]
-pub struct Scene {
+pub struct SceneTemplate {
     tree: Arena<SceneObject>,
     /// 灯光节点缓存（增删时维护，渲染每帧按距离收集）。
     light_nodes: Vec<ObjectKey>,
@@ -109,7 +109,7 @@ pub struct Scene {
     agx_max_ev: f32,
 }
 
-impl Default for Scene {
+impl Default for SceneTemplate {
     fn default() -> Self {
         Self {
             tree: Arena::default(),
@@ -125,7 +125,7 @@ impl Default for Scene {
     }
 }
 
-impl Scene {
+impl SceneTemplate {
     pub fn new() -> Self {
         Self::default()
     }
@@ -204,9 +204,9 @@ impl Scene {
             .filter(move |id| id.parent(&self.tree) == Some(key))
     }
 
-    /// 添加一个根节点（O(1)）。要作为子节点挂载请用 [`Scene::attach`]。
+    /// 添加一个根节点（O(1)）。要作为子节点挂载请用 [`SceneTemplate::attach`]。
     ///
-    /// 灯光节点会登记进灯光缓存（[`Scene::lights`]），供渲染每帧按距离收集。
+    /// 灯光节点会登记进灯光缓存（[`SceneTemplate::lights`]），供渲染每帧按距离收集。
     pub fn add_object(&mut self, object: SceneObject) -> ObjectKey {
         let key = self.tree.new_node(object);
         if matches!(self.tree[key].get().kind, SceneObjectKind::Light(_)) {
@@ -233,7 +233,7 @@ impl Scene {
 
     /// 添加一个相机节点（**不会**自动设为主相机），返回节点句柄。
     ///
-    /// 要把它设为主相机请再调用 [`Scene::set_main_camera`]；"添加"与"设为主相机"
+    /// 要把它设为主相机请再调用 [`SceneTemplate::set_main_camera`]；"添加"与"设为主相机"
     /// 是两个独立操作，避免添加相机时意外抢走主相机身份。
     pub fn add_camera(&mut self, camera: Camera) -> ObjectKey {
         self.add_object(SceneObject::new(
@@ -359,7 +359,7 @@ impl Scene {
     /// 把 `other` 中的所有物体复制进本场景（保持层级关系），返回新复制的根节点句柄。
     ///
     /// 用于把 glTF 等外部场景并入现有场景（例如并进演示场景）。
-    pub fn merge(&mut self, other: &Scene) -> Vec<ObjectKey> {
+    pub fn merge(&mut self, other: &SceneTemplate) -> Vec<ObjectKey> {
         // 第一遍：复制所有节点，记录旧句柄 → 新句柄。
         let mut remap: HashMap<ObjectKey, ObjectKey> = HashMap::new();
         for (old_key, object) in other.objects() {

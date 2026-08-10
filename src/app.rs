@@ -17,12 +17,13 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window};
 
 use crate::engine::ecs::components::{CameraC, MainCamera};
+use crate::engine::ecs::instance::{despawn_scene, spawn_scene, SceneInstance};
 use crate::engine::ecs::{self, FixedStep, FixedTimestep, InputSnapshot};
 use crate::engine::render::prepare::{render_schedule, RenderFrame};
 use crate::engine::render::Renderer;
 use crate::engine::{
     AssetManager, Camera, DisplayHandle, Environment, GamePath, GcPolicy, GpuManager, Handle,
-    MergedResourceSpace, Mesh, MeshView, PackConfig, Scene, Texture,
+    MergedResourceSpace, Mesh, MeshView, PackConfig, SceneTemplate, Texture,
 };
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
@@ -42,6 +43,8 @@ pub struct App {
     assets: AssetManager,
     /// GPU 资产管理器：句柄 → 显存表示的驻留表（上传/回收）。
     gpu: GpuManager,
+    /// 当前场景实例（关卡切换时先卸载它再生成新场景）。
+    scene_instance: Option<SceneInstance>,
     /// 鼠标是否已捕获（自由视角）。
     mouse_captured: bool,
     /// 灯光调试可视化开关（App 事件处理翻转，渲染时读取）。
@@ -85,6 +88,7 @@ impl App {
             last_frame: Instant::now(),
             assets,
             gpu,
+            scene_instance: None,
             mouse_captured: false,
             show_light_debug,
             show_collision_debug,
@@ -109,7 +113,7 @@ impl App {
             .register_textures(vec![Texture::checkerboard(64, 8)])
             .pop()
             .expect("注册了 1 张贴图");
-        let mut scene = Scene::demo(*triangle, *quad, *cube, Some(checker));
+        let mut scene = SceneTemplate::demo(*triangle, *quad, *cube, Some(checker));
         if let Some(env) = &environment {
             scene = scene
                 .with_environment(env.clone())
@@ -124,7 +128,7 @@ impl App {
             }
         };
         // 场景加载（节点摆放/材质）走 GamePath 一次解析，并进 demo。
-        match self.assets.load_scene(&test_path) {
+        match self.assets.load_scene_template(&test_path) {
             Ok(gltf_scene) => {
                 // 把测试模型放大 5 倍（等比），并挪到演示物体右前方，
                 // 避免和原点处的三角形重叠。
@@ -168,7 +172,7 @@ impl App {
     /// 尝试从 glTF 文件加载场景；成功返回 `true`，失败打印原因并返回 `false`。
     #[allow(dead_code)] // 预留：BACKROOMS_GLTF / game-data 场景加载路径，demo 阶段未启用
     fn try_load_gltf(&mut self, path: &GamePath, environment: Option<&Arc<Environment>>) -> bool {
-        match self.assets.load_scene(path) {
+        match self.assets.load_scene_template(path) {
             Ok(scene) => {
                 let scene = match environment {
                     Some(env) => scene.with_environment(env.clone()),
@@ -201,7 +205,11 @@ impl App {
     }
 
     /// App 级别的场景切换 API：模板场景 → 资产驻留 → 生成进 ECS 世界。
-    pub fn load_scene(&mut self, mut scene: Scene) {
+    pub fn load_scene(&mut self, mut scene: SceneTemplate) {
+        // 卸载旧场景实例（若有）：先 unpin 资产，再级联 despawn 整棵子树。
+        if let Some(old) = self.scene_instance.take() {
+            despawn_scene(&mut self.world, &mut self.assets, &old);
+        }
         // 每个场景必须有一个主相机（出生点视角）；缺省时补一个默认相机。
         self.ensure_main_camera(&mut scene);
         // 环境跟随场景：场景自带环境（天空盒 + IBL）时一并上传；
@@ -220,15 +228,15 @@ impl App {
         self.pin_scene_assets(&scene);
         self.gpu.sync(&mut self.assets);
         // 场景模板 → ECS 实体（碰撞盒在生成时从网格 AABB 派生）。
-        let main_camera =
-            ecs::scene::spawn_scene(&scene, &mut self.world, &MeshView::new(&self.assets));
-        if main_camera.is_none() {
+        let instance = spawn_scene(&scene, &mut self.world, &MeshView::new(&self.assets));
+        if instance.main_camera.is_none() {
             eprintln!("场景生成后没有主相机（不应发生：ensure_main_camera 已兜底）");
         }
+        self.scene_instance = Some(instance);
     }
 
     /// 场景引用的所有网格/贴图句柄标记为驻留（pin）。
-    fn pin_scene_assets(&mut self, scene: &Scene) {
+    fn pin_scene_assets(&mut self, scene: &SceneTemplate) {
         for (_, object) in scene.objects() {
             if let Some(handle) = object.mesh_handle() {
                 self.assets.pin(handle);
@@ -240,7 +248,7 @@ impl App {
     }
 
     /// 场景没有主相机时补一个默认相机（与早期硬编码相机相同的位置/朝向）。
-    fn ensure_main_camera(&self, scene: &mut Scene) {
+    fn ensure_main_camera(&self, scene: &mut SceneTemplate) {
         if scene.main_camera().is_none() {
             let size = self.window.inner_size();
             let aspect = size.width as f32 / size.height.max(1) as f32;

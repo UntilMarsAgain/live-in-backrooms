@@ -58,4 +58,4 @@ pub use core::resource::MergedResourceSpace;
 #[allow(unused_imports)]
 pub use render::{DisplayHandle, GpuManager, MeshGpu, Renderer, TextureGpu};
 #[allow(unused_imports)]
-pub use scene::{ObjectKey, Scene, SceneObject, SceneObjectKind};
+pub use scene::{ObjectKey, SceneObject, SceneObjectKind, SceneTemplate};
