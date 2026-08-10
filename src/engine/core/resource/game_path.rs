@@ -10,7 +10,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// 游戏资源路径：`namespace:path`（path 用 `/` 分隔，可带扩展名）。
@@ -33,10 +33,12 @@ impl GamePath {
         Ok(Self { namespace, path })
     }
 
+    /// 资源命名空间（`namespace:` 前缀）。
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
 
+    /// 命名空间内的相对路径（`:` 后的部分）。
     pub fn path(&self) -> &str {
         &self.path
     }

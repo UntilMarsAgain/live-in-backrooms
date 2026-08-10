@@ -114,4 +114,5 @@ pub(super) struct EnvironmentResources {
 }
 
 // 再导出：render/mod.rs 与测试仍按原路径使用，拆分不改变对外 API。
+#[allow(unused_imports)] // 仅测试使用；保留导出路径供无头测试引用
 pub(super) use textures::{create_cube_texture, create_default_environment};

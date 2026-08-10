@@ -16,11 +16,9 @@ use wgpu::{
     PrimitiveTopology, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, VertexState,
 };
 
-use crate::engine::core::asset::MeshSource;
 use crate::engine::core::data::aabb::Aabb;
 use crate::engine::core::data::light::LightKind;
 use crate::engine::core::frame::{ColliderData, LightData};
-use crate::engine::scene::{Scene, SceneObjectKind};
 
 /// 调试线条顶点：位置 + 颜色（与 debug.wgsl 顶点输入一一对应）。
 #[repr(C)]
@@ -63,52 +61,6 @@ impl DebugVertex {
 const BULB_RADIUS: f32 = 0.3;
 const RAY_LENGTH: f32 = 1.4;
 const DISC_SEGMENTS: usize = 16;
-
-/// 从场景收集所有光源，生成调试线框的顶点列表（2 顶点 = 1 条线段）。
-///
-/// 灯光是静态场景数据，在 `load_scene` 时调用一次；光源将来支持动画时
-/// 再改成每帧重建。
-pub(super) fn build_light_gizmos(scene: &Scene) -> Vec<DebugVertex> {
-    let mut vertices = Vec::new();
-    for (key, object) in scene.objects() {
-        let SceneObjectKind::Light(light) = object.kind else {
-            continue;
-        };
-        let world = scene
-            .world_transform(key)
-            .expect("objects() 只产出存活节点，world_transform 必然有值");
-        let (_, rotation, translation) = world.to_scale_rotation_translation();
-        // 太暗的光源用下限兜底，保证线框始终可见（保持光源自身的色相便于区分）。
-        let color = light.color.max(Vec3::splat(0.35));
-        match light.kind {
-            LightKind::Directional => {
-                // 局部 -Z（经世界旋转）= 光行进方向（光源 → 场景），
-                // 与面光一致；调试箭头直接画行进方向。
-                push_directional(&mut vertices, translation, rotation * Vec3::NEG_Z, color);
-            }
-            LightKind::Point => push_point(&mut vertices, &world, color),
-            LightKind::Area { width, height } => {
-                push_area(&mut vertices, &world, rotation, width, height, color);
-            }
-        }
-    }
-    vertices
-}
-
-/// 从场景收集所有网格物体的世界 AABB，生成线框盒子的顶点列表
-/// （12 条边 = 24 个顶点）。
-///
-/// 固定橙色线框；空包围盒（无网格数据）的节点自动跳过。
-pub(super) fn build_collision_gizmos(scene: &Scene, meshes: &dyn MeshSource) -> Vec<DebugVertex> {
-    let color = Vec3::new(1.0, 0.55, 0.1);
-    let mut vertices = Vec::new();
-    for (key, _) in scene.objects() {
-        if let Some(aabb) = scene.object_aabb_world(meshes, key) {
-            push_aabb(&mut vertices, &aabb, color);
-        }
-    }
-    vertices
-}
 
 /// 从渲染指令里的语义灯光生成调试线框（位置/朝向由 ECS 侧给出）。
 pub(super) fn build_light_gizmos_data(lights: &[LightData]) -> Vec<DebugVertex> {
@@ -441,33 +393,24 @@ impl LineGizmos {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::AssetManager;
-    use crate::engine::Camera;
-    use crate::engine::MergedResourceSpace;
-    use crate::engine::MeshView;
-    use crate::engine::core::data::light::Light;
-    use crate::engine::core::data::transform::Transform;
-    use crate::engine::scene::SceneObject;
+    use crate::engine::core::data::aabb::Aabb;
+    use crate::engine::core::data::light::LightKind;
     use glam::Quat;
 
     /// 方向光调试射线应指向光线行进方向（光源 → 场景），
     /// 即物体局部 -Z（统一约定的行进方向）经旋转后的方向。
     #[test]
     fn directional_gizmo_ray_points_along_travel_direction() {
-        let mut scene = Scene::new();
-        // 与演示场景相同的布光：光从右上前方照向场景（来向 = light_dir），
-        // 物体局部 -Z 按约定对齐行进方向（-light_dir）。
         let light_dir = Vec3::new(0.5, 0.6, 0.6).normalize();
-        scene.add_object(SceneObject::new(
-            SceneObjectKind::Light(Light::directional(Vec3::ONE, 1.0)),
-            Transform::new(
-                Vec3::ZERO,
-                Quat::from_rotation_arc(Vec3::NEG_Z, -light_dir),
-                Vec3::ONE,
-            ),
-        ));
+        let lights = [LightData {
+            kind: LightKind::Directional,
+            position: Vec3::ZERO,
+            rotation: Quat::from_rotation_arc(Vec3::NEG_Z, -light_dir),
+            color: Vec3::ONE,
+            intensity: 1.0,
+        }];
 
-        let gizmos = build_light_gizmos(&scene);
+        let gizmos = build_light_gizmos_data(&lights);
         // 找从圆盘中心出发、长度等于 RAY_LENGTH 的射线（push_arrow 第一条线段）。
         let ray = gizmos
             .windows(2)
@@ -488,15 +431,12 @@ mod tests {
     /// 且线段的端点落在立方体 8 个角点上。
     #[test]
     fn collision_gizmos_wire_a_single_cube() {
-        let mut scene = Scene::new();
-        let mut assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
-        let key = assets.register(crate::engine::Mesh::cube());
-        scene.add_object(SceneObject::new(
-            SceneObjectKind::Mesh(key),
-            Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE),
-        ));
+        let colliders = [ColliderData {
+            aabb: Aabb::new(Vec3::splat(-0.5), Vec3::splat(0.5)),
+            world: Mat4::IDENTITY,
+        }];
 
-        let vertices = build_collision_gizmos(&scene, &MeshView::new(&assets));
+        let vertices = build_collision_gizmos_data(&colliders);
         assert_eq!(vertices.len(), 24, "12 条边 × 2 顶点");
 
         // 所有端点都应落在立方体角点集合（±0.5）上。
@@ -520,20 +460,11 @@ mod tests {
 
     /// 空场景：无碰撞箱可画；非网格节点（分组/灯光）不会产出线段。
     #[test]
-    fn collision_gizmos_skip_non_mesh_nodes() {
-        let mut scene = Scene::new();
-        let assets = AssetManager::new(MergedResourceSpace::new(std::env::temp_dir()));
-        scene.add_object(SceneObject::new(
-            SceneObjectKind::Empty,
-            Transform::IDENTITY,
-        ));
-        scene.add_object(SceneObject::new(
-            SceneObjectKind::Light(Light::point(Vec3::ZERO, 1.0)),
-            Transform::IDENTITY,
-        ));
-        let cam = scene.add_camera(Camera::new(Vec3::ZERO, 0.0, 0.0, 1.0, 1.0, 0.1, 100.0));
-        assert!(scene.set_main_camera(cam));
-
-        assert!(build_collision_gizmos(&scene, &MeshView::new(&assets)).is_empty());
+    fn collision_gizmos_skip_empty_aabbs() {
+        let colliders = [ColliderData {
+            aabb: Aabb::EMPTY,
+            world: Mat4::IDENTITY,
+        }];
+        assert!(build_collision_gizmos_data(&colliders).is_empty());
     }
 }

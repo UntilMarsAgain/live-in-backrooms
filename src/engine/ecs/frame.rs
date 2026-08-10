@@ -13,8 +13,8 @@ use bevy_ecs::prelude::*;
 use bevy_trait_query::queryable;
 use glam::Mat4;
 
-use super::components::{CameraC, Collider, LightC, MainCamera, MeshObject, WorldMatrix};
 use super::DebugFlags;
+use super::components::{CameraC, Collider, LightC, MainCamera, MeshObject, WorldMatrix};
 use crate::engine::core::frame::{ColliderData, LightData, RenderCommand};
 
 /// 渲染指令作为 ECS 资源使用（core 层保持 bevy 无关）。

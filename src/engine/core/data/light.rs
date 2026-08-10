@@ -30,14 +30,6 @@ pub struct Light {
 }
 
 impl Light {
-    /// 白光、单位强度的方向光。
-    pub const WHITE: Self = Self {
-        kind: LightKind::Directional,
-        color: Vec3::ONE,
-        intensity: 1.0,
-    };
-
-    #[allow(dead_code)] // 预留：等价于 `WHITE` 的显式写法
     pub fn directional(color: Vec3, intensity: f32) -> Self {
         Self {
             kind: LightKind::Directional,

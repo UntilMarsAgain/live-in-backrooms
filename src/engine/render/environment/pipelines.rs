@@ -9,7 +9,7 @@ use wgpu::{
     RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, VertexState,
 };
 
-use super::{create_default_environment, EnvironmentResources, PREFILTER_MIP_COUNT};
+use super::{EnvironmentResources, PREFILTER_MIP_COUNT, create_default_environment};
 use crate::engine::render::uniform::{EnvParams, EnvironmentParams, PrefilterParams};
 
 impl EnvironmentResources {

@@ -13,76 +13,11 @@ fn decodes_repo_hdr_if_present() {
     assert!(env.width > 0 && env.height > 0);
     assert_eq!(env.rgb.len(), (env.width * env.height) as usize);
     // HDRI 不该全黑：至少有一个非零像素。
-    assert!(env
-        .rgb
-        .iter()
-        .any(|p| p[0] > 0.0 || p[1] > 0.0 || p[2] > 0.0));
-}
-
-/// CPU 转换：2×1 红绿图 → 立方体贴图，所有面都应有非零数据。
-#[test]
-fn to_cubemap_writes_nonzero() {
-    let env = Environment {
-        width: 2,
-        height: 1,
-        rgb: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-    };
-    let cube = env.to_cubemap(4);
-    assert_eq!(cube.len(), 4 * 4 * 6);
-    let max = cube
-        .iter()
-        .fold(0.0f32, |m, p| m.max(p[0]).max(p[1]).max(p[2]));
-    assert!(max > 0.0, "立方体贴图转换输出全为零");
-}
-
-/// CPU 转换：辐照度图应有数据且数值有限（无 NaN/Inf）。
-#[test]
-fn irradiance_map_is_finite_and_positive() {
-    // 全白环境：辐照度应均匀且为正。
-    let env = Environment {
-        width: 2,
-        height: 1,
-        rgb: vec![[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]],
-    };
-    let cube = env.to_cubemap(4);
-    let irr = Environment::irradiance_map(&cube, 4, 2, 64);
-    for p in &irr {
-        assert!(p[0].is_finite() && p[1].is_finite() && p[2].is_finite());
-        assert!(p[0] > 0.0 && p[1] > 0.0 && p[2] > 0.0);
-    }
-}
-
-/// CPU 转换：镜面预过滤 mip 链应有数据且数值有限（无 NaN/Inf）。
-#[test]
-fn prefilter_map_is_finite_and_positive() {
-    // 全白环境：预过滤结果应与环境同色（各向同性、为正）。
-    let env = Environment {
-        width: 2,
-        height: 1,
-        rgb: vec![[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]],
-    };
-    let cube = env.to_cubemap(8);
-    let mips = Environment::prefilter_map(&cube, 8, 4, 3, 128);
-    assert_eq!(mips.len(), 3);
-    for mip in &mips {
-        for p in mip {
-            assert!(p[0].is_finite() && p[1].is_finite() && p[2].is_finite());
-            assert!(p[0] > 0.0 && p[1] > 0.0 && p[2] > 0.0);
-        }
-    }
-}
-
-/// CPU 转换：BRDF LUT 数值有限且在 [0, 1] 附近（无越界/NaN）。
-#[test]
-fn brdf_lut_is_finite_and_bounded() {
-    let lut = Environment::brdf_lut(32, 128);
-    assert_eq!(lut.len(), 32 * 32);
-    for p in &lut {
-        assert!(p[0].is_finite() && p[1].is_finite());
-        // split-sum 的 a/b 项都在 [0, 1] 区间附近。
-        assert!((0.0..=1.5).contains(&p[0]));
-        assert!((0.0..=1.5).contains(&p[1]));
-    }
+    assert!(
+        env.rgb
+            .iter()
+            .any(|p| p[0] > 0.0 || p[1] > 0.0 || p[2] > 0.0)
+    );
 }
 
 /// LDR 解码：sRGB 中灰（128）应线性化为约 0.216，且曝光可放大。

@@ -35,10 +35,6 @@ impl FixedTimestep {
         }
     }
 
-    pub fn step(&self) -> Duration {
-        self.step
-    }
-
     /// 推进一帧真实时间，返回（应补的物理刻数, 渲染插值 alpha ∈ [0,1)）。
     pub fn advance(&mut self, frame_dt: Duration) -> (u32, f32) {
         self.acc += frame_dt;

@@ -171,16 +171,6 @@ impl GpuManager {
         }
     }
 
-    /// 底层设备（上传时使用）。
-    pub fn device(&self) -> &Device {
-        &self.device
-    }
-
-    /// 提交队列。
-    pub fn queue(&self) -> &Queue {
-        &self.queue
-    }
-
     /// 按句柄取用网格显存表示（**自愈**）：未上传则自动上传（CPU 数据不在
     /// 内存会先回磁盘），并刷新最近取用（`gc` 不会回收正在使用的资源）。
     ///
@@ -209,10 +199,6 @@ impl GpuManager {
     /// 纯查询：句柄当前的显存表示，**不触发上传**（已驻留/检查用）。
     pub fn mesh_gpu_resident(&self, handle: Handle<Mesh>) -> Option<&MeshGpu> {
         self.meshes.get(&handle).map(|e| &e.gpu)
-    }
-
-    pub fn texture_gpu_resident(&self, handle: Handle<Texture>) -> Option<&TextureGpu> {
-        self.textures.get(&handle).map(|e| &e.gpu)
     }
 
     /// 当前**显存驻留**的总占用（字节）：网格缓冲 + 贴图纹理的实际分配大小。
