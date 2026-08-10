@@ -14,12 +14,13 @@ use std::time::Duration;
 
 use bevy_ecs::hierarchy::ChildOf;
 use bevy_ecs::prelude::*;
+use bevy_trait_query::RegisterExt;
 
 use super::components::{
-    CameraC, Collider, LightC, LocalTransform, MainCamera, MaterialC, MeshHandle, WorldMatrix,
+    CameraC, Collider, LightC, LocalTransform, MainCamera, MeshObject, WorldMatrix,
 };
-use super::frame::render_schedule;
-use super::{DebugFlags, FixedStep, FixedTimestep, InputSnapshot, tick_schedule};
+use super::frame::{render_schedule, RenderExtract};
+use super::{tick_schedule, DebugFlags, FixedStep, FixedTimestep, InputSnapshot};
 use crate::engine::asset::MeshView;
 use crate::engine::core::asset::{AssetManager, Handle, MeshSource};
 use crate::engine::core::data::aabb::Aabb;
@@ -57,6 +58,12 @@ impl Playground {
     /// 装配物理刻与渲染刻两个调度器。
     pub fn new() -> Self {
         let mut world = World::new();
+        // 注册 trait 查询：把可渲染组件登记到 `RenderExtract` 注册表。
+        // 必须在首次运行调度（查询初始化）之前调用。
+        world
+            .register_component_as::<dyn RenderExtract, MeshObject>()
+            .register_component_as::<dyn RenderExtract, LightC>()
+            .register_component_as::<dyn RenderExtract, Collider>();
         world.insert_resource(FixedStep(Duration::from_secs_f64(1.0 / 60.0)));
         world.insert_resource(InputSnapshot::default());
         world.insert_resource(DebugFlags::default());
@@ -201,8 +208,10 @@ fn spawn_node(
                 .spawn((
                     local,
                     world_matrix,
-                    MeshHandle(handle),
-                    MaterialC(object.material.clone()),
+                    MeshObject {
+                        mesh: handle,
+                        material: object.material.clone(),
+                    },
                     collider,
                 ))
                 .id()

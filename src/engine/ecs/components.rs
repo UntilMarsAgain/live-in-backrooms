@@ -24,13 +24,17 @@ pub struct LocalTransform(pub Transform);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct WorldMatrix(pub Mat4);
 
-/// 引用统一资产库里的网格。
-#[derive(Component, Debug, Clone, Copy)]
-pub struct MeshHandle(pub Handle<Mesh>);
-
-/// 表面材质。
+/// 可渲染网格物体：网格句柄 + 材质。
+///
+/// 合并原 `MeshHandle` / `MaterialC` 两个组件：渲染提取需要两者同时出现，
+/// 合并后 trait 查询（[`super::frame::RenderExtract`]）能在一个组件上拿到全部数据。
 #[derive(Component, Debug, Clone)]
-pub struct MaterialC(pub Material);
+pub struct MeshObject {
+    /// 统一资产库里的网格句柄。
+    pub mesh: Handle<Mesh>,
+    /// 表面材质。
+    pub material: Material,
+}
 
 /// 灯光数据（位置/朝向由世界矩阵决定）。
 #[derive(Component, Debug, Clone, Copy)]
