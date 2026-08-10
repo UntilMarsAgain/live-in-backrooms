@@ -10,6 +10,7 @@ struct ObjectData {
     model: mat4x4<f32>,
     normal_matrix: mat3x3<f32>,
     base_color: vec4<f32>,
+    emissive: vec4<f32>,
     metallic: f32,
     roughness: f32,
     _pad0: f32,
@@ -40,12 +41,13 @@ struct LightCount {
     _pad2: u32,
 }
 
-// 环境参数：`intensity` = IBL 环境光强度（0 = 纯手动布光，1 = 满环境光）。
+// 环境参数：`intensity` = IBL 环境光强度（0 = 纯手动布光，1 = 满环境光）；
+// `exposure` 由 blit 统一应用，mesh 不读。
 struct EnvironmentParams {
     intensity: f32,
+    exposure: f32,
     agx_min_ev: f32,
     agx_max_ev: f32,
-    _pad0: u32,
 }
 
 const PI: f32 = 3.141592653589793;
@@ -60,6 +62,7 @@ const PI: f32 = 3.141592653589793;
 @group(3) @binding(1) var base_color_sampler: sampler;
 @group(3) @binding(2) var metallic_roughness_tex: texture_2d<f32>;
 @group(3) @binding(3) var normal_tex: texture_2d<f32>;
+@group(3) @binding(4) var emissive_tex: texture_2d<f32>;
 @group(4) @binding(0) var irradiance_tex: texture_cube<f32>;
 @group(4) @binding(1) var environment_tex: texture_cube<f32>;
 @group(4) @binding(2) var environment_sampler: sampler;
@@ -223,6 +226,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 n_dot_l;
         }
     }
+    // 自发光：贴图（sRGB 自动转线性）× 因子；不受光照影响，直接叠加。
+    // 因子为 0 或贴图为默认黑时贡献为 0（不发光）。
+    let emissive = textureSample(emissive_tex, base_color_sampler, input.tex_coord).rgb
+        * object_data[input.object_index].emissive.rgb;
+    color += emissive;
     // 输出原始辐射值（线性 HDR，可 >1）；色调映射由最后的 blit pass 统一完成。
     return vec4<f32>(color, 1.0);
 }

@@ -6,7 +6,7 @@
 use super::texture::Texture;
 use crate::engine::core::asset::Handle;
 
-/// 材质：基础色 + 金属度/粗糙度 + 法线贴图（glTF PBR 子集）。
+/// 材质：基础色 + 金属度/粗糙度 + 法线贴图 + 自发光（glTF PBR 子集）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
     /// 基础颜色因子（RGBA，glTF `baseColorFactor`）。
@@ -21,6 +21,10 @@ pub struct Material {
     pub metallic_roughness_texture: Option<Handle<Texture>>,
     /// 法线贴图（glTF `normalTexture`）。
     pub normal_texture: Option<Handle<Texture>>,
+    /// 自发光因子（线性 RGB；glTF `emissiveFactor`，默认 0 = 不发光）。
+    pub emissive_factor: [f32; 3],
+    /// 自发光贴图（glTF `emissiveTexture`，sRGB 语义，乘因子）。
+    pub emissive_texture: Option<Handle<Texture>>,
 }
 
 impl Default for Material {
@@ -32,12 +36,14 @@ impl Default for Material {
             roughness_factor: 1.0,
             metallic_roughness_texture: None,
             normal_texture: None,
+            emissive_factor: [0.0; 3],
+            emissive_texture: None,
         }
     }
 }
 
 impl Material {
-    /// 材质引用的全部贴图句柄（基础色/金属度粗糙度/法线）。
+    /// 材质引用的全部贴图句柄（基础色/金属度粗糙度/法线/自发光）。
     ///
     /// 关卡加载时用来收集"场景需要的贴图清单"统一 pin。
     pub fn texture_handles(&self) -> impl Iterator<Item = Handle<Texture>> + '_ {
@@ -45,6 +51,7 @@ impl Material {
             self.base_color_texture,
             self.metallic_roughness_texture,
             self.normal_texture,
+            self.emissive_texture,
         ]
         .into_iter()
         .flatten()

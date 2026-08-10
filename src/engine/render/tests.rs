@@ -424,6 +424,28 @@ fn gpu_skybox_sampling_verifies_texture_content() {
         "已知全红 cube 经天空盒渲染后 R 分量过低（上传或采样失败）"
     );
 
+    // 1.5) 回归：`set_intensity(0)` 只关 IBL（mesh 环境光照），**不**应让天空盒
+    // 本身变黑——intensity 与 exposure 解耦（天空盒不读 intensity）。写
+    // intensity=0 再渲染，天空盒应仍显示（非黑）。
+    resources.set_intensity(&queue, 0.0);
+    let data_zero_ibl = render_skybox_rgb(
+        &device,
+        &queue,
+        &resources,
+        &camera_bind_group,
+        &known_bind_group,
+    );
+    let mut max_r_zero = 0u8;
+    for chunk in data_zero_ibl.chunks_exact(4) {
+        max_r_zero = max_r_zero.max(chunk[0]);
+    }
+    assert!(
+        max_r_zero > 128,
+        "IBL 强度 0 时天空盒不应变黑（intensity 与 exposure 解耦）"
+    );
+    // 恢复默认，避免影响后续真实 HDR 步骤。
+    resources.set_intensity(&queue, 1.0);
+
     // 2) 真实 HDR → convert（CPU 转换 + 逐层上传）→ 天空盒渲染 → 非黑。
     let env =
         Environment::from_hdr_file(std::path::Path::new("test/test.hdr")).unwrap_or_else(|_| {
@@ -565,7 +587,7 @@ fn gpu_blit_tone_maps_hdr_radiance() {
 
     // blit → Rgba8UnormSrgb，读回。
     let blit = BlitResources::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let blit_bind_group = blit.create_bind_group(&device, &hdr_view, &env_params);
+    let blit_bind_group = blit.create_bind_group(&device, &hdr_view, &env_params, None);
     let color_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("blit test color"),
         size: wgpu::Extent3d {
@@ -785,7 +807,8 @@ fn render_skybox_rgb(
 
     // 2) blit pass：HDR → AgX 色调映射 → Rgba8UnormSrgb。
     let blit = BlitResources::new(device, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let blit_bind_group = blit.create_bind_group(device, &hdr_view, &resources.env_params_buffer);
+    let blit_bind_group =
+        blit.create_bind_group(device, &hdr_view, &resources.env_params_buffer, None);
     let color_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("verify color"),
         size: wgpu::Extent3d {

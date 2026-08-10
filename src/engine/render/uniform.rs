@@ -103,6 +103,8 @@ pub(super) struct ObjectData {
     pub(super) normal_matrix: [[f32; 4]; 3],
     /// 材质基础色因子（RGBA）。
     pub(super) base_color: [f32; 4],
+    /// 自发光因子（线性 RGB + 填充；无贴图时直接就是发光色）。
+    pub(super) emissive: [f32; 4],
     pub(super) metallic: f32,
     pub(super) roughness: f32,
     pub(super) _pad: [f32; 2],
@@ -173,25 +175,34 @@ pub(crate) const AGX_DEFAULT_EV_MAX: f32 = 6.5;
 pub(super) const AGX_DEFAULT_MIN_EV: f32 = AGX_DEFAULT_EV_MIN + AGX_MIDDLE_GRAY_LOG2;
 pub(super) const AGX_DEFAULT_MAX_EV: f32 = AGX_DEFAULT_EV_MAX + AGX_MIDDLE_GRAY_LOG2;
 
-/// 环境参数 uniform（mesh 管线 @group(4) binding 3，天空盒管线 @group(1) binding 2）。
-/// `intensity` = IBL 环境光强度（天空盒侧兼作曝光），0 = 纯手动布光，1 = 满环境光；
-/// `agx_min_ev` / `agx_max_ev` = AgX 色调映射 EV 窗口，场景可按层级覆盖（默认 Blender 值）。
+/// 环境参数 uniform（mesh 管线 @group(4) binding 3，天空盒管线 @group(1) binding 2，
+/// blit 管线 @group(0) binding 2）。
+/// `intensity` = **IBL 环境光强度**（只影响 mesh 的环境光照），0 = 纯手动布光，
+/// 1 = 满环境光；`exposure` = **全局曝光**（blit 统一乘在原始辐射值上，天空盒
+/// 与物体走同一个曝光）；`agx_min_ev` / `agx_max_ev` = AgX 色调映射 EV 窗口，
+/// 场景可按层级覆盖（默认 Blender 值）。
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct EnvironmentParams {
     pub(super) intensity: f32,
+    pub(super) exposure: f32,
     pub(super) agx_min_ev: f32,
     pub(super) agx_max_ev: f32,
-    pub(super) _pad: u32,
 }
+
+// 布局断言：4 × f32 = 16 字节，与三处 WGSL（environment/mesh/blit）对齐；
+// set_agx_range 按此偏移（intensity + exposure 之后）写 min/max。
+const _: () = assert!(std::mem::size_of::<EnvironmentParams>() == 16);
+const _: () = assert!(std::mem::offset_of!(EnvironmentParams, exposure) == 4);
+const _: () = assert!(std::mem::offset_of!(EnvironmentParams, agx_min_ev) == 8);
 
 impl Default for EnvironmentParams {
     fn default() -> Self {
         Self {
             intensity: 1.0,
+            exposure: 1.0,
             agx_min_ev: AGX_DEFAULT_MIN_EV,
             agx_max_ev: AGX_DEFAULT_MAX_EV,
-            _pad: 0,
         }
     }
 }

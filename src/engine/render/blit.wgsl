@@ -5,19 +5,20 @@
 // 这样后处理（Bloom / SSR / SSAO 等）可以在 HDR 值上工作，且天空盒与
 // 物体走同一条色调映射曲线。
 //
-// `environment_params.intensity` 字段此处**不使用**：它现在是 IBL 系数/
-// 天空盒曝光，由光照着色器各自应用。将来把"曝光"从光照链路拆出来后，
-// 曝光乘法应移到这里统一做（见 docs/optimizations.md）。
+// `exposure` = 全局曝光：场景 pass 输出未曝光的原始辐射值（天空盒、mesh
+// IBL 都不乘），色调映射前在这里统一乘一次——天空盒与物体走同一曝光。
+// `intensity`（IBL 系数）已被 mesh 着色器应用，blit 不读。
 struct EnvironmentParams {
     intensity: f32,
+    exposure: f32,
     agx_min_ev: f32,
     agx_max_ev: f32,
-    _pad0: u32,
 }
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(1) var hdr_sampler: sampler;
 @group(0) @binding(2) var<uniform> environment_params: EnvironmentParams;
+@group(0) @binding(3) var bloom_tex: texture_2d<f32>;
 
 // ============================================================================
 // AgX Tone Mapping（与 Blender/Filament/three.js 同源实现）
@@ -101,7 +102,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // 片元坐标（0..尺寸）→ UV：像素中心 +0.5 恰好对应纹素中心。
     let size = vec2<f32>(textureDimensions(hdr_tex));
     let uv = frag_pos.xy / size;
-    let radiance = textureSampleLevel(hdr_tex, hdr_sampler, uv, 0.0).rgb;
-    // 输出线性色，由 sRGB 交换链自动完成编码。
-    return vec4<f32>(agx_tone_map(radiance), 1.0);
+    // Bloom：把辉光结果加回原始辐射值（无 bloom 时绑定黑色纹理，贡献为 0）。
+    let radiance = textureSampleLevel(hdr_tex, hdr_sampler, uv, 0.0).rgb
+        + textureSampleLevel(bloom_tex, hdr_sampler, uv, 0.0).rgb;
+    // 统一应用全局曝光，再做 AgX 色调映射；输出线性色由 sRGB 交换链编码。
+    return vec4<f32>(agx_tone_map(radiance * environment_params.exposure), 1.0);
 }

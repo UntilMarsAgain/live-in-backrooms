@@ -237,6 +237,8 @@ impl Loader {
             roughness_factor: pbr.roughness_factor(),
             metallic_roughness_texture: tex_of_info(pbr.metallic_roughness_texture()),
             normal_texture: tex_of_normal(gltf_material.normal_texture()),
+            emissive_factor: gltf_material.emissive_factor(),
+            emissive_texture: tex_of_info(gltf_material.emissive_texture()),
         })
     }
 }

@@ -119,19 +119,31 @@ impl EnvironmentResources {
         }
     }
 
-    /// 设置环境强度（IBL 系数）：`0` = 纯手动布光（环境图只当背景天空盒），
-    /// `1` = 满环境光；可超 1 补亮。只写 intensity 字段，不重建任何资源。
+    /// 设置环境强度（**IBL 系数**）：`0` = 纯手动布光（物体不受环境光照，
+    /// 天空盒仍正常显示），`1` = 满环境光；可超 1 补亮。只写 intensity 字段，
+    /// 不重建任何资源。
     pub(crate) fn set_intensity(&self, queue: &wgpu::Queue, intensity: f32) {
         queue.write_buffer(&self.env_params_buffer, 0, bytemuck::bytes_of(&intensity));
     }
 
+    /// 设置全局曝光（blit 统一乘在原始辐射值上）：`1.0` = 原亮度，
+    /// 大于 1 提亮、小于 1 压暗（0 = 全黑，仅调试用）。只写 exposure 字段。
+    pub(crate) fn set_exposure(&self, queue: &wgpu::Queue, exposure: f32) {
+        queue.write_buffer(
+            &self.env_params_buffer,
+            4,
+            bytemuck::bytes_of(&exposure),
+        );
+    }
+
     /// 设置 AgX 色调映射的 EV 窗口（场景级配置，默认与 Blender 一致）。
-    /// 只写 min/max 两个字段，不重建任何资源。
+    /// 只写 min/max 两个字段（offset 8 起：intensity + exposure 之后），
+    /// 不重建任何资源。
     pub(crate) fn set_agx_range(&self, queue: &wgpu::Queue, min_ev: f32, max_ev: f32) {
         debug_assert!(min_ev < max_ev, "AgX EV 窗口要求 min_ev < max_ev");
         queue.write_buffer(
             &self.env_params_buffer,
-            4,
+            8,
             bytemuck::bytes_of(&[min_ev, max_ev]),
         );
     }

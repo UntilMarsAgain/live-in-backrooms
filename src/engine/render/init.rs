@@ -18,6 +18,7 @@ use crate::engine::core::data::texture::Texture;
 use crate::engine::render::debug::LineGizmos;
 use crate::engine::render::environment::EnvironmentResources;
 use crate::engine::render::uniform::{LightCountUniform, LightUniform, ObjectData, LIGHT_CAPACITY};
+use crate::engine::render::bloom::BloomResources;
 use crate::engine::render::{BlitResources, DisplayHandle, Renderer, HDR_FORMAT};
 
 /// 创建与窗口尺寸一致的深度纹理。
@@ -350,6 +351,17 @@ impl Renderer {
                         },
                         count: None,
                     },
+                    // 自发光贴图（sRGB；无贴图时绑定默认黑纹理）。
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -383,10 +395,13 @@ impl Renderer {
 
         // 5.9 色调映射 blit：采样 HDR 目标 → AgX 映射 → 写交换链。
         let blit_resources = BlitResources::new(&device, config.format);
+        // 5.10 Bloom：提取高亮 + 多级下采样/上采样，插在场景 pass 与 blit 之间。
+        let bloom = BloomResources::new(&device, width, height);
         let blit_bind_group = blit_resources.create_bind_group(
             &device,
             &hdr_view,
             &environment_resources.env_params_buffer,
+            Some(&bloom.mip_chain[0].1),
         );
 
         // 6. 渲染管线：网格 + 相机/物体/灯光/纹理/环境，输出到 HDR 目标。
@@ -471,6 +486,7 @@ impl Renderer {
             hdr_view,
             blit_resources,
             blit_bind_group,
+            bloom,
             environment: environment_resources.default_environment.clone(),
             environment_resources,
             light_gizmos,

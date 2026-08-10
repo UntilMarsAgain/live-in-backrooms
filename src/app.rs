@@ -113,7 +113,11 @@ pub struct App {
 impl App {
     /// 装配各子系统。窗口已由 main.rs 创建好，这里初始化渲染器与 ECS 世界。
     pub fn new(window: Arc<Window>, display: DisplayHandle) -> anyhow::Result<Self> {
-        let renderer = Renderer::new(&window, display)?;
+        let mut renderer = Renderer::new(&window, display)?;
+        // Bloom 默认参数：阈值 2.0（金属反射环境光不至于误触发辉光）、
+        // 强度 0.3。后续可做成关卡/场景配置。
+        renderer.set_bloom_threshold(2.0);
+        renderer.set_bloom_intensity(0.3);
         // 启动主流程：扫描有效包 → 生成/更新 packs.toml 顺序（环 → 报错），
         // 再按 order 校验依赖与冲突（不满足 → 报错退出）。
         let (pack_config, packages) = PackConfig::discover_and_update("game-data")?;

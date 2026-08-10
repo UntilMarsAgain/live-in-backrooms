@@ -74,6 +74,23 @@ impl Scene {
                 Vec3::ONE,
             ),
         ));
+        // 自发光立方体：emissive 因子 > 1（辐射值超 1），验证 Bloom 辉光
+        //（提取高亮 → 光晕；因子为 0 的物体不受影响）。
+        scene.add_object(
+            SceneObject::new(
+                SceneObjectKind::Mesh(cube),
+                Transform::new(
+                    Vec3::new(-2.2, 1.4, -1.0),
+                    Quat::from_rotation_y(-0.4),
+                    Vec3::splat(0.8),
+                ),
+            )
+            .with_material(Material {
+                base_color: [0.2, 0.2, 0.25, 1.0],
+                emissive_factor: [3.0, 0.6, 0.2],
+                ..Material::default()
+            }),
+        );
         // 立方体：放在视野正上方偏后，绕 Y 和 X 各转一点，让多个面可见。
         let cube = scene.add_object(
             SceneObject::new(

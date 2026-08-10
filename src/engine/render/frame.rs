@@ -34,10 +34,12 @@ impl Renderer {
         (self.depth_texture, self.depth_view) = create_depth_texture(&self.device, width, height);
         // HDR 中间目标同样随尺寸重建；blit 绑定组引用它的视图，需要一并重建。
         (self.hdr_texture, self.hdr_view) = create_hdr_texture(&self.device, width, height);
+        self.bloom.resize(&self.device, width, height);
         self.blit_bind_group = self.blit_resources.create_bind_group(
             &self.device,
             &self.hdr_view,
             &self.environment_resources.env_params_buffer,
+            Some(&self.bloom.mip_chain[0].1),
         );
     }
 
@@ -124,6 +126,12 @@ impl Renderer {
                         base_color: group.material.base_color,
                         metallic: group.material.metallic_factor,
                         roughness: group.material.roughness_factor,
+                        emissive: [
+                            group.material.emissive_factor[0],
+                            group.material.emissive_factor[1],
+                            group.material.emissive_factor[2],
+                            1.0,
+                        ],
                         _pad: [0.0; 2],
                     };
                     bytes[i * entry_size..(i + 1) * entry_size]
@@ -226,6 +234,13 @@ impl Renderer {
                         .normal_texture
                         .and_then(|handle| gpu.texture_gpu(handle, assets).map(|g| g.view.clone()))
                         .unwrap_or_else(|| self.default_normal_view.clone());
+                    let emissive_view = group
+                        .material
+                        .emissive_texture
+                        .and_then(|handle| gpu.texture_gpu(handle, assets).map(|g| g.view.clone()))
+                        // 无 emissive 贴图时绑白色：因子直接生效
+                        //（emissive_factor = 0 时仍不发光，因子本身控制开关）。
+                        .unwrap_or_else(|| self.default_white_view.clone());
                     let material_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
                         label: Some("material bind group"),
                         layout: &self.texture_bind_group_layout,
@@ -245,6 +260,10 @@ impl Renderer {
                             BindGroupEntry {
                                 binding: 3,
                                 resource: wgpu::BindingResource::TextureView(&normal_view),
+                            },
+                            BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::TextureView(&emissive_view),
                             },
                         ],
                     });
@@ -287,6 +306,12 @@ impl Renderer {
                         .draw(&mut pass, &self.camera_bind_group);
                 }
             }
+
+            // ---- Pass 1.5：Bloom（辉光）----
+            // 场景 pass 已结束（HDR 目标可采样），提取高亮 + 多级下采样/
+            // 上采样合并；blit pass 会把 bloom 结果加回 HDR。
+            self.bloom
+                .run(&self.device, &self.queue, &mut encoder, &self.hdr_view);
 
             // ---- Pass 2：色调映射 blit，HDR 目标 → 交换链 ----
             {

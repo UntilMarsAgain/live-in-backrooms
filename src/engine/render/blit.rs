@@ -61,6 +61,17 @@ impl BlitResources {
                     },
                     count: None,
                 },
+                // Bloom 结果（blit 把它加回 HDR；无 bloom 时绑黑色纹理）。
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -127,7 +138,25 @@ impl BlitResources {
         device: &wgpu::Device,
         hdr_view: &wgpu::TextureView,
         env_params_buffer: &wgpu::Buffer,
+        bloom_view: Option<&wgpu::TextureView>,
     ) -> wgpu::BindGroup {
+        // 无 bloom 时绑定黑色纹理，贡献为 0（blit 本身不区分是否有 bloom）。
+        let black = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("blit black bloom fallback"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: super::HDR_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let black_view = black.create_view(&wgpu::TextureViewDescriptor::default());
+        let bloom_view = bloom_view.unwrap_or(&black_view);
         device.create_bind_group(&BindGroupDescriptor {
             label: Some("blit bind group"),
             layout: &self.bind_group_layout,
@@ -143,6 +172,10 @@ impl BlitResources {
                 BindGroupEntry {
                     binding: 2,
                     resource: env_params_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(bloom_view),
                 },
             ],
         })

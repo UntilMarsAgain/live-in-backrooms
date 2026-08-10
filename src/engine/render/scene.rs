@@ -24,6 +24,12 @@ impl Renderer {
             .set_intensity(&self.queue, intensity);
     }
 
+    /// 设置全局曝光（blit 统一应用；默认 1.0）。
+    pub fn set_environment_exposure(&self, exposure: f32) {
+        self.environment_resources
+            .set_exposure(&self.queue, exposure);
+    }
+
     /// 覆盖 AgX 色调映射的 EV 窗口（场景级风格配置，默认与 Blender 一致）。
     ///
     /// 参数是**相对中间灰 0.18 的 EV 档位**（如 -10 ~ +6.5），内部换算成
@@ -34,6 +40,17 @@ impl Renderer {
             ev_min + AGX_MIDDLE_GRAY_LOG2,
             ev_max + AGX_MIDDLE_GRAY_LOG2,
         );
+    }
+
+    /// 设置辉光阈值（辐射值超过它才被 Bloom 提取；调高可避免金属反射/
+    /// 亮区误触发辉光）。
+    pub fn set_bloom_threshold(&mut self, threshold: f32) {
+        self.bloom.set_threshold(threshold);
+    }
+
+    /// 设置辉光强度（提取后乘的系数，控制光晕亮度；0 = 关）。
+    pub fn set_bloom_intensity(&mut self, intensity: f32) {
+        self.bloom.set_intensity(intensity);
     }
 
     /// 清除环境：切回默认的 1×1 黑环境（无天空盒、无 IBL），并把环境强度与

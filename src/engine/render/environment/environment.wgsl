@@ -25,13 +25,14 @@ struct CameraUniform {
 }
 
 // 环境参数 uniform（与 Rust 侧 EnvironmentParams 布局兼容）：
-// `intensity` 字段在此处作为全局曝光值使用；
+// `intensity` 只影响 mesh 的环境光照（天空盒不看它）；
+// `exposure` 是全局曝光，由最后的 blit pass 统一应用（本 pass 不乘）；
 // `agx_min_ev` / `agx_max_ev` 为 AgX 色调映射的 EV 窗口（中间灰 0.18 锚定）。
 struct EnvironmentParams {
-    intensity: f32, // 曝光值
+    intensity: f32,
+    exposure: f32,
     agx_min_ev: f32,
     agx_max_ev: f32,
-    _pad0: u32,
 }
 
 // ---- 等距矩形 → 立方体贴图 ----
@@ -306,8 +307,6 @@ fn skybox_fs_main(in: SkyboxOutput) -> @location(0) vec4<f32> {
     let dir = normalize(p.xyz / p.w);
     let radiance = textureSampleLevel(skybox_tex, skybox_sampler, dir, 0.0).rgb;
 
-    // 应用曝光（复用 environment_params.intensity 作为曝光值）
-    let exposed = radiance * environment_params.intensity;
-    // 输出原始辐射值（线性 HDR）；色调映射由最后的 blit pass 统一完成。
-    return vec4<f32>(exposed, 1.0);
+    // 输出原始辐射值（线性 HDR，不乘曝光）；曝光与色调映射由 blit 统一完成。
+    return vec4<f32>(radiance, 1.0);
 }

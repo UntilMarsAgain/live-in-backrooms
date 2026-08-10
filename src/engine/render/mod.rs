@@ -16,6 +16,7 @@
 
 mod asset;
 mod blit;
+mod bloom;
 mod debug;
 mod environment;
 mod frame;
@@ -26,6 +27,7 @@ mod tests;
 pub(crate) mod uniform;
 
 use self::blit::BlitResources;
+use self::bloom::BloomResources;
 pub use asset::{GpuManager, MeshGpu, TextureGpu};
 use wgpu::Color;
 
@@ -85,6 +87,8 @@ pub struct Renderer {
     blit_resources: BlitResources,
     /// blit 绑定组：引用 HDR 视图与环境参数 uniform，resize 时重建。
     blit_bind_group: wgpu::BindGroup,
+    /// Bloom（辉光）后处理：提取高亮 + 多级下采样/上采样合并。
+    bloom: BloomResources,
     /// 环境贴图（天空盒 + IBL）。始终存在：未加载时为 1×1 黑环境。
     environment: EnvironmentGpu,
     /// 环境子系统资源（布局、计算管线、天空盒管线等）。
