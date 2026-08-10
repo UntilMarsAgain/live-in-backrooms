@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use glam::{Quat, Vec3};
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -17,7 +18,7 @@ use crate::engine::ecs::playground::Playground;
 use crate::engine::render::Renderer;
 use crate::engine::{
     AssetManager, Camera, DisplayHandle, Environment, GamePath, GcPolicy, GpuManager, Handle,
-    MergedResourceSpace, Mesh, PackConfig, Scene, Texture,
+    MergedResourceSpace, Mesh, PackConfig, Scene, SceneObject, SceneObjectKind, Texture, Transform,
 };
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
@@ -105,6 +106,38 @@ impl App {
                         object.transform.scale *= 5.0;
                         object.transform.position += glam::Vec3::new(1.8, 0.0, -1.2);
                     }
+                }
+                // 实例化测试：取 glb 里第一个网格，铺一大片**同网格同材质**
+                // 的副本，验证渲染指令把它们合并成一个绘制组、一次
+                // draw_indexed 画完（multi-draw 的前置）。
+                // 实例化测试：找 glb 里第一个网格（可能在子节点，用全量遍历），
+                // 铺一大片**同网格同材质**的副本，验证渲染指令把它们合并成
+                // 一个绘制组、一次 draw_indexed 画完（multi-draw 的前置）。
+                if let Some((wrench_mesh, wrench_material)) = gltf_scene
+                    .objects()
+                    .find_map(|(_, object)| object.mesh_handle().map(|h| (h, object.material)))
+                {
+                    for row in 0..5 {
+                        for col in 0..10 {
+                            scene.add_object(
+                                SceneObject::new(
+                                    SceneObjectKind::Mesh(wrench_mesh),
+                                    Transform::new(
+                                        Vec3::new(
+                                            -4.5 + col as f32 * 1.2,
+                                            0.0,
+                                            -3.5 - row as f32 * 1.2,
+                                        ),
+                                        Quat::from_rotation_y(row as f32 * 0.4 + col as f32 * 0.25),
+                                        Vec3::splat(5.0),
+                                    ),
+                                )
+                                .with_material(wrench_material),
+                            );
+                        }
+                    }
+                } else {
+                    eprintln!("test.glb 没有网格节点，跳过实例化测试");
                 }
             }
             Err(e) => eprintln!("加载 {} 场景失败：{e}", test_path),

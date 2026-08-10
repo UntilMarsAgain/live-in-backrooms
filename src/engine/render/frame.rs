@@ -132,6 +132,16 @@ impl Renderer {
                 }
             }
             self.queue.write_buffer(&self.object_data_buffer, 0, &bytes);
+            // 一次性输出实例化分组统计，便于 demo 手动验证合并是否生效
+            //（组数远小于实例数 = 同网格同材质合并成功）。
+            static PRINTED_INSTANCE_STATS: std::sync::Once = std::sync::Once::new();
+            PRINTED_INSTANCE_STATS.call_once(|| {
+                eprintln!(
+                    "[demo] 渲染指令实例化分组：{} 个绘制组 / {} 个实例",
+                    command.meshes.len(),
+                    instance_count
+                );
+            });
         }
 
         // 获取当前帧；surface 状态异常时跳过或重建交换链。
