@@ -77,7 +77,7 @@ pub fn scan_packs(data_root: &Path) -> Result<HashMap<String, Package>> {
         let text = match std::fs::read_to_string(&manifest) {
             Ok(text) => text,
             Err(e) => {
-                eprintln!("警告：{folder} 的 package.toml 读取失败，忽略该包：{e}");
+                tracing::warn!("{folder} 的 package.toml 读取失败，忽略该包：{e}");
                 continue;
             }
         };
@@ -86,13 +86,13 @@ pub fn scan_packs(data_root: &Path) -> Result<HashMap<String, Package>> {
                 packs.insert(folder, pkg);
             }
             Ok(pkg) => {
-                eprintln!(
-                    "警告：{folder} 的 package.toml 中 id=\"{}\" 与文件夹名不一致，忽略该包",
+                tracing::warn!(
+                    "{folder} 的 package.toml 中 id=\"{}\" 与文件夹名不一致，忽略该包",
                     pkg.id
                 );
             }
             Err(e) => {
-                eprintln!("警告：{folder} 的 package.toml 解析失败，忽略该包：{e:#}");
+                tracing::warn!("{folder} 的 package.toml 解析失败，忽略该包：{e:#}");
             }
         }
     }

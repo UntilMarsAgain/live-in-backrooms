@@ -136,8 +136,8 @@ impl Renderer {
             //（组数远小于实例数 = 同网格同材质合并成功）。
             static PRINTED_INSTANCE_STATS: std::sync::Once = std::sync::Once::new();
             PRINTED_INSTANCE_STATS.call_once(|| {
-                eprintln!(
-                    "[demo] 渲染指令实例化分组：{} 个绘制组 / {} 个实例",
+                tracing::debug!(
+                    "渲染指令实例化分组：{} 个绘制组 / {} 个实例",
                     command.meshes.len(),
                     instance_count
                 );
@@ -249,7 +249,7 @@ impl Renderer {
                         ],
                     });
                     let Some(mesh_gpu) = gpu.mesh_gpu(group.mesh, assets) else {
-                        eprintln!(
+                        tracing::error!(
                             "渲染违例：场景引用了无效的网格句柄 {:?}，跳过绘制",
                             group.mesh
                         );

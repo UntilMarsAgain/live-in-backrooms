@@ -219,10 +219,21 @@ impl GpuManager {
     #[allow(dead_code)] // 公共 GC API：物理刻接入前由调用方按需触发
     pub fn gc(&mut self, policy: &GcPolicy) {
         let now = self.use_clock;
+        let meshes_before = self.meshes.len();
+        let textures_before = self.textures.len();
         self.meshes
             .retain(|_, entry| policy.should_keep(&entry.gc, now));
         self.textures
             .retain(|_, entry| policy.should_keep(&entry.gc, now));
+        tracing::debug!(
+            "显存 GC：网格 {}→{}（逐出 {}），贴图 {}→{}（逐出 {}）",
+            meshes_before,
+            self.meshes.len(),
+            meshes_before - self.meshes.len(),
+            textures_before,
+            self.textures.len(),
+            textures_before - self.textures.len(),
+        );
     }
 
     /// 上传一个网格句柄（自愈取用与 `sync` 共用）。
@@ -247,6 +258,7 @@ impl GpuManager {
                 gc: GcInfo { last_used, pins: 0 },
             },
         );
+        tracing::debug!("显存上传：网格 {:?}", handle.key());
         Some(())
     }
 
@@ -267,6 +279,7 @@ impl GpuManager {
                 gc: GcInfo { last_used, pins: 0 },
             },
         );
+        tracing::debug!("显存上传：贴图 {:?}", handle.key());
         Some(())
     }
 
@@ -295,9 +308,10 @@ impl GpuManager {
                     && !self.meshes.contains_key(handle)
             })
             .collect();
-        for handle in to_upload {
-            self.upload_mesh(handle, assets);
+        for handle in &to_upload {
+            self.upload_mesh(*handle, assets);
         }
+        tracing::debug!("显存预上传：{} 个网格", to_upload.len());
     }
 
     fn sync_textures(&mut self, assets: &mut AssetManager) {
@@ -308,8 +322,9 @@ impl GpuManager {
                     && !self.textures.contains_key(handle)
             })
             .collect();
-        for handle in to_upload {
-            self.upload_texture(handle, assets);
+        for handle in &to_upload {
+            self.upload_texture(*handle, assets);
         }
+        tracing::debug!("显存预上传：{} 个贴图", to_upload.len());
     }
 }

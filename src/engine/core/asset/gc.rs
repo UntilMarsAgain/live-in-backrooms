@@ -16,6 +16,7 @@ impl AssetManager {
                     .then_some(key)
             })
             .collect();
+        let count = keys.len();
         for key in keys {
             if let Some(slot) = self.slots.get_mut(key) {
                 if let Some(EntryData::File { data, .. }) = &mut slot.data {
@@ -25,6 +26,7 @@ impl AssetManager {
                 }
             }
         }
+        tracing::debug!("资产内存卸载：{source}（{count} 个条目）");
     }
 
     /// 智能内存回收（与 GPU 侧共用 [`GcPolicy::should_keep`] 判定）：
@@ -35,11 +37,14 @@ impl AssetManager {
     #[allow(dead_code)] // 公共 GC API：物理刻接入前由调用方按需触发
     pub fn gc(&mut self, policy: &GcPolicy) {
         let now = self.use_clock;
+        let total = self.slots.len();
+        let mut evicted = 0usize;
         for (_, slot) in self.slots.iter_mut() {
             if !policy.should_keep(&slot.gc, now) {
                 if let Some(EntryData::File { data, .. }) = &mut slot.data {
                     if data.take().is_some() {
                         slot.state = AssetState::DiskOnly;
+                        evicted += 1;
                     }
                 }
             }
@@ -54,5 +59,8 @@ impl AssetManager {
         self.file_entries
             .retain(|source, _| in_use.contains(source));
         self.file_refs.retain(|source, _| in_use.contains(source));
+        tracing::debug!(
+            "资产库 GC：扫描 {total} 个条目，内存逐出 {evicted} 个文件条目"
+        );
     }
 }

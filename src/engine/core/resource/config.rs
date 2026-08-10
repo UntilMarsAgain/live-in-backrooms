@@ -46,7 +46,7 @@ impl PackConfig {
             Ok(text) => match toml::from_str(&text) {
                 Ok(config) => config,
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "解析资源包清单失败（{}）：{e}；使用默认顺序",
                         path.as_ref().display()
                     );
@@ -54,7 +54,7 @@ impl PackConfig {
                 }
             },
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
                     "读取资源包清单失败（{}）：{e}；使用默认顺序",
                     path.as_ref().display()
                 );
@@ -147,7 +147,7 @@ impl PackConfig {
             .collect();
         self.order.retain(|id| packages.contains_key(id));
         for id in removed {
-            eprintln!("警告：packs.toml 中的包 {id} 不存在或不是有效包，已从加载顺序中移除");
+            tracing::warn!("packs.toml 中的包 {id} 不存在或不是有效包，已从加载顺序中移除");
         }
         // 新增：按依赖插入（依赖也是新包时先递归插入依赖）。
         let mut inserted: HashSet<String> = self.order.iter().cloned().collect();

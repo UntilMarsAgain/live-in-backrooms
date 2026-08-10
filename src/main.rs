@@ -11,6 +11,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop};
 use winit::window::{Window, WindowId};
 
 use app::App;
+use tracing_subscriber::layer::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// main.rs 里的薄壳：创建窗口，并把窗口事件原样转发给 App。
 struct WindowedApp {
@@ -44,7 +47,7 @@ impl ApplicationHandler for WindowedApp {
                 Ok(app) => self.app = Some(app),
                 Err(e) => {
                     // 启动期错误（资源包依赖/冲突/环等）：打印后退出，不 panic。
-                    eprintln!("应用启动失败：{e:#}");
+                    tracing::error!("应用启动失败：{e:#}");
                     event_loop.exit();
                 }
             }
@@ -83,6 +86,45 @@ impl ApplicationHandler for WindowedApp {
 }
 
 fn main() -> anyhow::Result<()> {
+    // 日志：终端与文件挂**各自的** EnvFilter，等级互不影响。
+    // - 终端：`RUST_LOG` 控制（默认 info）；
+    // - 文件：`BACKROOMS_FILE_LOG` 控制（默认 info；debug 会引入
+    //   wgpu/bevy 等第三方库的大量日志，需要排查时再临时调高）。
+    // 文件每次启动**覆盖**写入 logs/live-in-backrooms.log，避免长期积累
+    // 把硬盘写满。
+    let stdout_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let file_filter = std::env::var("BACKROOMS_FILE_LOG")
+        .map(tracing_subscriber::EnvFilter::new)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout)
+        .with_filter(stdout_filter);
+    let _ = std::fs::create_dir_all("logs");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open("logs/live-in-backrooms.log")
+    {
+        Ok(file) => {
+            tracing_subscriber::registry()
+                .with(stdout_layer)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(file)
+                        .with_ansi(false)
+                        .with_filter(file_filter),
+                )
+                .init();
+        }
+        Err(e) => {
+            // 文件打开失败时降级为仅终端输出，不阻断启动。
+            eprintln!("无法打开日志文件 logs/live-in-backrooms.log：{e}，仅输出到终端");
+            tracing_subscriber::registry().with(stdout_layer).init();
+        }
+    }
+
     let event_loop = EventLoop::new()?;
     // 使用 Wait：事件循环无事可做时真正休眠，渲染节奏由 update() 里的
     // request_redraw() 驱动；需要按帧动画时用 WaitUntil 即可。

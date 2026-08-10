@@ -44,7 +44,7 @@ impl App {
         // 再按 order 校验依赖与冲突（不满足 → 报错退出）。
         let (pack_config, packages) = PackConfig::discover_and_update("game-data")?;
         pack_config.validate(&packages)?;
-        eprintln!("资源包加载顺序：{}", pack_config.order().join(" → "));
+        tracing::info!("资源包加载顺序：{}", pack_config.order().join(" → "));
         let assets = AssetManager::new(MergedResourceSpace::from_pack_roots(
             pack_config.pack_roots("game-data"),
         ));
@@ -92,7 +92,7 @@ impl App {
         let test_path: GamePath = match "test:test.glb".parse() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("测试模型路径无效：{e}");
+                tracing::error!("测试模型路径无效：{e}");
                 return;
             }
         };
@@ -137,10 +137,10 @@ impl App {
                         }
                     }
                 } else {
-                    eprintln!("test.glb 没有网格节点，跳过实例化测试");
+                    tracing::warn!("test.glb 没有网格节点，跳过实例化测试");
                 }
             }
-            Err(e) => eprintln!("加载 {} 场景失败：{e}", test_path),
+            Err(e) => tracing::error!("加载 {} 场景失败：{e}", test_path),
         }
         self.load_scene(scene);
     }
@@ -154,17 +154,17 @@ impl App {
         let bytes = match self.assets.space().read(&path) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("环境贴图读取失败 {path}：{e}");
+                tracing::error!("环境贴图读取失败 {path}：{e}");
                 return None;
             }
         };
         match Environment::from_bytes(&bytes) {
             Ok(env) => {
-                eprintln!("环境贴图 {path} 加载成功（{}×{}）", env.width, env.height);
+                tracing::info!("环境贴图 {path} 加载成功（{}×{}）", env.width, env.height);
                 Some(Arc::new(env))
             }
             Err(e) => {
-                eprintln!("环境贴图解码失败 {path}：{e}");
+                tracing::error!("环境贴图解码失败 {path}：{e}");
                 None
             }
         }
@@ -183,7 +183,7 @@ impl App {
                 true
             }
             Err(e) => {
-                eprintln!("加载 glTF {path} 失败：{e}");
+                tracing::error!("加载 glTF {path} 失败：{e}");
                 false
             }
         }
@@ -228,7 +228,7 @@ impl App {
         // 碰撞盒在生成时从网格 AABB 派生）。
         self.playground.load_scene(&scene, &mut self.assets);
         if self.playground.main_camera().is_none() {
-            eprintln!("场景生成后没有主相机（不应发生：ensure_main_camera 已兜底）");
+            tracing::warn!("场景生成后没有主相机（不应发生：ensure_main_camera 已兜底）");
         }
     }
 
@@ -288,12 +288,12 @@ impl App {
                     // L：切换灯光调试可视化（长按不重复触发）。
                     if code == KeyCode::KeyL && !key_event.repeat {
                         let on = self.playground.toggle_light_debug();
-                        eprintln!("灯光调试可视化：{}", if on { "关" } else { "开" });
+                        tracing::info!("灯光调试可视化：{}", if on { "开" } else { "关" });
                     }
                     // B：切换碰撞箱调试可视化（长按不重复触发）。
                     if code == KeyCode::KeyB && !key_event.repeat {
                         let on = self.playground.toggle_collision_debug();
-                        eprintln!("碰撞箱调试可视化：{}", if on { "关" } else { "开" });
+                        tracing::info!("碰撞箱调试可视化：{}", if on { "开" } else { "关" });
                     }
                 }
                 // Esc 释放鼠标，回到系统光标。

@@ -137,7 +137,7 @@ impl Renderer {
             compatible_surface: Some(&surface),
             apply_limit_buckets: false,
         }))?;
-        eprintln!(
+        tracing::info!(
             "渲染后端：{}（{:?}）",
             adapter.get_info().name,
             adapter.get_info().backend
@@ -148,7 +148,7 @@ impl Renderer {
             .features()
             .contains(wgpu::Features::FLOAT32_FILTERABLE);
         if !float32_filterable {
-            eprintln!(
+            tracing::warn!(
                 "警告：设备不支持 RGBA32F 线性过滤（FLOAT32_FILTERABLE），\
                  环境贴图将使用点采样（天空盒与 IBL 会偏颗粒感）"
             );

@@ -297,11 +297,17 @@ impl AssetManager {
 
     /// 注册一份内联数据，返回带类型标记的句柄。
     pub fn register<T: Any + Send + Sync>(&mut self, data: T) -> Handle<T> {
-        self.register_with_source(
+        let handle = self.register_with_source(
             AssetState::Resident,
             TypeId::of::<T>(),
             EntryData::Inline(Box::new(data)),
-        )
+        );
+        tracing::debug!(
+            "资产注册（内联）：{} {:?}",
+            std::any::type_name::<T>(),
+            handle.key()
+        );
+        handle
     }
 
     /// 注册一个文件条目：数据**拷贝进槽位**（单一存储点），来源 + 定位供重读。
@@ -340,6 +346,7 @@ impl AssetManager {
             },
         );
         // 反向索引：路径 → 句柄（去重用）。
+        tracing::debug!("资产注册（文件）：{source} 条目 {key:?}");
         self.file_entries.entry(source).or_default().push(key);
         key
     }
@@ -460,6 +467,7 @@ impl AssetManager {
         };
         let parsed = (reload)(&self.space, type_id, extra_any).ok()?;
         // 4. 放回重载器 + 把数据写进槽位。
+        tracing::debug!("资产磁盘重载：{source}（条目 {:?}）", handle.key());
         self.reloaders.insert(source, reload);
         self.set_file_data(handle, parsed);
         Some(())
@@ -499,6 +507,7 @@ impl AssetManager {
         slot.gc.pins += 1;
         slot.gc.last_used = now;
         slot.state = AssetState::Pinned;
+        tracing::debug!("资产 pin：{:?}（pins={}）", handle.key(), slot.gc.pins);
         true
     }
 
@@ -512,6 +521,7 @@ impl AssetManager {
         if slot.gc.pins == 0 {
             slot.state = AssetState::Resident;
         }
+        tracing::debug!("资产 unpin：{:?}（pins={}）", handle.key(), slot.gc.pins);
         true
     }
 
@@ -543,6 +553,7 @@ impl AssetManager {
     /// 按原始键卸载（异步加载失败清理占位句柄也用）。
     fn remove_key(&mut self, key: DefaultKey) -> Option<EntryData> {
         let slot = self.slots.remove(key)?;
+        tracing::debug!("资产移除：{:?}", key);
         let data = slot.data;
         // 反向索引同步删除 + B1.2 引用计数。
         if let Some(EntryData::File { source, .. }) = &data {

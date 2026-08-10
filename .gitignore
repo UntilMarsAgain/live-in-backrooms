@@ -1,4 +1,5 @@
 /target
+/logs/
 
 # 游戏美术资产目录：内容不入库，仅保留说明文件。
 /game-data/vanilla/assets/*
