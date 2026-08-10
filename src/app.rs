@@ -3,10 +3,9 @@
 //! 持有 [`Playground`]（运行中的 ECS 世界：实体 + 双调度器 + 输入快照），
 //! winit 事件只负责**累积输入快照**，不直接改游戏状态；每帧 `advance`
 //! 跑物理刻（世界变换传播、自由相机），`prepare_frame` 跑渲染刻
-//! （查询组件 → 填 [`RenderFrame`]），再把帧数据交给渲染器。
+//! （查询组件 → 填渲染指令），再把指令交给渲染器。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -34,17 +33,11 @@ pub struct App {
     gpu: GpuManager,
     /// 鼠标是否已捕获（自由视角）。
     mouse_captured: bool,
-    /// 灯光调试可视化开关（App 事件处理翻转，渲染时读取）。
-    show_light_debug: Arc<AtomicBool>,
-    /// 碰撞箱调试可视化开关。
-    show_collision_debug: Arc<AtomicBool>,
 }
 
 impl App {
     /// 装配各子系统。窗口已由 main.rs 创建好，这里初始化渲染器与 ECS 世界。
     pub fn new(window: Arc<Window>, display: DisplayHandle) -> anyhow::Result<Self> {
-        let show_light_debug = Arc::new(AtomicBool::new(false));
-        let show_collision_debug = Arc::new(AtomicBool::new(false));
         let renderer = Renderer::new(&window, display)?;
         // 启动主流程：扫描有效包 → 生成/更新 packs.toml 顺序（环 → 报错），
         // 再按 order 校验依赖与冲突（不满足 → 报错退出）。
@@ -67,8 +60,6 @@ impl App {
             assets,
             gpu,
             mouse_captured: false,
-            show_light_debug,
-            show_collision_debug,
         };
         app.load_startup_scene();
         Ok(app)
@@ -263,12 +254,12 @@ impl App {
                 if key_event.state == ElementState::Pressed {
                     // L：切换灯光调试可视化（长按不重复触发）。
                     if code == KeyCode::KeyL && !key_event.repeat {
-                        let on = self.show_light_debug.fetch_xor(true, Ordering::Relaxed);
+                        let on = self.playground.toggle_light_debug();
                         eprintln!("灯光调试可视化：{}", if on { "关" } else { "开" });
                     }
                     // B：切换碰撞箱调试可视化（长按不重复触发）。
                     if code == KeyCode::KeyB && !key_event.repeat {
-                        let on = self.show_collision_debug.fetch_xor(true, Ordering::Relaxed);
+                        let on = self.playground.toggle_collision_debug();
                         eprintln!("碰撞箱调试可视化：{}", if on { "关" } else { "开" });
                     }
                 }
@@ -347,15 +338,11 @@ impl App {
         self.window.request_redraw();
     }
 
-    /// 渲染一帧：读取 Playground 里的渲染帧数据交给渲染器。
+    /// 渲染一帧：把 Playground 里的渲染指令交给渲染器执行（指令只带资源库
+    /// 句柄，渲染器绘制时拿句柄向库取 GPU 数据）。
     fn draw(&mut self) {
-        let frame = self.playground.render_frame();
-        self.renderer.render(
-            frame,
-            &mut self.gpu,
-            &mut self.assets,
-            self.show_light_debug.load(Ordering::Relaxed),
-            self.show_collision_debug.load(Ordering::Relaxed),
-        );
+        let command = self.playground.render_frame();
+        self.renderer
+            .render(command, &mut self.gpu, &mut self.assets);
     }
 }

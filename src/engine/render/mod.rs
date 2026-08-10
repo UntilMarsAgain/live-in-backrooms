@@ -3,7 +3,6 @@
 //! 本文件只做**集合点**：类型定义与再导出，具体实现拆到子模块：
 //! - [`init`]：渲染器初始化（设备/交换链/绑定组/管线装配）；
 //! - [`scene`]：环境设置（天空盒/IBL）；
-//! - [`prepare`]：ECS 渲染帧准备（组件 → [`RenderFrame`]）；
 //! - [`frame`]：每帧渲染与窗口尺寸变化；
 //! - [`uniform`]：GPU uniform 布局与灯光收集；
 //! - [`environment`]：环境贴图（天空盒 + IBL）的 GPU 资源与转换；
@@ -11,6 +10,9 @@
 //! - [`blit`]：色调映射 blit（HDR 中间目标 → 交换链）；
 //! - [`asset`]：资产管理器（GPU 表示类型、上传器、统一句柄资源管理）；
 //! - [`tests`]：WGSL 校验 + 无头冒烟测试（仅测试构建）。
+//!
+//! 渲染指令（[`crate::engine::core::frame::RenderCommand`]）是 ECS 与渲染器
+//! 之间的数据契约，定义在 core：本模块消费它，不反向依赖 ECS。
 
 mod asset;
 mod blit;
@@ -18,7 +20,6 @@ mod debug;
 mod environment;
 mod frame;
 mod init;
-pub(crate) mod prepare;
 mod scene;
 #[cfg(test)]
 mod tests;

@@ -18,13 +18,14 @@ use bevy_ecs::prelude::*;
 use super::components::{
     CameraC, Collider, LightC, LocalTransform, MainCamera, MaterialC, MeshHandle, WorldMatrix,
 };
-use super::{FixedStep, FixedTimestep, InputSnapshot, tick_schedule};
+use super::frame::render_schedule;
+use super::{DebugFlags, FixedStep, FixedTimestep, InputSnapshot, tick_schedule};
 use crate::engine::asset::MeshView;
 use crate::engine::core::asset::{AssetManager, Handle, MeshSource};
 use crate::engine::core::data::aabb::Aabb;
 use crate::engine::core::data::mesh::Mesh;
 use crate::engine::core::data::texture::Texture;
-use crate::engine::render::prepare::{RenderFrame, render_schedule};
+use crate::engine::core::frame::RenderCommand;
 use crate::engine::scene::{ObjectKey, Scene, SceneObjectKind};
 use winit::keyboard::KeyCode;
 
@@ -58,7 +59,8 @@ impl Playground {
         let mut world = World::new();
         world.insert_resource(FixedStep(Duration::from_secs_f64(1.0 / 60.0)));
         world.insert_resource(InputSnapshot::default());
-        world.insert_resource(RenderFrame::default());
+        world.insert_resource(DebugFlags::default());
+        world.insert_resource(RenderCommand::default());
         Self {
             world,
             tick_schedule: tick_schedule(),
@@ -90,6 +92,20 @@ impl Playground {
         self.world.resource_mut::<InputSnapshot>().scroll_delta += delta;
     }
 
+    /// 切换灯光调试可视化，返回切换后的状态。
+    pub fn toggle_light_debug(&mut self) -> bool {
+        let mut flags = self.world.resource_mut::<DebugFlags>();
+        flags.show_light_debug = !flags.show_light_debug;
+        flags.show_light_debug
+    }
+
+    /// 切换碰撞箱调试可视化，返回切换后的状态。
+    pub fn toggle_collision_debug(&mut self) -> bool {
+        let mut flags = self.world.resource_mut::<DebugFlags>();
+        flags.show_collision_debug = !flags.show_collision_debug;
+        flags.show_collision_debug
+    }
+
     /// 累加真实时间并跑固定步长物理刻；返回本帧实际执行的物理刻数
     /// （调用方可据此做每刻一次的收尾工作，如资产回收）。
     pub fn advance(&mut self, frame_dt: Duration) -> u32 {
@@ -100,14 +116,14 @@ impl Playground {
         ticks
     }
 
-    /// 渲染刻：把当前组件状态收集成 [`RenderFrame`]。
+    /// 渲染刻：把当前组件状态收集成 [`RenderCommand`]（渲染指令）。
     pub fn prepare_frame(&mut self) {
         self.render_schedule.run(&mut self.world);
     }
 
     /// 上一渲染刻准备好的帧数据（交给渲染器）。
-    pub fn render_frame(&self) -> &RenderFrame {
-        self.world.resource::<RenderFrame>()
+    pub fn render_frame(&self) -> &RenderCommand {
+        self.world.resource::<RenderCommand>()
     }
 
     /// 当前场景的主相机实体（没有加载场景时为 `None`）。

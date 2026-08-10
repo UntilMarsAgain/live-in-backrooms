@@ -10,7 +10,7 @@
 use glam::{Mat4, Vec3};
 
 use crate::engine::core::data::light::LightKind;
-use crate::engine::scene::{SceneObjectKind, Scene};
+use crate::engine::core::frame::LightData;
 
 /// 每帧参与着色的局部光（点光/面光）数量上限：离相机最近的 X 盏。
 /// 方向光不占此额度，总是全部参与。
@@ -20,30 +20,26 @@ pub(super) const MAX_NEARBY_LIGHTS: usize = 8;
 /// 预分配固定容量，每帧只写实际数量，避免运行时重建缓冲。
 pub(super) const LIGHT_CAPACITY: usize = 64;
 
-/// 从场景灯光缓存收集每帧灯光：
-/// 所有方向光（按场景顺序）+ 离 `camera_position` 最近的
-/// [`MAX_NEARBY_LIGHTS`] 盏局部光（欧氏距离，近 → 远）。
+/// 把渲染指令里的语义灯光打包成 GPU uniform：所有方向光（按场景顺序）+
+/// 离 `camera_position` 最近的 [`MAX_NEARBY_LIGHTS`] 盏局部光
+/// （欧氏距离，近 → 远）。
 ///
-/// 世界方向由物体的世界旋转决定（局部 -Z = 光行进方向）。
-#[allow(dead_code)] // 模板版灯光收集：已被 ECS 版（render::prepare）取代，测试仍覆盖数学
-pub(super) fn collect_lights(scene: &Scene, camera_position: Vec3) -> Vec<LightUniform> {
+/// 世界方向由灯光的旋转决定（局部 -Z = 光行进方向）。这是渲染侧的工作：
+/// 指令只带语义数据（[`LightData`]），uniform 布局在这里完成。
+pub(super) fn collect_light_uniforms(
+    lights: &[LightData],
+    camera_position: Vec3,
+) -> Vec<LightUniform> {
     let mut directional = Vec::new();
     let mut nearby: Vec<(f32, LightUniform)> = Vec::new();
 
-    for key in scene.lights() {
-        let object = scene.object(key).expect("lights() 只产出存活灯光节点");
-        let SceneObjectKind::Light(light) = object.kind else {
-            continue;
-        };
-        let world = scene
-            .world_transform(key)
-            .expect("objects() 只产出存活节点");
-        let (_, rotation, translation) = world.to_scale_rotation_translation();
+    for light in lights {
+        let direction = (light.rotation * Vec3::NEG_Z).to_array();
         if matches!(light.kind, LightKind::Directional) {
             directional.push(LightUniform {
                 kind: 0,
                 _pad: [0; 3],
-                direction: (rotation * Vec3::NEG_Z).to_array(),
+                direction,
                 _pad_direction: 0.0,
                 position: [0.0; 3],
                 _pad_position: 0.0,
@@ -61,7 +57,7 @@ pub(super) fn collect_lights(scene: &Scene, camera_position: Vec3) -> Vec<LightU
                 _pad: [0; 3],
                 direction: [0.0; 3],
                 _pad_direction: 0.0,
-                position: translation.to_array(),
+                position: light.position.to_array(),
                 _pad_position: 0.0,
                 color: light.color.to_array(),
                 intensity: light.intensity,
@@ -71,9 +67,9 @@ pub(super) fn collect_lights(scene: &Scene, camera_position: Vec3) -> Vec<LightU
             LightKind::Area { width, height } => LightUniform {
                 kind: 2,
                 _pad: [0; 3],
-                direction: (rotation * Vec3::NEG_Z).to_array(),
+                direction,
                 _pad_direction: 0.0,
-                position: translation.to_array(),
+                position: light.position.to_array(),
                 _pad_position: 0.0,
                 color: light.color.to_array(),
                 intensity: light.intensity,
@@ -82,7 +78,7 @@ pub(super) fn collect_lights(scene: &Scene, camera_position: Vec3) -> Vec<LightU
             },
             LightKind::Directional => unreachable!("方向光已在上方处理"),
         };
-        nearby.push((translation.distance(camera_position), entry));
+        nearby.push((light.position.distance(camera_position), entry));
     }
 
     // 最近的 X 盏局部光（欧氏距离），方向光始终优先且不占额度。
@@ -203,28 +199,23 @@ impl Default for EnvironmentParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::core::data::light::Light;
-    use crate::engine::core::data::transform::Transform;
-    use crate::engine::scene::{SceneObject, SceneObjectKind, Scene};
     use glam::Quat;
 
     /// 方向光的 uniform direction 应为行进方向（光源 → 场景），
     /// 即物体局部 -Z 经旋转后的方向，与面光"发射方向"语义一致。
     #[test]
     fn directional_light_direction_is_travel_direction() {
-        let mut scene = Scene::new();
         // 光从右上前方照向场景（来向 = arrival），行进方向 = -arrival。
         let arrival = Vec3::new(0.5, 0.6, 0.6).normalize();
-        scene.add_object(SceneObject::new(
-            SceneObjectKind::Light(Light::directional(Vec3::ONE, 1.0)),
-            Transform::new(
-                Vec3::ZERO,
-                Quat::from_rotation_arc(Vec3::NEG_Z, -arrival),
-                Vec3::ONE,
-            ),
-        ));
+        let data = [LightData {
+            kind: LightKind::Directional,
+            position: Vec3::ZERO,
+            rotation: Quat::from_rotation_arc(Vec3::NEG_Z, -arrival),
+            color: Vec3::ONE,
+            intensity: 1.0,
+        }];
 
-        let lights = collect_lights(&scene, Vec3::ZERO);
+        let lights = collect_light_uniforms(&data, Vec3::ZERO);
         assert_eq!(lights.len(), 1);
         let dir = Vec3::from(lights[0].direction);
         assert!(
@@ -235,27 +226,36 @@ mod tests {
 
     /// 收集规则：方向光总是包含且在前，局部光按离相机距离取最近 X 盏。
     #[test]
-    fn collect_lights_keeps_directionals_and_nearest_local() {
-        let mut scene = Scene::new();
-        scene.add_object(SceneObject::new(
-            SceneObjectKind::Light(Light::directional(Vec3::ONE, 1.0)),
-            Transform::new(
-                Vec3::ZERO,
-                Quat::from_rotation_arc(Vec3::NEG_Z, -Vec3::new(0.5, 0.6, 0.6).normalize()),
-                Vec3::ONE,
-            ),
-        ));
-        // 远处点光（距离 50）与近处点光（距离 2）。
-        scene.add_object(SceneObject::new(
-            SceneObjectKind::Light(Light::point(Vec3::ONE, 10.0)),
-            Transform::new(Vec3::new(50.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE),
-        ));
-        scene.add_object(SceneObject::new(
-            SceneObjectKind::Light(Light::point(Vec3::ONE, 10.0)),
-            Transform::new(Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE),
-        ));
+    fn collect_light_uniforms_keeps_directionals_and_nearest_local() {
+        let data = [
+            LightData {
+                kind: LightKind::Directional,
+                position: Vec3::ZERO,
+                rotation: Quat::from_rotation_arc(
+                    Vec3::NEG_Z,
+                    -Vec3::new(0.5, 0.6, 0.6).normalize(),
+                ),
+                color: Vec3::ONE,
+                intensity: 1.0,
+            },
+            // 远处点光（距离 50）与近处点光（距离 2）。
+            LightData {
+                kind: LightKind::Point,
+                position: Vec3::new(50.0, 0.0, 0.0),
+                rotation: Quat::IDENTITY,
+                color: Vec3::ONE,
+                intensity: 10.0,
+            },
+            LightData {
+                kind: LightKind::Point,
+                position: Vec3::new(2.0, 0.0, 0.0),
+                rotation: Quat::IDENTITY,
+                color: Vec3::ONE,
+                intensity: 10.0,
+            },
+        ];
 
-        let lights = collect_lights(&scene, Vec3::ZERO);
+        let lights = collect_light_uniforms(&data, Vec3::ZERO);
         assert_eq!(lights.len(), 3);
         // 顺序：方向光在前，局部光按距离近 → 远。
         assert_eq!(lights[0].kind, 0);
@@ -265,21 +265,19 @@ mod tests {
 
     /// 局部光超过 X 盏时只保留最近的 X 盏。
     #[test]
-    fn collect_lights_truncates_to_nearest_max() {
-        let mut scene = Scene::new();
+    fn collect_light_uniforms_truncates_to_nearest_max() {
         // 9 盏点光，距离 1..=9，X = MAX_NEARBY_LIGHTS = 8。
-        for i in 0..9 {
-            scene.add_object(SceneObject::new(
-                SceneObjectKind::Light(Light::point(Vec3::ONE, 1.0)),
-                Transform::new(
-                    Vec3::new((i + 1) as f32, 0.0, 0.0),
-                    Quat::IDENTITY,
-                    Vec3::ONE,
-                ),
-            ));
-        }
+        let data: Vec<LightData> = (0..9)
+            .map(|i| LightData {
+                kind: LightKind::Point,
+                position: Vec3::new((i + 1) as f32, 0.0, 0.0),
+                rotation: Quat::IDENTITY,
+                color: Vec3::ONE,
+                intensity: 1.0,
+            })
+            .collect();
 
-        let lights = collect_lights(&scene, Vec3::ZERO);
+        let lights = collect_light_uniforms(&data, Vec3::ZERO);
         assert_eq!(lights.len(), MAX_NEARBY_LIGHTS);
         // 第 9 盏（距离 9）被截掉，其余都在额度内。
         for light in &lights {

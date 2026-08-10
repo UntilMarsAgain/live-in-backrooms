@@ -5,6 +5,9 @@
 //!                       ← ecs（场景/渲染/输入统一在 ECS 上）
 //! ```
 //!
+//! ECS 与 render 之间**不互相依赖**：渲染指令（[`core::frame::RenderCommand`]，
+//! 拍扁的场景）定义在 core，ECS 填充它、render 消费它，双方都只依赖 core。
+//!
 //! - [`core`]：无 GPU、无场景依赖的共享数据层（Transform/Mesh/Texture/Material/Light/Camera）；
 //! - [`scene`]：层级场景图；
 //! - [`render`]：渲染；
@@ -45,6 +48,8 @@ pub use core::data::texture::Texture;
 pub use core::data::transform::Transform;
 #[allow(unused_imports)]
 pub use core::environment::Environment;
+#[allow(unused_imports)]
+pub use core::frame::{ColliderData, LightData, RenderCommand, RenderObject};
 #[allow(unused_imports)]
 pub use core::gc::GcPolicy;
 #[allow(unused_imports)]

@@ -1,5 +1,6 @@
-//! 每帧渲染：从 [`RenderFrame`] 取相机/灯光/物体数据提交、场景 pass 绘制到
-//! HDR 目标、色调映射 blit pass 写交换链并呈现。
+//! 每帧渲染：执行一条 [`RenderCommand`]（只带资源库句柄的渲染指令），
+//! 绘制时拿句柄向 `GpuManager` 取 GPU 缓冲/视图（缺失自愈上传），
+//! 场景 pass 绘制到 HDR 目标、色调映射 blit pass 写交换链并呈现。
 
 use std::mem::size_of;
 
@@ -12,11 +13,12 @@ use wgpu::{
 
 use crate::engine::core::asset::AssetManager;
 use crate::engine::core::camera::CameraUniform;
+use crate::engine::core::frame::RenderCommand;
 use crate::engine::render::asset::GpuManager;
+use crate::engine::render::debug;
 use crate::engine::render::init::{create_depth_texture, create_hdr_texture};
-use crate::engine::render::prepare::RenderFrame;
-use crate::engine::render::uniform::{LightCountUniform, ObjectData};
-use crate::engine::render::{Renderer, CLEAR_COLOR};
+use crate::engine::render::uniform::{LightCountUniform, ObjectData, collect_light_uniforms};
+use crate::engine::render::{CLEAR_COLOR, Renderer};
 
 impl Renderer {
     /// 窗口尺寸变化时重建交换链。
@@ -39,20 +41,20 @@ impl Renderer {
         );
     }
 
-    /// 渲染一帧：从 [`RenderFrame`] 取相机/物体/灯光/线框，写入 uniform，
-    /// 场景 pass 绘制到 HDR 中间目标，blit 色调映射后写交换链并呈现。
+    /// 渲染一帧：执行一条渲染指令（只带资源库句柄），写入 uniform，绘制时
+    /// 拿句柄向 `GpuManager` 取 GPU 数据（`gpu`/`assets` 是资源库本身，
+    /// 不是指令内容），场景 pass 绘制到 HDR 中间目标，blit 色调映射后写
+    /// 交换链并呈现。
     ///
-    /// 物体数据与材质绑定组**每帧**从帧数据构建（物体数量小，可接受；
-    /// 后续优化：按 (实体, 材质版本) 缓存绑定组）。
+    /// 物体数据与材质绑定组**每帧**从指令构建（物体数量小，可接受；
+    /// 后续优化：按材质缓存绑定组）。
     pub fn render(
         &mut self,
-        render_frame: &RenderFrame,
+        command: &RenderCommand,
         gpu: &mut GpuManager,
         assets: &mut AssetManager,
-        show_light_debug: bool,
-        show_collision_debug: bool,
     ) {
-        let Some(camera) = &render_frame.camera else {
+        let Some(camera) = &command.camera else {
             return;
         };
         // 相机 uniform。
@@ -60,9 +62,12 @@ impl Renderer {
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
 
-        // 灯光：数量 uniform + storage 数组（帧数据里已收集好）。
+        // 灯光：把指令里的语义灯光打包成 uniform（方向光 + 就近局部光），
+        // 数量 uniform + storage 数组。
+        let camera_position = command.camera.map(|c| c.position()).unwrap_or_default();
+        let light_uniforms = collect_light_uniforms(&command.lights, camera_position);
         let light_count = LightCountUniform {
-            count: render_frame.lights.len() as u32,
+            count: light_uniforms.len() as u32,
             _pad: [0; 3],
         };
         self.queue.write_buffer(
@@ -70,17 +75,17 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&light_count),
         );
-        if !render_frame.lights.is_empty() {
+        if !light_uniforms.is_empty() {
             self.queue.write_buffer(
                 &self.light_storage_buffer,
                 0,
-                bytemuck::cast_slice(&render_frame.lights),
+                bytemuck::cast_slice(&light_uniforms),
             );
         }
 
         // 物体数据：容量不足时重建 storage 缓冲（紧凑数组，实例下标 = 数组下标）。
         let entry_size = size_of::<ObjectData>();
-        let needed = (render_frame.objects.len() as u64).max(1) * entry_size as u64;
+        let needed = (command.objects.len() as u64).max(1) * entry_size as u64;
         if self.object_data_buffer.size() < needed {
             self.object_data_buffer = self.device.create_buffer(&BufferDescriptor {
                 label: Some("object data buffer"),
@@ -98,9 +103,9 @@ impl Renderer {
                 }],
             });
         }
-        if !render_frame.objects.is_empty() {
-            let mut bytes = vec![0u8; render_frame.objects.len() * entry_size];
-            for (i, object) in render_frame.objects.iter().enumerate() {
+        if !command.objects.is_empty() {
+            let mut bytes = vec![0u8; command.objects.len() * entry_size];
+            for (i, object) in command.objects.iter().enumerate() {
                 let model = object.world_matrix;
                 // 法线矩阵 = 模型上三角的逆转置，非等比缩放下法线方向才正确。
                 let m = Mat3::from_mat4(model).inverse().transpose();
@@ -185,10 +190,10 @@ impl Renderer {
                 pass.set_bind_group(2, &self.light_bind_group, &[]);
                 pass.set_bind_group(4, &self.environment.mesh_bind_group, &[]);
 
-                // 每个物体：句柄 → 资产管理器取独立 GPU 缓冲（每网格一份），
+                // 每个物体：句柄 → 资源库取 GPU 缓冲/贴图视图（缺失自愈上传），
                 // 用实例区间 i..i+1 编码物体索引（instance_index = i）。
-                // 材质绑定组每帧从帧数据构建（自愈取用贴图视图）。
-                for (i, object) in render_frame.objects.iter().enumerate() {
+                // 材质绑定组每帧从解析出的视图构建（后续优化：按材质缓存）。
+                for (i, object) in command.objects.iter().enumerate() {
                     let base_view = object
                         .material
                         .base_color_texture
@@ -242,19 +247,18 @@ impl Renderer {
                     pass.draw_indexed(0..mesh_gpu.index_count, 0, i as u32..i as u32 + 1);
                 }
 
-                // 调试线框：顶点每帧从 ECS 查询重建，这里直接上传并绘制
-                //（深度 Always + 不写深度，被遮挡也可见；关闭时跳过）。
-                self.light_gizmos
-                    .upload(&self.device, &self.queue, &render_frame.light_gizmos);
-                self.collision_gizmos.upload(
-                    &self.device,
-                    &self.queue,
-                    &render_frame.collision_gizmos,
-                );
-                if show_light_debug {
+                // 调试线框：从指令里的语义灯光/碰撞箱生成顶点并上传绘制
+                //（深度 Always + 不写深度，被遮挡也可见；仅开启时构建）。
+                if command.show_light_debug {
+                    let vertices = debug::build_light_gizmos_data(&command.lights);
+                    self.light_gizmos
+                        .upload(&self.device, &self.queue, &vertices);
                     self.light_gizmos.draw(&mut pass, &self.camera_bind_group);
                 }
-                if show_collision_debug {
+                if command.show_collision_debug {
+                    let vertices = debug::build_collision_gizmos_data(&command.colliders);
+                    self.collision_gizmos
+                        .upload(&self.device, &self.queue, &vertices);
                     self.collision_gizmos
                         .draw(&mut pass, &self.camera_bind_group);
                 }

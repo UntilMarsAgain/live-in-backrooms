@@ -6,5 +6,6 @@ pub mod asset;
 pub mod camera;
 pub mod data;
 pub mod environment;
+pub mod frame;
 pub mod gc;
 pub mod resource;

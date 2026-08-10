@@ -2,8 +2,7 @@
 //!
 //! 存储、查询、系统与调度执行由 bevy_ecs 提供；**执行时机由本模块的
 //! [`FixedTimestep`] 累加器控制**——物理刻按固定步长跑 [`tick_schedule`]，
-//! 渲染刻按帧跑 `render_schedule`（定义在渲染层，见
-//! [`crate::engine::render::prepare`]）。
+//! 渲染刻按帧跑 [`frame::render_schedule`]（本模块定义）。
 //!
 //! 现有 [`Scene`](crate::engine::scene::Scene) 保留为**加载期模板**
 //! （glTF / 演示构建、合并、环境），由 [`playground::Playground::load_scene`]
@@ -11,6 +10,7 @@
 
 pub mod camera;
 pub mod components;
+pub mod frame;
 pub mod hierarchy;
 pub mod playground;
 
@@ -72,6 +72,13 @@ impl InputSnapshot {
     pub fn pressed(&self, code: KeyCode) -> bool {
         self.keys.contains(&code)
     }
+}
+
+/// 调试可视化开关（App 按键切换，渲染刻系统读取后写入渲染指令）。
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct DebugFlags {
+    pub show_light_debug: bool,
+    pub show_collision_debug: bool,
 }
 
 /// 物理刻调度：世界变换传播 → 自由相机（固定步长跑这个）。

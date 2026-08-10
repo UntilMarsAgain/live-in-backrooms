@@ -19,8 +19,8 @@ use wgpu::{
 use crate::engine::core::asset::MeshSource;
 use crate::engine::core::data::aabb::Aabb;
 use crate::engine::core::data::light::LightKind;
-use crate::engine::ecs::components::{Collider, LightC, WorldMatrix};
-use crate::engine::scene::{SceneObjectKind, Scene};
+use crate::engine::core::frame::{ColliderData, LightData};
+use crate::engine::scene::{Scene, SceneObjectKind};
 
 /// 调试线条顶点：位置 + 颜色（与 debug.wgsl 顶点输入一一对应）。
 #[repr(C)]
@@ -99,10 +99,7 @@ pub(super) fn build_light_gizmos(scene: &Scene) -> Vec<DebugVertex> {
 /// （12 条边 = 24 个顶点）。
 ///
 /// 固定橙色线框；空包围盒（无网格数据）的节点自动跳过。
-pub(super) fn build_collision_gizmos(
-    scene: &Scene,
-    meshes: &dyn MeshSource,
-) -> Vec<DebugVertex> {
+pub(super) fn build_collision_gizmos(scene: &Scene, meshes: &dyn MeshSource) -> Vec<DebugVertex> {
     let color = Vec3::new(1.0, 0.55, 0.1);
     let mut vertices = Vec::new();
     for (key, _) in scene.objects() {
@@ -113,37 +110,43 @@ pub(super) fn build_collision_gizmos(
     vertices
 }
 
-/// ECS 版：从灯光组件查询生成调试线框（位置/朝向由世界矩阵决定）。
-pub(super) fn build_light_gizmos_ecs<'a>(
-    lights: impl Iterator<Item = (&'a LightC, &'a WorldMatrix)>,
-) -> Vec<DebugVertex> {
+/// 从渲染指令里的语义灯光生成调试线框（位置/朝向由 ECS 侧给出）。
+pub(super) fn build_light_gizmos_data(lights: &[LightData]) -> Vec<DebugVertex> {
     let mut vertices = Vec::new();
-    for (light, world) in lights {
-        let (_, rotation, translation) = world.0.to_scale_rotation_translation();
-        let color = light.0.color.max(Vec3::splat(0.35));
-        match light.0.kind {
+    for light in lights {
+        let color = light.color.max(Vec3::splat(0.35));
+        let world =
+            Mat4::from_scale_rotation_translation(Vec3::ONE, light.rotation, light.position);
+        match light.kind {
             LightKind::Directional => {
-                push_directional(&mut vertices, translation, rotation * Vec3::NEG_Z, color);
+                push_directional(
+                    &mut vertices,
+                    light.position,
+                    light.rotation * Vec3::NEG_Z,
+                    color,
+                );
             }
             LightKind::Point => {
-                push_point(&mut vertices, &world.0, color);
+                push_point(&mut vertices, &world, color);
             }
             LightKind::Area { width, height } => {
-                push_area(&mut vertices, &world.0, rotation, width, height, color);
+                push_area(&mut vertices, &world, light.rotation, width, height, color);
             }
         }
     }
     vertices
 }
 
-/// ECS 版：从碰撞盒组件生成世界 AABB 线框（碰撞盒为局部空间，经世界矩阵变换）。
-pub(super) fn build_collision_gizmos_ecs<'a>(
-    colliders: impl Iterator<Item = (&'a WorldMatrix, &'a Collider)>,
-) -> Vec<DebugVertex> {
+/// 从渲染指令里的语义碰撞箱生成世界 AABB 线框
+/// （碰撞盒为局部空间，经世界矩阵变换；空包围盒跳过）。
+pub(super) fn build_collision_gizmos_data(colliders: &[ColliderData]) -> Vec<DebugVertex> {
     let color = Vec3::new(1.0, 0.55, 0.1);
     let mut vertices = Vec::new();
-    for (world, collider) in colliders {
-        let aabb = transform_aabb(collider.0, world.0);
+    for collider in colliders {
+        if collider.aabb.is_empty() {
+            continue;
+        }
+        let aabb = transform_aabb(collider.aabb, collider.world);
         push_aabb(&mut vertices, &aabb, color);
     }
     vertices
@@ -438,13 +441,13 @@ impl LineGizmos {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::core::data::light::Light;
-    use crate::engine::core::data::transform::Transform;
-    use crate::engine::scene::SceneObject;
     use crate::engine::AssetManager;
     use crate::engine::Camera;
     use crate::engine::MergedResourceSpace;
     use crate::engine::MeshView;
+    use crate::engine::core::data::light::Light;
+    use crate::engine::core::data::transform::Transform;
+    use crate::engine::scene::SceneObject;
     use glam::Quat;
 
     /// 方向光调试射线应指向光线行进方向（光源 → 场景），
