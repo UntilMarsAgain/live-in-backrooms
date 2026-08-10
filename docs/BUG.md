@@ -30,3 +30,15 @@
   无环境时不重置；渲染器侧环境图始终存在（未设置时为 1×1 黑环境）。
 - 方案：新增 `Renderer::reset_environment`，加载不带环境的场景时切回默认黑环境，
   并恢复默认环境强度与 AgX 窗口。
+
+### F1/F2 切换 demo 后旧场景实体残留（输入失效、场景叠加）
+
+- 现象：按下 F2 切换 demo 后输入完全失效、新旧场景叠加渲染，但 PinToken
+  析构（资产 unpin）正常。
+- 根因：`Playground::load_scene` 改 PinToken 时只做了 `self.scene = None`
+  （触发资产自动 unpin），漏掉旧实例的 `despawn`——ECS 实体残留在 World，
+  新旧场景叠加、多相机干扰输入。
+- 方案：先 `self.scene.take()` 并 `old.despawn(&mut self.world)`（清 ECS
+  实体，不需要 assets），随后旧实例 drop 自动 unpin（此刻不持锁，避免
+  Mutex 重入死锁），再锁住生成新场景。另：`pin_scene_assets` 增加句柄去重，
+  同网格被 50 个实例引用时只 pin 一次，引用计数不随实例数膨胀。

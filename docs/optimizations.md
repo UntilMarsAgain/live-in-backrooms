@@ -8,35 +8,34 @@
 
 ## 物体世界矩阵/法线矩阵：每帧全量上传
 
-- **现状**：每帧对每个节点算 `world_transform`（O(N×深度)）并整体 `write_buffer` 一次。
+- **现状**：世界矩阵由 ECS 层级系统（`propagate_world_transforms`，物理刻）
+  逐实体累乘维护；渲染侧每帧把指令里的世界矩阵/法线矩阵打包进
+  `object_data` storage 数组并整体 `write_buffer` 一次（已按「网格 × 材质」
+  实例化分组，同组多实例一份数据）。
 - **问题**：大部分物体不动，重复推导是浪费；但物体是"碰巧没变"而非"保证不变"
   （游戏实体将来会动），不能像资产那样硬性只传一次。
-- **已铺好的路**：`write_buffer` 支持偏移，可只更新脏物体；场景图已有代际句柄和
-  `reparent`，加"transform 版本号 + 子树脏标记"只需给 `SceneObject` 加个字段。
-- **触发时机**：物体数量上千、profile 显示世界矩阵计算成为热点时。先做 CPU 侧脏传播
-  缓存，再考虑 GPU 侧跳过整次写入；更远期可把静态/动态物体拆两组 + instancing。
+- **已铺好的路**：`write_buffer` 支持偏移，可只更新脏物体；ECS 组件可加
+  "transform 版本号"（`Changed<LocalTransform>` 已能检测），渲染提取只重传
+  脏实例。
+- **触发时机**：物体数量上千、profile 显示世界矩阵计算成为热点时。先做 CPU
+  侧脏传播缓存，再考虑 GPU 侧跳过整次写入；更远期可把静态/动态物体拆两组。
 
 ## 灯光：三种类型已落地，面光是近似
 
 - **现状**：方向光 / 点光 / 面光（矩形面板）三种类型，统一 80 字节/灯；
   点光平方反比衰减，面光按"朗伯发射面板 + 平方反比"近似；
-  uniform 数组定长 8（656 字节），CPU 收集时 clamp。
+  灯光已改为 **storage buffer**（`LIGHT_CAPACITY = 64` + 独立数量 uniform），
+  CPU 收集"全部方向光 + 就近 `MAX_NEARBY_LIGHTS = 8` 盏局部光"。
 - **待补**：真实矩形面光需要 **LTC**（BRDF LUT + 多边形积分）；聚光灯；
   强度/颜色目前是直觉单位，没有 lux/W 物理语义。
-- **已铺好的路**：`collect_lights` 独立成函数、`size` 字段已为 LTC 预留；
-  灯数超过几十时换 storage buffer（`var<storage>` + 运行时长度数组）即可去掉上限。
-
-## 渲染批次：每物体一次 draw
-
-- **现状**：每个网格物体一次 `set_bind_group` + `draw_indexed`（几百次调用以内没问题）。
-- **优化方向**：重复物体 instancing（管线加实例输入即可，`draw_indexed(..., 0..instances)`
-  原生支持）；`AssetManager` 的每网格独立缓冲天然支持按句柄一次 instanced draw。
-- **触发时机**：Level 0 迷宫/区块体系落地时一起做。
+- **已铺好的路**：`collect_light_uniforms` 独立成函数、`size` 字段已为 LTC
+  预留；storage buffer 容量上限（64）在极端场景可再扩。
 
 ## MultiDrawIndirect：从 CPU 逐条画改为 GPU 批量画
 
-- **现状**：所有绘制仍是 CPU 驱动（每物体一条命令），区块世界里几千个可见区块 =
-  几千次 CPU 命令编码往返。
+- **现状**：绘制已是实例化分组（每「网格 × 材质」组一条 `draw_indexed`），
+  但仍是 CPU 驱动逐条命令；区块世界里几千个可见区块仍会有上千次 CPU
+  命令编码往返。
 - **优化方向**：参考 Minecraft 26.3 Snapshot 6 的做法——地形区块改用 MultiDrawIndirect，
   每帧 CPU 只上传一张紧凑的间接参数表（每个 draw 5×u32：
   `index_count / instance_count / first_index / base_vertex / first_instance`），
@@ -80,8 +79,9 @@
   - IBL 漫反射不经过曝光，与天空盒亮度未必一致（曝光拆分见
     "HDR 中间目标 + 色调映射 blit"条目）；
   - 环境转换在启动时阻塞完成（加载画面出现前），未异步化；
-  - 环境是"每 Level 一份"的资产，当前只有启动时加载一次，没有 Level 切换
-    的卸载/热替换（`set_environment` 已支持重建，App 层尚未接关卡数据）。
+  - 环境热替换已接入：`App::load_scene` 按场景 `set_environment` /
+    `reset_environment`（demo 切换即此路径）；但 `Level` 数据模型与
+    "按关卡分组驻留/卸载"仍未定义（见 TODO"多 Level 切换"）。
 - **待补**：阴影贴图（从灯光视角渲染深度，独立 pass）；场景反射（反射探针 /
   SSR，见下方条目）。
 
@@ -94,9 +94,10 @@
 - **已铺好的路**：后处理（Bloom / SSAO / SSR）可以在"场景 pass 之后、
   blit 之前"插入，直接消费 HDR 目标；阴影等需要额外视角的 pass 也可复用
   同一套离屏纹理框架。
-- **已知简化**：`environment_params.intensity` 仍兼任 IBL 系数与天空盒曝光，
-  blit 不乘曝光（见 `blit.wgsl` 注释）——曝光拆分时应把乘法统一移到 blit；
-  调试线框现在也走色调映射（画进 HDR 目标，与场景一起被映射）。
+- **已知简化**：`intensity`（IBL 系数）与 `skybox_exposure`（天空盒亮度）
+  已拆开（intensity=0 只关环境光、天空盒仍显示）；IBL 漫反射仍不经过曝光，
+  与天空盒亮度未必一致——若需统一，把曝光乘法移到 blit（保持 AgX 输入为
+  原始辐射值）；调试线框现在也走色调映射（画进 HDR 目标，与场景一起被映射）。
 
 ## 镜面反射：只反射环境图，不反射场景物体
 
@@ -136,8 +137,9 @@
   隐式三角化），我们的 MikkTSpace 跑在三角形上不会报错。Blender 的切线导出
   报 "Could not calculate tangents" 是因为它在三角化之前对含 ngon 的原始网格
   算切线；只有想让 .glb 文件自带 TANGENT（供其他工具用）时才需要先手动三角化。
-- **待办**：mipmap 生成（现在是 1 级，远处纹理会闪烁）、纹理驻留/卸载
-  （多 Level 后）、UV 的 v 翻转约定验证（glTF 与 wgpu 采样原点实测为准）。
+- **待办**：mipmap 生成（现在是 1 级，远处纹理会闪烁）、UV 的 v 翻转约定
+  验证（glTF 与 wgpu 采样原点实测为准）。纹理驻留/卸载已实现
+  （`GpuManager` 按最近使用窗口回收 + CPU `AssetManager` 按来源重读）。
 
 ## 半透明物体
 
@@ -155,16 +157,18 @@
 
 ## 异步加载、多线程与加载提示
 
-- **现状**：glTF 加载/网格上传都在主线程、启动时一次性完成。
-- **已铺好的路**：资产不可变 + 统一 `AssetManager`，将来异步加载时解析走
-  工作线程、注册仍主线程；`pin` 后 `sync_gpu` 负责上传，加载队列可插在中间。
-- **触发时机**：加载时间开始影响体验时。
+- ~~**异步加载**~~ 已实现（文件级、多类型）：`AssetManager::load_file_async`
+  按 `FileLoader::scan` 先注册各类型占位句柄（Loading），后台线程 `parse`
+  **完整解析一次**后填充；`get` 阻塞等待；`handle_state`/`status` 可查询。
+  网格上传仍在主线程；`pin` → `GpuManager::sync` 负责批量上传。
+- **待补**：加载提示画面（当前启动阻塞在上传/转换完成前）；关卡切换的
+  异步加载（进入新 Level 时不卡住当前帧）。
 
 ## 顶点格式扩展
 
-- **现状**：POSITION / NORMAL / TEXCOORD_0 / COLOR_0（56 字节/顶点）。
+- **现状**：POSITION / NORMAL / TANGENT / TEXCOORD_0 / COLOR_0（60 字节/顶点）。
 - **已铺好的路**：`Vertex::layout()` 显式 offset，加 TANGENT、JOINTS_0/WEIGHTS_0
-  （蒙皮）、第二套 UV 时只动 `Vertex` + 布局函数 + 加载器。
+  （蒙皮）、第二套 UV 时只动 `Vertex` + 布局函数 + 加载器（TANGENT 已加）。
 - **索引**：统一 u32；海量小网格时再考虑 u16。
 
 ## ~~负缩放/镜像节点约定~~
@@ -184,10 +188,10 @@
 
 ## 测试覆盖
 
-- **现状**（78 个测试，其中 8 个 GPU 相关，统一 `gpu_` 前缀命名）：
-  - CPU 单测：场景世界矩阵、glTF 加载、环境转换（`to_cubemap` / `irradiance_map`），
-    不碰 GPU，任何环境可跑；资产注册表（世代句柄/复用/pin-unpin）、GamePath
-    校验、合并资源空间调度器；
+- **现状**（91 个测试，其中 9 个 GPU 相关，统一 `gpu_` 前缀命名）：
+  - CPU 单测：场景世界矩阵与层级、glTF 加载、环境解码（HDR/LDR 与自动识别），
+    不碰 GPU，任何环境可跑；资产注册表（世代句柄/复用/pin-unpin/PinToken）、
+    GamePath 校验、合并资源空间调度器、渲染指令实例化分组；
   - **WGSL 语法校验**：用 naga 解析并校验 `mesh.wgsl` / `environment.wgsl`，
     语法与绑定组声明错误在 `cargo test` 阶段暴露（`cargo build` 不编译 WGSL）；
   - **无头冒烟测试**：不创建窗口，请求 PRIMARY 后端设备（无 OpenGL），真跑
@@ -200,8 +204,8 @@
 - **注意事项**：GPU 相关测试默认全量跑（`cargo test`），**必须有 GPU**——
   无可用适配器时直接**断言失败**（防止"没跑也算通过"的假绿）；无 GPU 的机器
   必须显式用 `cargo test -- --skip gpu_` 跳过它们。
-- **可补**：`collect_lights`（方向推导）、uniform 布局（大小/偏移断言）、
-  strip/fan 转换的边界。
+- **可补**：`collect_light_uniforms`（方向推导）、uniform 布局（大小/偏移
+  断言）、strip/fan 转换的边界。
 - **后端能力验证**：`examples/vulkan_probe.rs`（强制 Vulkan，A/B/C/D 四项实测），
   换机器/驱动后跑一遍即可确认后端能力，避免静默依赖 storage 数组纹理等
   不可靠特性。
