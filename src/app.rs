@@ -1,50 +1,37 @@
 //! App：各功能的集成点。
 //!
-//! 持有 ECS `World`（场景/输入/渲染帧数据）+ 双调度器：
-//! - 物理刻（固定步长，`tick_schedule`）：世界变换传播、自由相机、资产回收；
-//! - 渲染刻（按帧，`render_schedule`）：查询组件 → 填 [`RenderFrame`]。
-//!
-//! winit 事件只负责**累积输入快照**（写进 `World` 资源），不直接改游戏状态。
+//! 持有 [`Playground`]（运行中的 ECS 世界：实体 + 双调度器 + 输入快照），
+//! winit 事件只负责**累积输入快照**，不直接改游戏状态；每帧 `advance`
+//! 跑物理刻（世界变换传播、自由相机），`prepare_frame` 跑渲染刻
+//! （查询组件 → 填 [`RenderFrame`]），再把帧数据交给渲染器。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use bevy_ecs::prelude::*;
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window};
 
-use crate::engine::ecs::components::{CameraC, MainCamera};
 use crate::engine::ecs::playground::Playground;
-use crate::engine::ecs::{self, FixedStep, FixedTimestep, InputSnapshot};
 use crate::engine::render::Renderer;
-use crate::engine::render::prepare::{RenderFrame, render_schedule};
 use crate::engine::{
     AssetManager, Camera, DisplayHandle, Environment, GamePath, GcPolicy, GpuManager, Handle,
-    MergedResourceSpace, Mesh, MeshView, PackConfig, Scene, Texture,
+    MergedResourceSpace, Mesh, PackConfig, Scene, Texture,
 };
 
 /// 应用的集成层：main.rs 只负责创建窗口，其余都在这里装配。
 pub struct App {
     window: Arc<Window>,
     renderer: Renderer,
-    /// ECS 世界：实体/组件/资源（输入快照、渲染帧等）。
-    world: World,
-    /// 物理刻调度（固定步长）。
-    tick_schedule: Schedule,
-    /// 渲染刻调度（按帧）。
-    render_schedule: Schedule,
-    /// 固定步长累加器。
-    timestep: FixedTimestep,
+    /// 运行中的 ECS 世界（场景实例、输入快照、渲染帧数据）。
+    playground: Playground,
     last_frame: Instant,
     /// CPU 资产管理器：内存副本、磁盘读取与内存卸载（无 GPU 依赖）。
     assets: AssetManager,
     /// GPU 资产管理器：句柄 → 显存表示的驻留表（上传/回收）。
     gpu: GpuManager,
-    /// 当前场景实例（关卡切换时先卸载它再生成新场景）。
-    playground: Option<Playground>,
     /// 鼠标是否已捕获（自由视角）。
     mouse_captured: bool,
     /// 灯光调试可视化开关（App 事件处理翻转，渲染时读取）。
@@ -72,23 +59,13 @@ impl App {
             std::sync::Arc::new(renderer.queue().clone()),
         );
 
-        // ECS 世界：固定步长 + 输入快照 + 渲染帧资源。
-        let mut world = World::new();
-        world.insert_resource(FixedStep(Duration::from_secs_f64(1.0 / 60.0)));
-        world.insert_resource(InputSnapshot::default());
-        world.insert_resource(RenderFrame::default());
-
         let mut app = Self {
             window,
             renderer,
-            world,
-            tick_schedule: ecs::tick_schedule(),
-            render_schedule: render_schedule(),
-            timestep: FixedTimestep::new(Duration::from_secs_f64(1.0 / 60.0)),
+            playground: Playground::new(),
             last_frame: Instant::now(),
             assets,
             gpu,
-            playground: None,
             mouse_captured: false,
             show_light_debug,
             show_collision_debug,
@@ -204,12 +181,8 @@ impl App {
             .collect()
     }
 
-    /// App 级别的场景切换 API：模板场景 → 资产驻留 → 生成进 ECS 世界。
+    /// App 级别的场景切换 API：模板场景 → 资产驻留 → 交给 Playground 生成。
     pub fn load_scene(&mut self, mut scene: Scene) {
-        // 卸载旧场景实例（若有）：先 unpin 资产，再级联 despawn 整棵子树。
-        if let Some(old) = self.playground.take() {
-            old.despawn(&mut self.world, &mut self.assets);
-        }
         // 每个场景必须有一个主相机（出生点视角）；缺省时补一个默认相机。
         self.ensure_main_camera(&mut scene);
         // 环境跟随场景：场景自带环境（天空盒 + IBL）时一并上传；
@@ -227,12 +200,12 @@ impl App {
         // 收集场景引用的资产并 pin（CPU 侧标记驻留），随后 GPU 层上传。
         self.pin_scene_assets(&scene);
         self.gpu.sync(&mut self.assets);
-        // 场景模板 → ECS 实体（碰撞盒在生成时从网格 AABB 派生）。
-        let playground = Playground::spawn(&scene, &mut self.world, &MeshView::new(&self.assets));
-        if playground.main_camera.is_none() {
+        // 场景模板 → ECS 实体（旧实例自动卸载：unpin 资产 + 级联 despawn；
+        // 碰撞盒在生成时从网格 AABB 派生）。
+        self.playground.load_scene(&scene, &mut self.assets);
+        if self.playground.main_camera().is_none() {
             eprintln!("场景生成后没有主相机（不应发生：ensure_main_camera 已兜底）");
         }
-        self.playground = Some(playground);
     }
 
     /// 场景引用的所有网格/贴图句柄标记为驻留（pin）。
@@ -275,10 +248,7 @@ impl App {
             WindowEvent::Resized(size) => {
                 self.renderer.resize(size.width, size.height);
                 let aspect = size.width as f32 / size.height.max(1) as f32;
-                let mut query = self.world.query::<(&mut CameraC, &MainCamera)>();
-                if let Ok((mut camera, _)) = query.single_mut(&mut self.world) {
-                    camera.0.set_aspect(aspect);
-                }
+                self.playground.set_aspect(aspect);
                 self.window.request_redraw();
             }
             WindowEvent::RedrawRequested => self.draw(),
@@ -288,26 +258,20 @@ impl App {
                 let PhysicalKey::Code(code) = key_event.physical_key else {
                     return;
                 };
-                let mut input = self.world.resource_mut::<InputSnapshot>();
-                match key_event.state {
-                    ElementState::Pressed => {
-                        input.keys.insert(code);
-                        // L：切换灯光调试可视化（长按不重复触发）。
-                        if code == KeyCode::KeyL && !key_event.repeat {
-                            let on = self.show_light_debug.fetch_xor(true, Ordering::Relaxed);
-                            eprintln!("灯光调试可视化：{}", if on { "关" } else { "开" });
-                        }
-                        // B：切换碰撞箱调试可视化（长按不重复触发）。
-                        if code == KeyCode::KeyB && !key_event.repeat {
-                            let on = self.show_collision_debug.fetch_xor(true, Ordering::Relaxed);
-                            eprintln!("碰撞箱调试可视化：{}", if on { "关" } else { "开" });
-                        }
+                self.playground
+                    .set_key(code, key_event.state == ElementState::Pressed);
+                if key_event.state == ElementState::Pressed {
+                    // L：切换灯光调试可视化（长按不重复触发）。
+                    if code == KeyCode::KeyL && !key_event.repeat {
+                        let on = self.show_light_debug.fetch_xor(true, Ordering::Relaxed);
+                        eprintln!("灯光调试可视化：{}", if on { "关" } else { "开" });
                     }
-                    ElementState::Released => {
-                        input.keys.remove(&code);
+                    // B：切换碰撞箱调试可视化（长按不重复触发）。
+                    if code == KeyCode::KeyB && !key_event.repeat {
+                        let on = self.show_collision_debug.fetch_xor(true, Ordering::Relaxed);
+                        eprintln!("碰撞箱调试可视化：{}", if on { "关" } else { "开" });
                     }
                 }
-                drop(input);
                 // Esc 释放鼠标，回到系统光标。
                 if code == KeyCode::Escape && self.mouse_captured {
                     self.release_mouse();
@@ -327,7 +291,7 @@ impl App {
                     MouseScrollDelta::LineDelta(_, y) => *y,
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 20.0,
                 };
-                self.world.resource_mut::<InputSnapshot>().scroll_delta += scroll;
+                self.playground.add_scroll(scroll);
             }
             _ => {}
         }
@@ -337,9 +301,8 @@ impl App {
     pub fn handle_device_event(&mut self, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.mouse_captured {
-                let mut input = self.world.resource_mut::<InputSnapshot>();
-                input.look_delta.0 += delta.0 as f32;
-                input.look_delta.1 += delta.1 as f32;
+                self.playground
+                    .add_look_delta(delta.0 as f32, delta.1 as f32);
             }
         }
     }
@@ -372,25 +335,23 @@ impl App {
         let frame_dt = (now - self.last_frame).min(Duration::from_secs_f32(0.25));
         self.last_frame = now;
 
-        let (ticks, _alpha) = self.timestep.advance(frame_dt);
+        let ticks = self.playground.advance(frame_dt);
         for _ in 0..ticks {
-            self.tick_schedule.run(&mut self.world);
             // 资产回收挂到物理刻（统一 GC 策略）。
             let policy = GcPolicy::default();
             self.assets.gc(&policy);
             self.gpu.gc(&policy);
         }
 
-        // 渲染刻：查询组件 → 填 RenderFrame。
-        self.render_schedule.run(&mut self.world);
+        self.playground.prepare_frame();
         self.window.request_redraw();
     }
 
-    /// 渲染一帧：读取 ECS 世界里的渲染帧数据交给渲染器。
+    /// 渲染一帧：读取 Playground 里的渲染帧数据交给渲染器。
     fn draw(&mut self) {
-        let frame = self.world.resource::<RenderFrame>();
+        let frame = self.playground.render_frame();
         self.renderer.render(
-            &frame,
+            frame,
             &mut self.gpu,
             &mut self.assets,
             self.show_light_debug.load(Ordering::Relaxed),
